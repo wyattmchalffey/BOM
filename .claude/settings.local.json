@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(Get-ChildItem -Recurse -File \"C:\\\\Users\\\\Wyatt\\\\Desktop\\\\BOM\\\\love2d\\\\src\")",
+      "Bash(Select-Object -ExpandProperty FullName)",
+      "WebFetch(domain:docs.google.com)",
+      "WebFetch(domain:doc-0g-74-sheets.googleusercontent.com)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:love2d.org)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:gist.githubusercontent.com)"
+    ]
+  }
+}

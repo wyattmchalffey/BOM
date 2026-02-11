@@ -1,0 +1,29 @@
+amount,Attack,Health,Effect,Type / Population,Upkeep,Rank,Title
+8,0{Weapons/spinning-sword},2{Abstract/hearts},"<i>""It ain't much, but it's honest work""</i>",Human - Worker - 8{Body&Actions/ba2_backup},0{Resources/rs2_oat},{Symbols/sy2_rank_alt_3}0,Peasant
+6,,2{Abstract/hearts},,Human - Warrior - 8{Body&Actions/ba2_backup},0{Resources/rs2_oat},,Soldier
+4,3{Weapons/spinning-sword},4{Abstract/hearts},<b>On Attack</b>: Give 1 Other Attacking Unit +1/+0,Human - Mounted Warrior - 8{Body&Actions/ba2_backup},,,Horseman
+6,4{Weapons/spinning-sword},3{Abstract/hearts},<b>Vigilance</b>,,,,Quarter Master
+4,4{Weapons/spinning-sword},,"<b>Vigilance</b>
+ <b>On Attack</b>: If attacking with another Mounted Unit, Deal 2 Damage to Target Unit",Human - Mounted Warrior - 8{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Lancer
+4,1{Weapons/spinning-sword},4{Abstract/hearts},"Sacrifice 2 Human Workers to play from Hand
+ Produces 2x Resources",Human - Worker - 6{Body&Actions/ba2_backup},0{Resources/rs2_oat},,Loving Family
+0,0{Weapons/spinning-sword},2{Abstract/hearts},<b>Deathtouch</b>,,,,Blind Monk
+4,4{Weapons/spinning-sword},3{Abstract/hearts},<b>First Strike</b>,Human - Ninja - 8{Body&Actions/ba2_backup},,,Young Rookie
+4,6{Weapons/spinning-sword},4{Abstract/hearts},<b>First Strike</b>,Human - Ninja - 4{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Shinobi
+4,0{Weapons/spinning-sword},3{Abstract/hearts},<b>Action</b> - Remove a Knowlege Counter: Draw a Card,Human - Scholar - 4{Body&Actions/ba2_backup},,,Philosopher
+0,1{Weapons/spinning-sword},3{Abstract/hearts},<b>Once per Turn Action</b> - Remove a Knowlege Counter: Opt 3 cards,Human - Scholar - 4{Body&Actions/ba2_backup},,,Scientist
+4,,,"<b>Rank</b> is equal to amount of this Technology Owned +1
+ 
+ All Warriors gain +1 attack",Human - Technology - 8{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}*,Melee Age Up
+0,,,All Warriors gain +1 Health,Human - Technology - 8{Body&Actions/ba2_backup},,,Desert Sandals
+3,5{Weapons/spinning-sword},8{Abstract/hearts},"<b>Trample Vigilance</b>
+ <b>On attack</b>, 2{Resources/rs1_cash}: All Attacking Warriors gain +1 Attack for each Scholar",Human - Royal Warrior 4{Body&Actions/ba2_backup},2{Resources/rs2_oat},{Symbols/sy2_rank_alt_3}3,King of Man
+0,3{Weapons/spinning-sword},1{Abstract/hearts},Deals 2x Damage to <b>Mounted</b> Units,,,,Pikeman
+3,4{Weapons/spinning-sword},4{Abstract/hearts},"<b>Flying</b>
+ <b>Action</b> - X{Nature/stone-block}, <b>Rest</b>: Deal X Damage to Target Unit",Human - Machine - 4{Body&Actions/ba2_backup},2{Resources/rs2_oat},{Symbols/sy2_rank_alt_3}3,Flying Machine
+3,0{Weapons/spinning-sword},3{Abstract/hearts},<b>Action</b> - 1{Nature/stone-block} : Deal 2 Damage to any Target,Human - Machine - 4{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Catapult
+5,3{Weapons/spinning-sword},3{Abstract/hearts},"<b>Once per Turn Action</b> - 3{Resources/rs1_cash}: Deal 3 damage to target unit
+ <b>Action</b> - Remove 3 Knowlege Counters, <b>Rest</b>: Play an Machine",Human - Scholar - 6{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Alchemist
+3,,,Deal 2 Damage to each <b>Charging</b> Unit,Science - Spell - 4{Body&Actions/ba2_backup},,,Acid Bomb
+3,,,"<b>Action</b> - <b>Rest</b>: Place 2 Knowlege counters on any Target(s)
+ <b>Action</b> - 2{Resources/rs1_cash}, <b>Rest</b>: Seach deck for any Science Spell or Human Technology and add to Hand",Human - Royal Scholar - 4{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Prince of Reason

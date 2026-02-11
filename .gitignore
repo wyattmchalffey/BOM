@@ -1,0 +1,11 @@
+# Logs and temp
+*.log
+*.local
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.sw?

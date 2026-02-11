@@ -1,0 +1,25 @@
+amount,Attack,Health,Effect,Type / Population,Upkeep,Rank,Title
+6,,3{Abstract/hearts},"<b>Action</b> - Sacrifice this Unit: Deal 3 damage to any Unit
+ <b>Action</b> - 2{Chemical/drop}, <b>Rest</b>: Cast an Orc Blood Spell",Orc - Cleric - 8{Body&Actions/ba2_backup},,,Blood Divinator
+12,1{Weapons/spinning-sword},1{Abstract/hearts},"<i>
+ ""Work Work""</i>",Orc - Worker - Warrior - 12{Body&Actions/ba2_backup},0{Resources/rs2_oat},{Symbols/sy2_rank_alt_3}0,Grunt
+6,3{Weapons/spinning-sword},4{Abstract/hearts},"Whenever an ally Unit dies, you may rest this unit to gain 2 {Abstract/crossed-bones}",,,,Bone Daddy
+4,4{Weapons/spinning-sword},7{Abstract/hearts},"<b>Monument 4</b> 
+ <i>(Remove a counter from a Monument Structure with at least 4 Counters to Play)</i>",Stone - Elemental - 6{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Stone Golem
+5,,2{Abstract/hearts},"<b>Monument 1</b> 
+ <i>(Remove a counter from a Monument Structure with at least 1 Counter to Play)</i>",Stone - Monster - 8{Body&Actions/ba2_backup},,,Gargoyle
+5,,,"<b>Action</b> - Sacrifice a Unit, <b>Rest</b>: Cast a Death Spell 
+ 
+ <b>Action</b> - 2{Chemical/drop}5 {Abstract/crossed-bones}, <b>Rest</b>: Summon an Undead",Orc - Cleric - 4{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Necromancer
+3,8{Weapons/spinning-sword},8{Abstract/hearts},<b>Trample</b> (Excess damage harms structures),Orc - Undead - 4{Body&Actions/ba2_backup},2{Resources/rs2_oat},{Symbols/sy2_rank_alt_3}3,Ancient Giant
+8,,1{Abstract/hearts},"<b>Rush </b><i>(Can attack the turn it's summoned)</i>
+ <b>Decaying</b> <i>(Dies at the end of the Turn)</i>",Orc - Undead - 8{Body&Actions/ba2_backup},0{Resources/rs2_oat},{Symbols/sy2_rank_alt_3}0,Brittle Skeleton
+3,,,Destroy target Non-Undead Unit,Death - Spell - 4{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Mortal Coil
+2,,,Give all Orcs +1 Attack during the next Attack,Orc - Blood - Spell - 4{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Blood Boil
+4,,,"<b>Monument 2</b> 
+ <i>(Remove a counter from a Monument Structure with at least 2 Counters to Play)</i> 
+ Deal 3 Damage to target Unit",Stone - Spell,,,Stone Toss
+5,,3{Abstract/hearts},<b>Instant</b> - 2 {Abstract/crossed-bones} : Gain +2 attack untill the end of Turn,Orc - Warrior - 8{Body&Actions/ba2_backup},,,Bone Muncher
+4,7{Weapons/spinning-sword},,"<b>Vigilance</b>
+ <b>On attack</b> - 2{Chemical/drop}: Gain <b>Trample</b> untill the end of Turn",Orc - Warrior - 4{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Berserker
+5,,3{Abstract/hearts},<b>Once per Turn Action</b> - 3 {Abstract/crossed-bones} : Summon up to 3 Tier 0 Undead from the Graveyard,Orc - Mage - 6{Body&Actions/ba2_backup},,{Symbols/sy2_rank_alt_3}2,Skelieutenant
