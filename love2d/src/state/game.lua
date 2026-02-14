@@ -1,7 +1,8 @@
 -- In-game screen: game state, board, blueprint modal, drag-drop, End turn button, hand UI
 
 local game_state_module = require("src.game.state")
-local actions = require("src.game.actions")
+local commands = require("src.game.commands")
+local replay = require("src.game.replay")
 local board = require("src.ui.board")
 local blueprint_modal = require("src.ui.blueprint_modal")
 local deck_viewer = require("src.ui.deck_viewer")
@@ -24,7 +25,6 @@ GameState.__index = GameState
 
 function GameState.new()
   local g = game_state_module.create_initial_game_state()
-  actions.start_turn(g) -- Player 1's turn starts immediately
   local self = setmetatable({
     game_state = g,
     show_blueprint_for_player = nil, -- 0 or 1 when modal open
@@ -49,9 +49,15 @@ function GameState.new()
     hand_hover_index = nil,      -- which hand card the mouse is over (1-based)
     hand_selected_index = nil,   -- which hand card is "selected" (clicked)
     hand_y_offsets = {},          -- per-card animated y offset (negative = raised)
+    command_log = replay.new_log({
+      command_schema_version = commands.SCHEMA_VERSION,
+      rules_version = config.rules_version,
+      content_version = config.content_version,
+    }), -- deterministic command stream for replay/network migration
   }, GameState)
   -- Cache the hand cursor once
   self._cursor_hand = love.mouse.getSystemCursor("hand")
+  self:dispatch_command({ type = "START_TURN", player_index = 0 }) -- Player 1's turn starts immediately
   -- Init display_resources from actual values for all resource types
   for pi = 1, 2 do
     for _, key in ipairs(config.resource_types) do
@@ -63,6 +69,20 @@ function GameState.new()
     self.hand_y_offsets[i] = 0
   end
   return self
+end
+
+
+function GameState:dispatch_command(command)
+  local result = commands.execute(self.game_state, command)
+  replay.append(self.command_log, command, result, self.game_state)
+  if not result.ok then
+    sound.play("error")
+  end
+  return result
+end
+
+function GameState:get_command_log_snapshot()
+  return replay.snapshot(self.command_log)
 end
 
 function GameState:update(dt)
@@ -370,7 +390,12 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         local cfg = deck_viewer.get_config()
         local can_click = cfg and cfg.can_click_fn and cfg.can_click_fn(def)
         if can_click then
-          local built = actions.build_structure(self.game_state, self.show_blueprint_for_player, def.id)
+          local built_res = self:dispatch_command({
+            type = "BUILD_STRUCTURE",
+            player_index = self.show_blueprint_for_player,
+            card_id = def.id,
+          })
+          local built = built_res.ok
           if built then
             sound.play("build")
             shake.trigger(3, 0.12)
@@ -439,7 +464,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   -- End turn: allow either player to click (for testing)
   if kind == "end_turn" then
     sound.play("whoosh")
-    actions.end_turn(self.game_state)
+    self:dispatch_command({ type = "END_TURN" })
     -- Feature 3: Capture resources before start_turn for production popups
     local new_active = self.game_state.activePlayer
     local p = self.game_state.players[new_active + 1]
@@ -447,7 +472,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     for _, key in ipairs(config.resource_types) do
       before[key] = p.resources[key] or 0
     end
-    actions.start_turn(self.game_state)
+    self:dispatch_command({ type = "START_TURN" })
     local after = {}
     for _, key in ipairs(config.resource_types) do
       after[key] = p.resources[key] or 0
@@ -485,15 +510,13 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   if kind == "activate_ability" and pi == self.game_state.activePlayer then
     local info = extra  -- { source = "base"|"board", board_index = N, ability_index = N }
     local p = self.game_state.players[pi + 1]
-    local card_def, source_key
+    local card_def
     if info.source == "base" then
       card_def = cards.get_card_def(p.baseId)
-      source_key = "base:" .. info.ability_index
     elseif info.source == "board" then
       local entry = p.board[info.board_index]
       if entry then
         card_def = cards.get_card_def(entry.card_id)
-        source_key = "board:" .. info.board_index .. ":" .. info.ability_index
       end
     end
     if card_def and card_def.abilities then
@@ -503,7 +526,15 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         local before_res = {}
         for k, v in pairs(p.resources) do before_res[k] = v end
 
-        actions.activate_ability(self.game_state, pi, card_def, source_key, info.ability_index)
+        self:dispatch_command({
+          type = "ACTIVATE_ABILITY",
+          player_index = pi,
+          source = {
+            type = info.source,
+            index = info.board_index,
+          },
+          ability_index = info.ability_index,
+        })
 
         -- Visual feedback
         sound.play("coin")
@@ -527,7 +558,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   -- Legacy compat: activate_base (shouldn't be hit anymore but just in case)
   if kind == "activate_base" and pi == self.game_state.activePlayer then
     local before_workers = self.game_state.players[pi + 1].totalWorkers
-    actions.activate_base_ability(self.game_state, pi)
+    self:dispatch_command({ type = "ACTIVATE_ABILITY", player_index = pi, source = { type = "base" }, ability_index = 1 })
     local after_workers = self.game_state.players[pi + 1].totalWorkers
     if after_workers > before_workers then
       sound.play("coin")
@@ -617,29 +648,27 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   -- Drop target (unassigned pool or clicking an unassigned worker = same zone)
   if kind == "unassigned_pool" or kind == "worker_unassigned" then
     if from == "left" then
-      actions.unassign_worker_from_resource(self.game_state, pi, res_left)
-      did_drop = true
+      did_drop = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = res_left }).ok
     elseif from == "right" then
-      actions.unassign_worker_from_resource(self.game_state, pi, "stone")
-      did_drop = true
+      did_drop = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
     end
   elseif kind == "resource_left" then
     if from == "unassigned" then
-      actions.assign_worker_to_resource(self.game_state, pi, res_left)
-      did_drop = true
+      did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = res_left }).ok
     elseif from == "right" then
-      actions.unassign_worker_from_resource(self.game_state, pi, "stone")
-      actions.assign_worker_to_resource(self.game_state, pi, res_left)
-      did_drop = true
+      local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = "stone" })
+      if unassign_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = res_left }).ok
+      end
     end
   elseif kind == "resource_right" then
     if from == "unassigned" then
-      actions.assign_worker_to_resource(self.game_state, pi, "stone")
-      did_drop = true
+      did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
     elseif from == "left" then
-      actions.unassign_worker_from_resource(self.game_state, pi, res_left)
-      actions.assign_worker_to_resource(self.game_state, pi, "stone")
-      did_drop = true
+      local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = res_left })
+      if unassign_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
+      end
     end
   end
 
