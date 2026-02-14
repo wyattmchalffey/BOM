@@ -21,3 +21,8 @@ Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc
 ## Project outline
 
 See [PROJECT_OUTLINE.md](PROJECT_OUTLINE.md) for the full MVP plan and file layout.
+
+
+## Multiplayer migration testing
+
+See [docs/MULTIPLAYER_TESTING.md](docs/MULTIPLAYER_TESTING.md) for replay and host smoke-test steps.
