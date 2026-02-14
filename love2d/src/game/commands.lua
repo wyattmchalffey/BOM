@@ -25,6 +25,14 @@ local function ok(meta, events)
   return { ok = true, reason = "ok", meta = meta, events = events or {} }
 end
 
+local function validate_active_player(g, command)
+  if command.player_index == nil then
+    return false
+  end
+
+  return command.player_index == g.activePlayer
+end
+
 local function can_activate(g, player_index, card_def, source_key, ability_index)
   if g.phase ~= "MAIN" then return false end
   if player_index ~= g.activePlayer then return false end
@@ -48,9 +56,13 @@ function commands.execute(g, command)
   end
 
   if command.type == "START_TURN" then
-    if command.player_index ~= nil and command.player_index ~= g.activePlayer then
+    if not validate_active_player(g, command) then
       return fail("not_active_player")
     end
+    if g.phase ~= "TURN_START" then
+      return fail("turn_already_started")
+    end
+
     actions.start_turn(g)
     return ok(
       { active_player = g.activePlayer, turn_number = g.turnNumber },
@@ -59,6 +71,13 @@ function commands.execute(g, command)
   end
 
   if command.type == "END_TURN" then
+    if not validate_active_player(g, command) then
+      return fail("not_active_player")
+    end
+    if g.phase ~= "MAIN" then
+      return fail("invalid_phase")
+    end
+
     local ending_player = g.activePlayer
     actions.end_turn(g)
     return ok(

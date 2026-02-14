@@ -46,6 +46,7 @@ end
 function actions.end_turn(g)
   g.activePlayer = (g.activePlayer == 0) and 1 or 0
   g.turnNumber = g.turnNumber + 1
+  g.phase = "TURN_START"
   g.priorityPlayer = g.activePlayer
   return g
 end

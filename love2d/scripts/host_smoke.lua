@@ -48,6 +48,27 @@ local s2 = host:submit(0, protocol.submit_command("smoke-1", 2, {
 }))
 assert_ok(s2, "submit2")
 
+local unauthorized_end_turn = host:submit(0, protocol.submit_command("smoke-1", 3, {
+  type = "END_TURN",
+}))
+if unauthorized_end_turn.ok or unauthorized_end_turn.reason ~= "not_active_player" then
+  io.stderr:write("unauthorized_end_turn should fail with not_active_player\n")
+  os.exit(1)
+end
+
+local started = host:submit(1, protocol.submit_command("smoke-1", 1, {
+  type = "START_TURN",
+}))
+assert_ok(started, "start_turn")
+
+local duplicate_start_turn = host:submit(1, protocol.submit_command("smoke-1", 2, {
+  type = "START_TURN",
+}))
+if duplicate_start_turn.ok or duplicate_start_turn.reason ~= "turn_already_started" then
+  io.stderr:write("duplicate_start_turn should fail with turn_already_started\n")
+  os.exit(1)
+end
+
 local bad_seq = host:submit(0, protocol.submit_command("smoke-1", 2, {
   type = "START_TURN",
 }))

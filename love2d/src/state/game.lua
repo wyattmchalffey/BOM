@@ -464,7 +464,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   -- End turn: allow either player to click (for testing)
   if kind == "end_turn" then
     sound.play("whoosh")
-    self:dispatch_command({ type = "END_TURN" })
+    self:dispatch_command({ type = "END_TURN", player_index = self.game_state.activePlayer })
     -- Feature 3: Capture resources before start_turn for production popups
     local new_active = self.game_state.activePlayer
     local p = self.game_state.players[new_active + 1]
@@ -472,7 +472,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     for _, key in ipairs(config.resource_types) do
       before[key] = p.resources[key] or 0
     end
-    self:dispatch_command({ type = "START_TURN" })
+    self:dispatch_command({ type = "START_TURN", player_index = new_active })
     local after = {}
     for _, key in ipairs(config.resource_types) do
       after[key] = p.resources[key] or 0

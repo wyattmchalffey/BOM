@@ -112,7 +112,7 @@ function state.create_initial_game_state(setup)
     },
     activePlayer = first_player,
     turnNumber = 1,
-    phase = "MAIN",
+    phase = "TURN_START",
     priorityPlayer = first_player,
     pendingAction = nil,
     activatedUsedThisTurn = {},
