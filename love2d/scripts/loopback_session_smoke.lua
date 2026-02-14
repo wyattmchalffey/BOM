@@ -30,16 +30,21 @@ local client_b = client_session.new({ transport = transport, player_name = "Bob"
 assert_ok(client_a:connect(), "client_a connect")
 assert_ok(client_b:connect(), "client_b connect")
 
--- Simulate disconnect/reconnect flow using session token.
-assert_ok(client_b:disconnect_local(), "client_b local disconnect")
-assert_ok(client_b:reconnect(), "client_b reconnect")
-
 assert_ok(client_a:submit({ type = "ASSIGN_WORKER", resource = "wood" }), "client_a assign")
 assert_ok(client_a:submit({ type = "END_TURN" }), "client_a end turn")
 
 local blocked = client_a:submit({ type = "ASSIGN_WORKER", resource = "wood" })
 if blocked.ok then
   io.stderr:write("expected blocked command after turn pass\n")
+  os.exit(1)
+end
+
+-- Reconnect client_a after sending commands; seq should continue (not reset to 1).
+assert_ok(client_a:disconnect_local(), "client_a local disconnect")
+assert_ok(client_a:reconnect(), "client_a reconnect")
+local still_blocked = client_a:submit({ type = "ASSIGN_WORKER", resource = "wood" })
+if still_blocked.ok or still_blocked.reason == "resync_required" then
+  io.stderr:write("expected non-active-player failure without resync after reconnect\n")
   os.exit(1)
 end
 

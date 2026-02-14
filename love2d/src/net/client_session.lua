@@ -55,7 +55,7 @@ function client_session:connect()
   self.player_index = response.payload.player_index
   self.session_token = response.payload.session_token
   self.last_checksum = response.payload.checksum
-  self.next_seq = 1
+  self.next_seq = response.payload.next_expected_seq or 1
   self.connected = true
 
   return ok({ player_index = self.player_index, match_id = self.match_id })
@@ -82,6 +82,7 @@ function client_session:reconnect()
 
   self.player_index = response.payload.player_index
   self.last_checksum = response.payload.checksum
+  self.next_seq = response.payload.next_expected_seq or self.next_seq
   self.connected = true
 
   return ok({ player_index = self.player_index, match_id = self.match_id })
@@ -94,13 +95,16 @@ function client_session:submit(command)
   local response = self.transport:send_submit(self.player_index, envelope)
 
   if response.type == "command_ack" then
-    self.next_seq = self.next_seq + 1
+    self.next_seq = (response.payload and response.payload.next_expected_seq) or (self.next_seq + 1)
     self.last_checksum = response.payload and response.payload.checksum or self.last_checksum
     return ok(response.payload)
   end
 
   if response.type == "resync_required" then
     self.last_checksum = nil
+    if response.payload and response.payload.next_expected_seq then
+      self.next_seq = response.payload.next_expected_seq
+    end
     return fail("resync_required", response.payload)
   end
 

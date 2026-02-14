@@ -62,12 +62,15 @@ function host:_next_session_token(player_index)
   return table.concat({ self.match_id, tostring(player_index), tostring(self._token_counter) }, ":")
 end
 
-function host:_resync_payload(extra)
+function host:_resync_payload(extra, player_index)
   local payload = {
     active_player = self.state.activePlayer,
     turn_number = self.state.turnNumber,
     checksum = checksum.game_state(self.state),
   }
+  if player_index ~= nil then
+    payload.next_expected_seq = (self.last_seq_by_player[player_index] or 0) + 1
+  end
   if extra then
     for k, v in pairs(extra) do
       payload[k] = v
@@ -84,6 +87,7 @@ function host:_build_session_meta(player_index)
     turn_number = self.state.turnNumber,
     checksum = checksum.game_state(self.state),
     session_token = self.slots[player_index].session_token,
+    next_expected_seq = (self.last_seq_by_player[player_index] or 0) + 1,
   }
 end
 
@@ -147,7 +151,7 @@ function host:submit(player_index, envelope)
   if envelope.client_checksum ~= nil and envelope.client_checksum ~= host_checksum_before then
     return fail("checksum_mismatch", self:_resync_payload({
       received_checksum = envelope.client_checksum,
-    }))
+    }, player_index))
   end
 
   local expected_seq = (self.last_seq_by_player[player_index] or 0) + 1
@@ -155,7 +159,7 @@ function host:submit(player_index, envelope)
     return fail("sequence_out_of_order", self:_resync_payload({
       expected_seq = expected_seq,
       received_seq = envelope.seq,
-    }))
+    }, player_index))
   end
 
   local command = deep_copy(envelope.command)
@@ -168,7 +172,7 @@ function host:submit(player_index, envelope)
     return fail(result.reason, self:_resync_payload({
       seq = envelope.seq,
       events = result.events or {},
-    }))
+    }, player_index))
   end
 
   self.last_seq_by_player[player_index] = envelope.seq
@@ -179,6 +183,7 @@ function host:submit(player_index, envelope)
     turn_number = self.state.turnNumber,
     events = result.events or {},
     checksum = checksum.game_state(self.state),
+    next_expected_seq = self.last_seq_by_player[player_index] + 1,
   })
 end
 

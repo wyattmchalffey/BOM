@@ -25,6 +25,7 @@ This plan assumes:
 - ✅ Added loopback transport + client-session adapter for end-to-end local command/ack/snapshot flow.
 - ✅ Added checksum-based `resync_required` path and snapshot resync plumbing.
 - ✅ Added session-token reconnect flow for client sessions over transport boundaries.
+- ✅ Added reconnect metadata carrying next expected sequence hints.
 - ✅ Added in-client command logging (`GameState.command_log`) using replay schema metadata to seed replay/network sync work.
 
 ---

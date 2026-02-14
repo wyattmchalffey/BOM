@@ -64,6 +64,7 @@ Loopback session smoke test passed
 
 This validates:
 - client session handshake, join assignment, and reconnect via session token,
+- sequence continuity across reconnect (no seq reset to 1),
 - client -> transport -> host command path,
 - sequence progression and command acks,
 - snapshot + checksum retrieval for resync workflows.
