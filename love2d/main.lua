@@ -8,8 +8,49 @@
 -- so all game code transparently uses logical coordinates.
 
 local GameState = require("src.state.game")
+local runtime_multiplayer = require("src.net.runtime_multiplayer")
+local websocket_provider = require("src.net.websocket_provider")
 
 local current_state
+
+local function getenv(name)
+  if love.system and love.system.getOS then
+    -- love.system.getOS guard keeps this path explicit for runtime portability.
+  end
+  return os.getenv(name)
+end
+
+local function build_authoritative_adapter_from_env()
+  local mode = getenv("BOM_MULTIPLAYER_MODE")
+  local player_name = getenv("BOM_PLAYER_NAME") or "Player"
+
+  if not mode or mode == "" then
+    return nil
+  end
+
+  local opts = {
+    mode = mode,
+    player_name = player_name,
+    match_id = getenv("BOM_MATCH_ID"),
+  }
+
+  if mode == "websocket" then
+    opts.url = getenv("BOM_MULTIPLAYER_URL")
+    local resolved = websocket_provider.resolve()
+    if resolved.ok then
+      opts.websocket_provider = resolved.provider
+    else
+      return nil, resolved.reason
+    end
+  end
+
+  local built = runtime_multiplayer.build(opts)
+  if not built.ok then
+    return nil, built.reason
+  end
+
+  return built.adapter, nil
+end
 
 -- Base (design) resolution — all game code uses these logical dimensions
 local BASE_W = 1280
@@ -50,7 +91,11 @@ end
 
 function love.load()
   math.randomseed(os.time())
-  current_state = GameState.new()
+  local adapter, err = build_authoritative_adapter_from_env()
+  current_state = GameState.new({ authoritative_adapter = adapter })
+  if err then
+    print("[multiplayer] disabled: " .. tostring(err))
+  end
   update_scale()
 end
 

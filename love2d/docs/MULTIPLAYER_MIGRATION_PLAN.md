@@ -32,6 +32,10 @@ This plan assumes:
 - ✅ Added headless host service boundary (`src/net/headless_host_service.lua`) and process runner (`scripts/run_headless_host.lua`).
 - ✅ Added authoritative client adapter (`src/net/authoritative_client_game.lua`) to sync snapshots after network command submission.
 - ✅ Added in-client command logging (`GameState.command_log`) using replay schema metadata to seed replay/network sync work.
+- ✅ Added runtime multiplayer wiring (`src/net/runtime_multiplayer.lua`) so game startup can opt into authoritative headless/websocket transport flows.
+- ✅ Routed `state/game.lua` command dispatch through an optional authoritative adapter path for remote-authoritative command submission.
+- ✅ Added client-side reconnect queue/backoff handling in `state/game.lua` for transport failures in authoritative mode.
+- ✅ Added websocket host-service loop boundary (`src/net/websocket_host_service.lua`) and host runner (`scripts/run_websocket_host.lua`) for LAN/online process wiring.
 
 ---
 
@@ -168,9 +172,9 @@ Future additions:
 
 ## Next implementation targets (short-term)
 
-1. Integrate a real websocket server/client provider with `src/net/websocket_client.lua` + `src/net/headless_host_service.lua` in runtime builds.
-2. Wire `state/game.lua` UI intents through `src/net/authoritative_client_game.lua` for remote-authoritative play.
-3. Add reconnect flow using `state_snapshot` + checksum validation and resync triggers in the live client path.
+1. Validate websocket host/server module compatibility in packaged deployments (including TLS/reverse-proxy and firewall guidance).
+2. Expand reconnect UX with explicit player-facing affordances (manual retry button and richer disconnected-state messaging).
+3. Add multiplayer session details UI (match/player identifiers and reconnect attempt telemetry) in-game.
 
 ---
 
