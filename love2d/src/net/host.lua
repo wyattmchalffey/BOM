@@ -14,7 +14,10 @@ local host = {}
 host.__index = host
 
 local function deep_copy(value)
-  if type(value) ~= "table" then return value end
+  if type(value) ~= "table" then
+    return value
+  end
+
   local out = {}
   for k, v in pairs(value) do
     out[k] = deep_copy(v)
@@ -33,6 +36,7 @@ end
 function host.new(opts)
   opts = opts or {}
   local g = game_state.create_initial_game_state(opts.setup)
+
   local self = setmetatable({
     match_id = opts.match_id or "local-match",
     state = g,
@@ -49,9 +53,6 @@ function host.new(opts)
     next_player_index = 0,
     last_seq_by_player = {},
     _token_counter = 0,
-    max_players = opts.max_players or 2,
-    next_player_index = 0,
-    last_seq_by_player = {},
   }, host)
 
   -- Mirror current local game startup behavior.
@@ -71,14 +72,17 @@ function host:_resync_payload(extra, player_index)
     turn_number = self.state.turnNumber,
     checksum = checksum.game_state(self.state),
   }
+
   if player_index ~= nil then
     payload.next_expected_seq = (self.last_seq_by_player[player_index] or 0) + 1
   end
+
   if extra then
     for k, v in pairs(extra) do
       payload[k] = v
     end
   end
+
   return payload
 end
 
@@ -95,12 +99,13 @@ function host:_build_session_meta(player_index)
 end
 
 function host:join(client_payload)
-  local v = protocol.validate_handshake({
+  local validation = protocol.validate_handshake({
     rules_version = self.rules_version,
     content_version = self.content_version,
   }, client_payload)
-  if not v.ok then
-    return fail(v.reason)
+
+  if not validation.ok then
+    return fail(validation.reason)
   end
 
   if self.next_player_index >= self.max_players then
@@ -122,8 +127,11 @@ function host:join(client_payload)
 end
 
 function host:reconnect(reconnect_payload)
-  local v = protocol.validate_reconnect(reconnect_payload)
-  if not v.ok then return fail(v.reason) end
+  local validation = protocol.validate_reconnect(reconnect_payload)
+  if not validation.ok then
+    return fail(validation.reason)
+  end
+
   if reconnect_payload.match_id ~= self.match_id then
     return fail("match_id_mismatch")
   end
@@ -134,17 +142,6 @@ function host:reconnect(reconnect_payload)
   end
 
   return ok(self:_build_session_meta(player_index))
-  self.slots[player_index] = {
-    player_name = client_payload.player_name or ("Player " .. tostring(player_index + 1)),
-  }
-  self.last_seq_by_player[player_index] = 0
-
-  return ok({
-    match_id = self.match_id,
-    player_index = player_index,
-    active_player = self.state.activePlayer,
-    turn_number = self.state.turnNumber,
-  })
 end
 
 function host:submit(player_index, envelope)
@@ -152,9 +149,9 @@ function host:submit(player_index, envelope)
     return fail("player_not_joined")
   end
 
-  local pv = protocol.validate_submit_command(envelope)
-  if not pv.ok then
-    return fail(pv.reason)
+  local validation = protocol.validate_submit_command(envelope)
+  if not validation.ok then
+    return fail(validation.reason)
   end
 
   if envelope.match_id ~= self.match_id then
@@ -174,12 +171,6 @@ function host:submit(player_index, envelope)
       expected_seq = expected_seq,
       received_seq = envelope.seq,
     }, player_index))
-  local expected_seq = (self.last_seq_by_player[player_index] or 0) + 1
-  if envelope.seq ~= expected_seq then
-    return fail("sequence_out_of_order", {
-      expected_seq = expected_seq,
-      received_seq = envelope.seq,
-    })
   end
 
   local command = deep_copy(envelope.command)
@@ -193,12 +184,6 @@ function host:submit(player_index, envelope)
       seq = envelope.seq,
       events = result.events or {},
     }, player_index))
-    return fail(result.reason, {
-      seq = envelope.seq,
-      active_player = self.state.activePlayer,
-      turn_number = self.state.turnNumber,
-      events = result.events or {},
-    })
   end
 
   self.last_seq_by_player[player_index] = envelope.seq
@@ -231,6 +216,7 @@ function host:connect_message(handshake_payload)
   if join_result.ok then
     return protocol.command_ack(self.match_id, 0, join_result.meta)
   end
+
   return protocol.error_message(self.match_id, join_result.reason, join_result.meta)
 end
 
@@ -239,10 +225,8 @@ function host:reconnect_message(reconnect_payload)
   if reconnect_result.ok then
     return protocol.command_ack(self.match_id, 0, reconnect_result.meta)
   end
-  return protocol.error_message(self.match_id, reconnect_result.reason, reconnect_result.meta)
-end
 
-  })
+  return protocol.error_message(self.match_id, reconnect_result.reason, reconnect_result.meta)
 end
 
 function host:get_state_snapshot()
@@ -256,6 +240,7 @@ function host:get_state_snapshot_message()
     checksum = checksum.game_state(self.state),
     state = self:get_state_snapshot(),
   }
+
   return protocol.state_snapshot(self.match_id, payload)
 end
 

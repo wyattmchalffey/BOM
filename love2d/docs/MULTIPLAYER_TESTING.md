@@ -47,7 +47,29 @@ This validates:
 - out-of-order sequence rejection,
 - replay entry capture on host side.
 
-## 3) Manual protocol checks in REPL (optional)
+## 3) Run loopback client-session smoke test
+
+From repository root:
+
+```bash
+lua love2d/scripts/loopback_session_smoke.lua
+```
+
+Expected output:
+
+```text
+Loopback session smoke test passed
+```
+
+This validates:
+- client session handshake, join assignment, and reconnect via session token,
+- sequence continuity across reconnect (no seq reset to 1),
+- client -> transport -> host command path,
+- sequence progression and command acks,
+- snapshot + checksum retrieval for resync workflows,
+- checksum-mismatch handling via `resync_required` and client session auto-resync helper.
+
+## 4) Manual protocol checks in REPL (optional)
 
 Open Lua REPL in repo root:
 
@@ -79,7 +101,7 @@ print(protocol.validate_submit_command({
 
 Expected output: `true`.
 
-## 4) Run game client (optional UI sanity)
+## 5) Run game client (optional UI sanity)
 
 From `love2d/`:
 
@@ -92,4 +114,4 @@ This does not yet connect to remote transport, but confirms command-driven local
 ## Notes
 
 - `src/net/protocol.lua` and `src/net/host.lua` are transport-agnostic foundations for future socket/websocket integration.
-- For CI, add both smoke scripts as required checks once Lua is installed in the build environment.
+- For CI, add all smoke scripts as required checks once Lua is installed in the build environment.

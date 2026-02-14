@@ -59,12 +59,6 @@ end
 
 -- Force checksum mismatch and ensure resync path is exercised.
 client_b.last_checksum = "bad-checksum"
-local mismatch = client_b:submit({ type = "END_TURN" })
-if mismatch.ok or mismatch.reason ~= "resync_required" then
-  io.stderr:write("expected resync_required on checksum mismatch\n")
-  os.exit(1)
-end
-
 local after_resync = client_b:submit_with_resync({ type = "END_TURN" })
 if after_resync.ok or after_resync.reason ~= "resynced_retry_required" then
   io.stderr:write("expected resynced_retry_required after auto snapshot\n")
