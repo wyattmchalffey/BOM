@@ -67,6 +67,7 @@ function protocol.validate_reconnect(payload)
 end
 
 function protocol.submit_command(match_id, seq, command, client_checksum)
+function protocol.submit_command(match_id, seq, command)
   return {
     type = "submit_command",
     protocol_version = protocol.VERSION,
@@ -135,6 +136,9 @@ function protocol.error_message(match_id, reason, payload)
     reason = reason,
     payload = payload or {},
   }
+end
+
+  return ok({ accepted = true })
 end
 
 return protocol

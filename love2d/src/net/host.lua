@@ -49,6 +49,9 @@ function host.new(opts)
     next_player_index = 0,
     last_seq_by_player = {},
     _token_counter = 0,
+    max_players = opts.max_players or 2,
+    next_player_index = 0,
+    last_seq_by_player = {},
   }, host)
 
   -- Mirror current local game startup behavior.
@@ -131,6 +134,17 @@ function host:reconnect(reconnect_payload)
   end
 
   return ok(self:_build_session_meta(player_index))
+  self.slots[player_index] = {
+    player_name = client_payload.player_name or ("Player " .. tostring(player_index + 1)),
+  }
+  self.last_seq_by_player[player_index] = 0
+
+  return ok({
+    match_id = self.match_id,
+    player_index = player_index,
+    active_player = self.state.activePlayer,
+    turn_number = self.state.turnNumber,
+  })
 end
 
 function host:submit(player_index, envelope)
@@ -160,6 +174,12 @@ function host:submit(player_index, envelope)
       expected_seq = expected_seq,
       received_seq = envelope.seq,
     }, player_index))
+  local expected_seq = (self.last_seq_by_player[player_index] or 0) + 1
+  if envelope.seq ~= expected_seq then
+    return fail("sequence_out_of_order", {
+      expected_seq = expected_seq,
+      received_seq = envelope.seq,
+    })
   end
 
   local command = deep_copy(envelope.command)
@@ -173,6 +193,12 @@ function host:submit(player_index, envelope)
       seq = envelope.seq,
       events = result.events or {},
     }, player_index))
+    return fail(result.reason, {
+      seq = envelope.seq,
+      active_player = self.state.activePlayer,
+      turn_number = self.state.turnNumber,
+      events = result.events or {},
+    })
   end
 
   self.last_seq_by_player[player_index] = envelope.seq
@@ -214,6 +240,9 @@ function host:reconnect_message(reconnect_payload)
     return protocol.command_ack(self.match_id, 0, reconnect_result.meta)
   end
   return protocol.error_message(self.match_id, reconnect_result.reason, reconnect_result.meta)
+end
+
+  })
 end
 
 function host:get_state_snapshot()
