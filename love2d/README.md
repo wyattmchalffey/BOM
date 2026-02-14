@@ -1,6 +1,4 @@
-# Battles of Masadoria — Love2D MVP
-
-Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc Food+Stone), bases, resource nodes, worker assignment via drag-and-drop, blueprint deck view, End turn / Start next.
+@@ -4,25 +4,101 @@ Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc
 
 ## Run
 
@@ -49,3 +47,56 @@ BOM_HOST=0.0.0.0 BOM_PORT=8080 lua love2d/scripts/run_websocket_host.lua
 ```
 
 Then point clients at `BOM_MULTIPLAYER_URL=ws://<host-ip>:8080`.
+
+
+## Non-technical Windows guide
+
+If you want a click-by-click setup for players/testers, use:
+
+- [docs/WINDOWS_MULTIPLAYER_SETUP_NON_TECHNICAL.md](docs/WINDOWS_MULTIPLAYER_SETUP_NON_TECHNICAL.md)
+
+## Windows multiplayer quick setup
+
+### 1) Launch a multiplayer client from PowerShell
+
+From the `love2d` folder:
+
+```powershell
+# Local authoritative host in-process
+.\run_multiplayer.ps1 -Mode headless -PlayerName "PlayerA" -MatchId "lan-test"
+
+# Remote websocket host
+.\run_multiplayer.ps1 -Mode websocket -Url "ws://192.168.1.25:8080" -PlayerName "PlayerA" -MatchId "lan-test"
+```
+
+### 2) Launch a websocket host from PowerShell
+
+From the `love2d` folder:
+
+```powershell
+.\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
+```
+
+### 3) Build a distributable Windows folder
+
+From the `love2d` folder:
+
+```powershell
+.\build_windows.ps1 -GameName "BattlesOfMasadoria"
+```
+
+This creates `build/windows/` with:
+- `BattlesOfMasadoria.love`
+- `BattlesOfMasadoria.exe` (fused executable)
+- required LÖVE runtime `.dll` files copied next to the executable.
+
+## Remaining multiplayer setup checklist
+
+To run reliable LAN/online matches outside local smoke tests, these items are still recommended:
+
+- Install and package a websocket **client** Lua module for each target platform build (Windows/macOS/Linux).
+- Install and package a websocket **server** Lua module for the host runtime used by `scripts/run_websocket_host.lua`.
+- For internet play, run behind TLS/reverse proxy (`wss://`) and configure firewall/port-forwarding for the host endpoint.
+- Add clear reconnect UX affordances (manual retry button + richer disconnected-state messaging).
+- Add multiplayer session details UI (match id, player id/name, reconnect attempt telemetry).
+- Finish command/event coverage + deterministic replay validation before broad online rollout.
