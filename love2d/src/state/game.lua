@@ -23,10 +23,11 @@ local res_registry = require("src.data.resources")
 local GameState = {}
 GameState.__index = GameState
 
-function GameState.new()
-  local g = game_state_module.create_initial_game_state()
+function GameState.new(opts)
+  opts = opts or {}
+  local initial_state = game_state_module.create_initial_game_state()
   local self = setmetatable({
-    game_state = g,
+    game_state = initial_state,
     show_blueprint_for_player = nil, -- 0 or 1 when modal open
     drag = nil, -- { player_index, from } where from = "unassigned" | "left" | "right"
     hover = nil, -- { kind, pi, idx } updated every mousemoved
@@ -54,26 +55,123 @@ function GameState.new()
       rules_version = config.rules_version,
       content_version = config.content_version,
     }), -- deterministic command stream for replay/network migration
+    authoritative_adapter = opts.authoritative_adapter,
+    multiplayer_error = nil,
+    multiplayer_status = nil,
+    reconnect_pending = false,
+    reconnect_attempts = 0,
+    reconnect_timer = 0,
   }, GameState)
   -- Cache the hand cursor once
   self._cursor_hand = love.mouse.getSystemCursor("hand")
-  self:dispatch_command({ type = "START_TURN", player_index = 0 }) -- Player 1's turn starts immediately
+
+  if self.authoritative_adapter then
+    local connected = self.authoritative_adapter:connect()
+    if connected.ok then
+      local remote_state = self.authoritative_adapter:get_state()
+      if remote_state then
+        self.game_state = remote_state
+      end
+      self.multiplayer_status = "Connected (authoritative)"
+    else
+      self.multiplayer_error = connected.reason
+      self.multiplayer_status = "Multiplayer unavailable: " .. tostring(connected.reason)
+      self.authoritative_adapter = nil
+    end
+  end
+
+  if not self.authoritative_adapter then
+    self:dispatch_command({ type = "START_TURN", player_index = 0 }) -- Player 1's turn starts immediately
+    if not self.multiplayer_status then
+      self.multiplayer_status = "Local mode"
+    end
+  end
+
   -- Init display_resources from actual values for all resource types
   for pi = 1, 2 do
     for _, key in ipairs(config.resource_types) do
-      self.display_resources[pi][key] = g.players[pi].resources[key] or 0
+      self.display_resources[pi][key] = self.game_state.players[pi].resources[key] or 0
     end
   end
   -- Init hand y_offsets for player 0's starting hand
-  for i = 1, #g.players[1].hand do
+  for i = 1, #self.game_state.players[1].hand do
     self.hand_y_offsets[i] = 0
   end
   return self
 end
 
 
+local function should_trigger_reconnect(reason)
+  return reason == "not_connected"
+    or reason == "missing_transport"
+    or reason == "transport_send_failed"
+    or reason == "transport_receive_failed"
+    or reason == "transport_decode_failed"
+    or reason == "transport_encode_failed"
+    or reason == "transport_error"
+end
+
+function GameState:_queue_reconnect(reason)
+  if not self.authoritative_adapter then return end
+  if self.reconnect_pending then return end
+  self.reconnect_pending = true
+  self.reconnect_attempts = 0
+  self.reconnect_timer = 0
+  self.multiplayer_error = reason
+  self.multiplayer_status = "Reconnecting: " .. tostring(reason)
+end
+
+function GameState:_attempt_reconnect()
+  if not self.authoritative_adapter then return false end
+
+  local reconnected = self.authoritative_adapter:reconnect()
+  if reconnected.ok then
+    local remote_state = self.authoritative_adapter:get_state()
+    if remote_state then
+      self.game_state = remote_state
+    end
+    self.reconnect_pending = false
+    self.reconnect_attempts = 0
+    self.reconnect_timer = 0
+    self.multiplayer_error = nil
+    self.multiplayer_status = "Connected (authoritative)"
+    return true
+  end
+
+  self.reconnect_attempts = self.reconnect_attempts + 1
+  local wait = math.min(6, 0.5 * (2 ^ math.min(self.reconnect_attempts, 4)))
+  self.reconnect_timer = wait
+  self.multiplayer_error = reconnected.reason
+  self.multiplayer_status = "Reconnect failed (retrying): " .. tostring(reconnected.reason)
+  return false
+end
+
 function GameState:dispatch_command(command)
-  local result = commands.execute(self.game_state, command)
+  local result
+
+  if self.authoritative_adapter then
+    result = self.authoritative_adapter:submit(command)
+
+    if not result.ok and result.reason == "resynced_retry_required" then
+      result = self.authoritative_adapter:submit(command)
+    end
+
+    if result.ok then
+      local remote_state = self.authoritative_adapter:get_state()
+      if remote_state then
+        self.game_state = remote_state
+      end
+      self.multiplayer_status = "Connected (authoritative)"
+    else
+      self.multiplayer_status = "Multiplayer warning: " .. tostring(result.reason)
+      if should_trigger_reconnect(result.reason) then
+        self:_queue_reconnect(result.reason)
+      end
+    end
+  else
+    result = commands.execute(self.game_state, command)
+  end
+
   replay.append(self.command_log, command, result, self.game_state)
   if not result.ok then
     sound.play("error")
@@ -198,6 +296,13 @@ function GameState:update(dt)
   else
     self.tooltip_target = nil
     self.tooltip_timer = 0
+  end
+
+  if self.reconnect_pending and self.authoritative_adapter then
+    self.reconnect_timer = self.reconnect_timer - dt
+    if self.reconnect_timer <= 0 then
+      self:_attempt_reconnect()
+    end
   end
 
   if self.turn_banner_timer > 0 then
@@ -372,6 +477,19 @@ function GameState:draw()
     love.graphics.setFont(util.get_title_font(28))
     love.graphics.setColor(1, 1, 1, alpha)
     love.graphics.printf(self.turn_banner_text, 0, gh / 2 - 16, gw, "center")
+  end
+
+  if self.multiplayer_status then
+    local status_font = util.get_font(11)
+    local text_w = status_font:getWidth(self.multiplayer_status)
+    local pad_x, pad_y = 10, 6
+    local box_w = math.min(420, text_w + pad_x * 2)
+    local box_h = status_font:getHeight() + pad_y * 2
+    love.graphics.setColor(0.08, 0.09, 0.13, 0.7)
+    love.graphics.rectangle("fill", 12, 12, box_w, box_h, 6, 6)
+    love.graphics.setColor(1, 1, 1, 0.92)
+    love.graphics.setFont(status_font)
+    love.graphics.printf(self.multiplayer_status, 12 + pad_x, 12 + pad_y, box_w - pad_x * 2, "left")
   end
 
   -- Vignette: drawn last, on top of everything
