@@ -9,12 +9,52 @@ local config = require("src.data.config")
 
 local state = {}
 
+-- Kinds that go into the player's main (draw) deck
+local DECK_KINDS = { Unit = true, Spell = true, Technology = true, Item = true, Artifact = true }
+
 function state.empty_resources()
   local r = {}
   for _, key in ipairs(config.resource_types) do
     r[key] = 0
   end
   return r
+end
+
+-- Fisher-Yates shuffle (in-place)
+local function shuffle(t)
+  for i = #t, 2, -1 do
+    local j = math.random(1, i)
+    t[i], t[j] = t[j], t[i]
+  end
+  return t
+end
+
+-- Build a draw deck for a faction: collect all matching cards, each appearing `population` times
+function state.build_deck(faction)
+  local deck = {}
+  for _, def in ipairs(cards.CARD_DEFS) do
+    if def.faction == faction and DECK_KINDS[def.kind] then
+      local copies = def.population or 1
+      for _ = 1, copies do
+        deck[#deck + 1] = def.id
+      end
+    end
+  end
+  shuffle(deck)
+  return deck
+end
+
+-- Draw N cards from a player's deck into their hand
+function state.draw_cards(player, count)
+  count = count or 1
+  local drawn = 0
+  for _ = 1, count do
+    if #player.deck == 0 then break end
+    local card_id = table.remove(player.deck)
+    player.hand[#player.hand + 1] = card_id
+    drawn = drawn + 1
+  end
+  return drawn
 end
 
 -- Create a player state.
@@ -37,7 +77,9 @@ function state.create_player_state(index, opts)
     resources[k] = v
   end
 
-  return {
+  -- Build the draw deck and draw a starting hand
+  local deck = state.build_deck(faction)
+  local p = {
     faction = faction,
     baseId = base_id,
     life = base_def.baseHealth or 30,
@@ -45,14 +87,15 @@ function state.create_player_state(index, opts)
     totalWorkers = starting_workers,
     maxWorkers = max_workers,
     workersOn = { food = 0, wood = 0, stone = 0 },
-    deckStructure = {},
-    deckUnit = {},
-    workerPile = {},
+    deck = deck,
     hand = {},
     board = {},
     graveyard = {},
     resourceNodes = {},
   }
+  -- Draw starting hand of 5 cards
+  state.draw_cards(p, 5)
+  return p
 end
 
 -- Create the full game state.

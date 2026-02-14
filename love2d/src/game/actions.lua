@@ -1,11 +1,27 @@
--- Game actions: start turn, end turn, assign/unassign workers, activate abilities.
+-- Game actions: start turn, end turn, assign/unassign workers, activate abilities, draw cards.
 -- Uses data/config.lua for production rates and other constants.
 
 local config = require("src.data.config")
 local cards = require("src.game.cards")
 local abilities = require("src.game.abilities")
+local game_state = require("src.game.state")
 
 local actions = {}
+
+-- Check if a card def has a specific static effect
+local function has_static_effect(card_def, effect_name)
+  if not card_def or not card_def.abilities then return false end
+  for _, ab in ipairs(card_def.abilities) do
+    if ab.type == "static" and ab.effect == effect_name then return true end
+  end
+  return false
+end
+
+-- Draw cards from deck to hand
+function actions.draw_card(g, player_index, count)
+  local p = g.players[player_index + 1]
+  return game_state.draw_cards(p, count or 1)
+end
 
 function actions.start_turn(g)
   g.activatedUsedThisTurn = {}
@@ -17,6 +33,11 @@ function actions.start_turn(g)
   p.resources.food  = p.resources.food  + p.workersOn.food  * config.production_per_worker
   p.resources.wood  = p.resources.wood  + p.workersOn.wood  * config.production_per_worker
   p.resources.stone = p.resources.stone + p.workersOn.stone * config.production_per_worker
+  -- Draw a card (unless base has skip_draw, e.g. Orc Encampment)
+  local base_def = cards.get_card_def(p.baseId)
+  if not has_static_effect(base_def, "skip_draw") then
+    actions.draw_card(g, active, 1)
+  end
   g.phase = "MAIN"
   g.priorityPlayer = active
   return g
@@ -48,13 +69,19 @@ function actions.unassign_worker_from_resource(g, player_index, resource)
 end
 
 -- Activate an ability on a card (base, structure, etc.)
--- source_key: unique string like "0:base" or "0:board:3" for tracking once-per-turn
-function actions.activate_ability(g, player_index, card_def, source_key)
+-- source_key: unique string like "base:1" or "board:3:2" for tracking once-per-turn
+-- ability_index: optional index into card_def.abilities (defaults to first activated)
+function actions.activate_ability(g, player_index, card_def, source_key, ability_index)
   if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
   local p = g.players[player_index + 1]
 
-  local ability = cards.get_activated_ability(card_def)
-  if not ability then return g end
+  local ability
+  if ability_index and card_def.abilities then
+    ability = card_def.abilities[ability_index]
+  else
+    ability = cards.get_activated_ability(card_def)
+  end
+  if not ability or ability.type ~= "activated" then return g end
 
   local key = tostring(player_index) .. ":" .. source_key
   if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end

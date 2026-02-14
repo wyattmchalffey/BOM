@@ -9,12 +9,14 @@ return {
   workers_gained_per_turn = 1,
 
   -- All resource types in the game (add new ones here and they propagate everywhere)
-  resource_types = { "food", "wood", "stone", "cash", "metal", "bones" },
+  resource_types = { "food", "wood", "stone", "metal", "gold", "bones", "blood", "ectoplasm", "crystal", "fire", "water" },
 
   -- Default starting resources (can be overridden per-player during setup)
   default_starting_resources = {
     food = 0, wood = 0, stone = 0,
-    cash = 0, metal = 0, bones = 0,
+    metal = 0, gold = 0, bones = 0,
+    blood = 0, ectoplasm = 0, crystal = 0,
+    fire = 0, water = 0,
   },
 
   -- Default player setup (used when no custom config is provided)

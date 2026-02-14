@@ -17,6 +17,18 @@ return {
     default_max_workers = 12,
     default_starting_workers = 3,
   },
+  Elf = {
+    color = { 0.2, 0.75, 0.35 },   -- green accent
+    default_base_id = "ELF_BASE_ENCAMPMENT",
+    default_max_workers = 8,
+    default_starting_workers = 2,
+  },
+  Gnome = {
+    color = { 0.7, 0.45, 0.9 },    -- purple accent
+    default_base_id = "GNOME_BASE_REIKI",
+    default_max_workers = 6,
+    default_starting_workers = 2,
+  },
   Neutral = {
     color = { 0.55, 0.56, 0.83 },
   },
