@@ -26,3 +26,26 @@ See [PROJECT_OUTLINE.md](PROJECT_OUTLINE.md) for the full MVP plan and file layo
 ## Multiplayer migration testing
 
 See [docs/MULTIPLAYER_TESTING.md](docs/MULTIPLAYER_TESTING.md) for replay and host smoke-test steps.
+
+
+## Runtime multiplayer environment variables
+
+- `BOM_MULTIPLAYER_MODE`: `off` (default), `headless`, or `websocket`.
+- `BOM_PLAYER_NAME`: optional display name sent during handshake.
+- `BOM_MATCH_ID`: optional match identifier override for local/headless setup.
+- `BOM_MULTIPLAYER_URL`: required for websocket mode (e.g. `ws://127.0.0.1:8080`).
+
+### Websocket provider note
+
+Websocket mode expects a runtime Lua module named `websocket` that exposes `client.sync()` and a connection with `connect/send/receive`. Startup now validates provider compatibility and falls back to local mode with an explicit reason when unavailable.
+
+
+### Host process helper (LAN / online)
+
+For a networked authoritative host process, use:
+
+```bash
+BOM_HOST=0.0.0.0 BOM_PORT=8080 lua love2d/scripts/run_websocket_host.lua
+```
+
+Then point clients at `BOM_MULTIPLAYER_URL=ws://<host-ip>:8080`.
