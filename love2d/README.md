@@ -1,6 +1,4 @@
-# Battles of Masadoria — Love2D MVP
-
-Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc Food+Stone), bases, resource nodes, worker assignment via drag-and-drop, blueprint deck view, End turn / Start next.
+@@ -4,25 +4,101 @@ Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc
 
 ## Run
 
