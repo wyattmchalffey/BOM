@@ -74,12 +74,16 @@ From the `love2d` folder:
 .\run_multiplayer.ps1 -Mode websocket -Url "ws://192.168.1.25:8080" -PlayerName "PlayerA" -MatchId "lan-test"
 ```
 
-### 2) Launch a websocket host from PowerShell
+### 2) Launch a websocket host
 
 From the `love2d` folder:
 
 ```powershell
+# PowerShell
 .\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
+
+# Command Prompt-safe wrapper (use this if `.ps1` opens in Notepad)
+run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
 ```
 
 ### 3) Build a distributable Windows folder
