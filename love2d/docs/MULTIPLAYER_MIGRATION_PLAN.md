@@ -22,6 +22,10 @@ This plan assumes:
 - ✅ Added protocol scaffolding (`src/net/protocol.lua`) for version-checked handshake and command submission envelopes.
 - ✅ Added a headless authoritative host foundation (`src/net/host.lua`) with join flow, sequence validation, command execution, and replay capture.
 - ✅ Added smoke-test scripts (`scripts/replay_smoke.lua`, `scripts/host_smoke.lua`) and a dedicated testing guide.
+- ✅ Added loopback transport + client-session adapter for end-to-end local command/ack/snapshot flow.
+- ✅ Added checksum-based `resync_required` path and snapshot resync plumbing.
+- ✅ Added session-token reconnect flow for client sessions over transport boundaries.
+- ✅ Added reconnect metadata carrying next expected sequence hints.
 - ✅ Added in-client command logging (`GameState.command_log`) using replay schema metadata to seed replay/network sync work.
 
 ---
@@ -159,9 +163,9 @@ Future additions:
 
 ## Next implementation targets (short-term)
 
-1. Add headless host loop that consumes `protocol.submit_command` payloads and executes `commands.execute` authoritatively.
-2. Add replay smoke test that replays a captured command log and verifies final state checksum.
-3. Add command sequence/ack handling to prevent duplicate or out-of-order application.
+1. Wire real socket/websocket transport to the existing host/client-session interfaces.
+2. Add reconnect flow using `state_snapshot` + checksum validation and resync triggers.
+3. Expand command coverage for combat/stack windows and add deterministic regression fixtures.
 
 ---
 
