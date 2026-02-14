@@ -26,6 +26,11 @@ This plan assumes:
 - ✅ Added checksum-based `resync_required` path and snapshot resync plumbing.
 - ✅ Added session-token reconnect flow for client sessions over transport boundaries.
 - ✅ Added reconnect metadata carrying next expected sequence hints.
+- ✅ Added websocket-ready transport adapter (`src/net/websocket_transport.lua`) plus host gateway (`src/net/host_gateway.lua`) for real network boundary integration.
+- ✅ Added JSON framing codec (`src/net/json_codec.lua`) and concrete websocket client wrapper (`src/net/websocket_client.lua`) for provider-based runtime wiring.
+- ✅ Added websocket transport error normalization (encode/send/receive/decode failure mapping) with dedicated smoke coverage.
+- ✅ Added headless host service boundary (`src/net/headless_host_service.lua`) and process runner (`scripts/run_headless_host.lua`).
+- ✅ Added authoritative client adapter (`src/net/authoritative_client_game.lua`) to sync snapshots after network command submission.
 - ✅ Added in-client command logging (`GameState.command_log`) using replay schema metadata to seed replay/network sync work.
 
 ---
@@ -163,9 +168,9 @@ Future additions:
 
 ## Next implementation targets (short-term)
 
-1. Wire real socket/websocket transport to the existing host/client-session interfaces.
-2. Add reconnect flow using `state_snapshot` + checksum validation and resync triggers.
-3. Expand command coverage for combat/stack windows and add deterministic regression fixtures.
+1. Integrate a real websocket server/client provider with `src/net/websocket_client.lua` + `src/net/headless_host_service.lua` in runtime builds.
+2. Wire `state/game.lua` UI intents through `src/net/authoritative_client_game.lua` for remote-authoritative play.
+3. Add reconnect flow using `state_snapshot` + checksum validation and resync triggers in the live client path.
 
 ---
 

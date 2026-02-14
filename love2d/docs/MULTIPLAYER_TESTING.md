@@ -69,7 +69,120 @@ This validates:
 - snapshot + checksum retrieval for resync workflows,
 - checksum-mismatch handling via `resync_required` and client session auto-resync helper.
 
-## 4) Manual protocol checks in REPL (optional)
+## 4) Run websocket-ready transport smoke test
+
+From repository root:
+
+```bash
+lua love2d/scripts/websocket_transport_smoke.lua
+```
+
+Expected output:
+
+```text
+Websocket transport smoke test passed
+```
+
+This validates:
+- host gateway request routing (`connect`, `reconnect`, `submit`, `snapshot`),
+- websocket-ready transport request/response contract,
+- compatibility with `client_session` reconnect + resync helpers over a transport boundary.
+
+## 5) Run websocket JSON + client-wrapper smoke test
+
+From repository root:
+
+```bash
+lua love2d/scripts/websocket_json_client_smoke.lua
+```
+
+Expected output:
+
+```text
+Websocket JSON client smoke test passed
+```
+
+This validates:
+- JSON encode/decode framing around transport request/response payloads,
+- `websocket_client` provider wrapper compatibility with `websocket_transport`,
+- end-to-end connect/submit/resync/retry flow using framed payloads.
+
+## 6) Run websocket transport error-handling smoke test
+
+From repository root:
+
+```bash
+lua love2d/scripts/websocket_transport_error_smoke.lua
+```
+
+Expected output:
+
+```text
+Websocket transport error smoke test passed
+```
+
+This validates:
+- encode/send/receive/decode failure normalization to protocol `error` messages,
+- non-crashing behavior for transport boundary failures,
+- explicit `reason` codes for client-session level handling/logging.
+
+## 7) Run headless host service smoke test
+
+From repository root:
+
+```bash
+lua love2d/scripts/headless_host_service_smoke.lua
+```
+
+Expected output:
+
+```text
+Headless host service smoke test passed
+```
+
+This validates:
+- framed JSON service boundary (`headless_host_service`) over host gateway,
+- client-session compatibility across a process/network-style request/response boundary,
+- connect/submit/resync/retry flow without direct in-process host calls.
+
+## 8) Run authoritative client adapter smoke test
+
+From repository root:
+
+```bash
+lua love2d/scripts/authoritative_client_game_smoke.lua
+```
+
+Expected output:
+
+```text
+Authoritative client game smoke test passed
+```
+
+This validates:
+- a client-facing authoritative adapter that syncs host snapshots after command submit,
+- compatibility between `client_session` and process/network-style host service boundaries,
+- command submission + resync-required retry handling while maintaining a client-side snapshot cache.
+
+## 9) Run conflict-marker smoke test
+
+From repository root:
+
+```bash
+lua love2d/scripts/conflict_marker_smoke.lua
+```
+
+Expected output:
+
+```text
+Conflict marker smoke test passed
+```
+
+This validates:
+- no unresolved Git merge markers are present in `.lua` and `.md` files under `love2d/`,
+- branch merges did not leave conflict artifacts that break Lua parsing.
+
+## 10) Manual protocol checks in REPL (optional)
 
 Open Lua REPL in repo root:
 
@@ -101,7 +214,7 @@ print(protocol.validate_submit_command({
 
 Expected output: `true`.
 
-## 5) Run game client (optional UI sanity)
+## 11) Run game client (optional UI sanity)
 
 From `love2d/`:
 
@@ -112,6 +225,14 @@ love .
 This does not yet connect to remote transport, but confirms command-driven local flow still runs.
 
 ## Notes
+
+- `src/net/websocket_transport.lua` is adapter-based: inject a real websocket client and encode/decode functions (for example JSON) to move from in-memory smoke to real network transport.
+- `src/net/websocket_client.lua` wraps provider-specific websocket connections behind the transport client contract.
+- `src/net/json_codec.lua` provides minimal JSON framing utilities for transport payloads.
+- `src/net/headless_host_service.lua` exposes host/gateway as framed JSON for process/network boundaries.
+- `scripts/run_headless_host.lua` runs the headless host service over stdin/stdout lines.
+- `src/net/authoritative_client_game.lua` is a client adapter that keeps local state in sync via authoritative snapshots.
+
 
 - `src/net/protocol.lua` and `src/net/host.lua` are transport-agnostic foundations for future socket/websocket integration.
 - For CI, add all smoke scripts as required checks once Lua is installed in the build environment.
