@@ -47,7 +47,6 @@ This validates:
 - out-of-order sequence rejection,
 - replay entry capture on host side.
 
-
 ## 3) Run loopback client-session smoke test
 
 From repository root:
@@ -67,7 +66,7 @@ This validates:
 - sequence continuity across reconnect (no seq reset to 1),
 - client -> transport -> host command path,
 - sequence progression and command acks,
-- snapshot + checksum retrieval for resync workflows.
+- snapshot + checksum retrieval for resync workflows,
 - checksum-mismatch handling via `resync_required` and client session auto-resync helper.
 
 ## 4) Manual protocol checks in REPL (optional)
@@ -115,4 +114,4 @@ This does not yet connect to remote transport, but confirms command-driven local
 ## Notes
 
 - `src/net/protocol.lua` and `src/net/host.lua` are transport-agnostic foundations for future socket/websocket integration.
-- For CI, add both smoke scripts as required checks once Lua is installed in the build environment.
+- For CI, add all smoke scripts as required checks once Lua is installed in the build environment.
