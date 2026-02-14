@@ -1,4 +1,5 @@
 @echo off
+setlocal
 REM Run Battles of Masadoria with LÖVE. Use this if "love" is not in your PATH.
 set "LOVE="
 if exist "C:\Program Files\LOVE\love.exe" set "LOVE=C:\Program Files\LOVE\love.exe"
@@ -9,5 +10,7 @@ if "%LOVE%"=="" (
   pause
   exit /b 1
 )
-"%LOVE%" "%~dp0"
-pause
+
+REM Normalize game directory path to avoid stray quote/trailing-slash issues.
+for %%I in ("%~dp0.") do set "GAME_DIR=%%~fI"
+"%LOVE%" "%GAME_DIR%"

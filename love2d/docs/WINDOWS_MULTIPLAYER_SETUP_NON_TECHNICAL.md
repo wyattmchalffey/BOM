@@ -109,6 +109,11 @@ Replace `YOUR_IP` with your IPv4 address.
 - Install LÖVE 11.x from https://love2d.org/.
 - Re-run the same command.
 
+### “Cannot load game at path ...” when using `run.bat`
+- Make sure you run `run.bat` from inside the real `love2d` folder (not a shortcut pointing elsewhere).
+- Pull the latest files; `run.bat` now normalizes the folder path before launching LÖVE.
+- If it still fails, try PowerShell launch instead: `./run.ps1`.
+
 ### “Lua not found” when starting host
 - Install Lua 5.4+.
 - Ensure `lua` works in PowerShell (`lua -v`).
