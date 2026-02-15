@@ -126,6 +126,13 @@ Replace `YOUR_IP` with your IPv4 address.
 - Open **PowerShell** in the `love2d` folder and run the command there, or
 - Use `run_websocket_host.bat ...` from Command Prompt, which launches PowerShell with the right flags.
 
+
+### “failed to start websocket host: websocket_server_module_not_found”
+- This means the websocket **server** Lua module is missing from your Lua install.
+- Install LuaRocks (if needed), then run: `luarocks install websocket`
+- Verify module visibility in the same shell: `lua -e "require('websocket.server.sync')"`
+- Start host again: `run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
+
 ### Players cannot connect
 - Confirm host used `run_websocket_host.ps1` and kept the window open.
 - Confirm everyone uses the same port (`8080` unless changed).
