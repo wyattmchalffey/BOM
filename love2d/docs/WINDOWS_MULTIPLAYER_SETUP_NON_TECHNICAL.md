@@ -55,15 +55,31 @@ Use this if players are on the same home/office network.
 
 (same method as above)
 
-### 2) Start the host
+### 2) Install multiplayer dependencies (first time only)
 
 ```powershell
+.\install_multiplayer_dependencies.ps1
+```
+
+If LuaRocks cannot find your Lua in PATH, run with explicit values:
+
+```powershell
+.\install_multiplayer_dependencies.ps1 -LuaVersion 5.3 -LuaExePath "C:\path\to\lua.exe"
+```
+
+### 3) Start the host
+
+```powershell
+# PowerShell
 .\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
+
+# If the .ps1 file opens in Notepad instead of running, use:
+run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
 ```
 
 Leave this window open.
 
-### 3) Find your local IP address
+### 4) Find your local IP address
 
 In a new PowerShell window, run:
 
@@ -73,7 +89,7 @@ ipconfig
 
 Look for `IPv4 Address` (example: `192.168.1.25`).
 
-### 4) Tell players to connect
+### 5) Tell players to connect
 
 Each player runs:
 
@@ -115,8 +131,25 @@ Replace `YOUR_IP` with your IPv4 address.
 - If it still fails, try PowerShell launch instead: `./run.ps1`.
 
 ### “Lua not found” when starting host
-- Install Lua 5.4+.
+- Install Lua (version depends on websocket module availability for your LuaRocks setup).
 - Ensure `lua` works in PowerShell (`lua -v`).
+
+### “run_websocket_host.ps1 opens in Notepad”
+- Open **PowerShell** in the `love2d` folder and run the command there, or
+- Use `run_websocket_host.bat ...` from Command Prompt, which launches PowerShell with the right flags.
+
+
+### “failed to start websocket host: websocket_server_module_not_found”
+- This means the websocket **server** Lua module is missing from your Lua install.
+- Install LuaRocks (if needed), then run: `luarocks install lua-websockets` (recommended)
+- If `luarocks install websocket` fails with Git clone/repository errors, use `lua-websockets` instead
+- If you get “No results ... for your Lua version”, check supported versions: `luarocks install lua-websockets --check-lua-versions`
+- Install for a Lua version you actually have (example): `luarocks --lua-version=5.3 install lua-websockets`
+- If you get “Could not find Lua 5.3 in PATH”, set Lua path first: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`
+- Verify backend module visibility in the same shell (either one works):
+  - `lua -e "require('websocket.server.sync')"`
+  - `lua -e "require('websocket.server_copas'); require('copas')"`
+- Start host again: `run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
 
 ### Players cannot connect
 - Confirm host used `run_websocket_host.ps1` and kept the window open.
@@ -134,5 +167,7 @@ Replace `YOUR_IP` with your IPv4 address.
 
 - Play local: `run.bat`
 - Join server: `.\run_multiplayer.ps1 -Mode websocket -Url "ws://HOST:8080" -PlayerName "Me" -MatchId "match1"`
-- Host LAN: `.\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
+- Install deps: `.\install_multiplayer_dependencies.ps1`
+- Host LAN (PowerShell): `.\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
+- Host LAN (Command Prompt-safe): `run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
 - Build package: `.\build_windows.ps1 -GameName "BattlesOfMasadoria"`
