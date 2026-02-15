@@ -26,6 +26,8 @@ See [PROJECT_OUTLINE.md](PROJECT_OUTLINE.md) for the full MVP plan and file layo
 
 See [docs/MULTIPLAYER_TESTING.md](docs/MULTIPLAYER_TESTING.md) for replay and host smoke-test steps.
 
+Dependency checklist: [docs/MULTIPLAYER_DEPENDENCIES.md](docs/MULTIPLAYER_DEPENDENCIES.md).
+
 ## Runtime multiplayer environment variables
 
 - `BOM_MULTIPLAYER_MODE`: `off` (default), `headless`, or `websocket`.
@@ -47,6 +49,20 @@ If either dependency is missing:
 On Windows host startup, if you see `failed to start websocket host: websocket_server_module_not_found`, first try `luarocks install websocket`. If LuaRocks says no results for your current Lua, run `luarocks install websocket --check-lua-versions`, then install for a Lua version you actually have (for example `luarocks --lua-version=5.3 install websocket`). If LuaRocks reports `Could not find Lua <version> in PATH`, set it explicitly (example: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`) and retry. Then verify with one of:
 - `lua -e "require('websocket.server.sync')"`
 - `lua -e "require('websocket.server_copas'); require('copas')"`
+
+### Windows dependency installer script
+
+From `love2d/` you can install/verify websocket multiplayer dependencies with:
+
+```powershell
+.\install_multiplayer_dependencies.ps1
+```
+
+If LuaRocks cannot find your Lua version in PATH, pass both version + exe path:
+
+```powershell
+.\install_multiplayer_dependencies.ps1 -LuaVersion 5.3 -LuaExePath "C:\path\to\lua.exe"
+```
 
 ### Host process helper (LAN / online)
 

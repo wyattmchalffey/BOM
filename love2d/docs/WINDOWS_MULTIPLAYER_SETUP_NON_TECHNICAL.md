@@ -55,7 +55,19 @@ Use this if players are on the same home/office network.
 
 (same method as above)
 
-### 2) Start the host
+### 2) Install multiplayer dependencies (first time only)
+
+```powershell
+.\install_multiplayer_dependencies.ps1
+```
+
+If LuaRocks cannot find your Lua in PATH, run with explicit values:
+
+```powershell
+.\install_multiplayer_dependencies.ps1 -LuaVersion 5.3 -LuaExePath "C:\path\to\lua.exe"
+```
+
+### 3) Start the host
 
 ```powershell
 # PowerShell
@@ -67,7 +79,7 @@ run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
 
 Leave this window open.
 
-### 3) Find your local IP address
+### 4) Find your local IP address
 
 In a new PowerShell window, run:
 
@@ -77,7 +89,7 @@ ipconfig
 
 Look for `IPv4 Address` (example: `192.168.1.25`).
 
-### 4) Tell players to connect
+### 5) Tell players to connect
 
 Each player runs:
 
@@ -154,6 +166,7 @@ Replace `YOUR_IP` with your IPv4 address.
 
 - Play local: `run.bat`
 - Join server: `.\run_multiplayer.ps1 -Mode websocket -Url "ws://HOST:8080" -PlayerName "Me" -MatchId "match1"`
+- Install deps: `.\install_multiplayer_dependencies.ps1`
 - Host LAN (PowerShell): `.\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
 - Host LAN (Command Prompt-safe): `run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
 - Build package: `.\build_windows.ps1 -GameName "BattlesOfMasadoria"`
