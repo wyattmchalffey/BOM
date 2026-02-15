@@ -8,7 +8,7 @@ This guide covers practical test steps for the current multiplayer foundation.
 2. (Optional) LÖVE 11.x for running the game client UI.
 3. For websocket-mode tests and runtime checks, install websocket Lua modules:
    - client side: module `websocket` with `client.sync()`
-   - host side: module `websocket.server.sync` with `listen()`
+   - host side: module `websocket.server.sync` with `listen()`, or `websocket.server_copas` + `copas`
 
 ## 0) Preflight multiplayer setup sanity check
 

@@ -11,10 +11,10 @@ if (-not $lua) {
     exit 1
 }
 
-$wsCheck = "local ok, mod = pcall(require, 'websocket.server.sync'); if ok and mod and type(mod.listen) == 'function' then os.exit(0) else os.exit(3) end"
+$wsCheck = "local ok1,m1=pcall(require,'websocket.server.sync'); if ok1 and m1 and type(m1.listen)=='function' then os.exit(0) end; local ok2,m2=pcall(require,'websocket.server_copas'); local ok3=pcall(require,'copas'); if ok2 and m2 and type(m2.listen)=='function' and ok3 then os.exit(0) end; os.exit(3)"
 & $lua -e $wsCheck
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "Missing websocket server module: websocket.server.sync"
+    Write-Host "Missing supported websocket server backend."
     Write-Host "Install it for the same Lua runtime used by this script (for example via LuaRocks)."
     Write-Host "Try: luarocks install websocket"
     Write-Host "If LuaRocks reports no results for your current Lua version, run:"
@@ -23,7 +23,8 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "  luarocks --lua-version=5.3 install websocket"
     Write-Host "If LuaRocks says 'Could not find Lua <version> in PATH', set the interpreter path first:"
     Write-Host "  luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe"
-    Write-Host 'Verify with: lua -e "require(""websocket.server.sync"")"'
+    Write-Host 'Verify one backend with: lua -e "require(""websocket.server.sync"")"'
+    Write-Host 'Or (lua-websockets): lua -e "require(""websocket.server_copas""); require(""copas"")"'
     exit 1
 }
 

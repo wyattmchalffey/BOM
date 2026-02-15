@@ -133,7 +133,9 @@ Replace `YOUR_IP` with your IPv4 address.
 - If you get “No results ... for your Lua version”, check supported versions: `luarocks install websocket --check-lua-versions`
 - Install for a Lua version you actually have (example): `luarocks --lua-version=5.3 install websocket`
 - If you get “Could not find Lua 5.3 in PATH”, set Lua path first: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`
-- Verify module visibility in the same shell: `lua -e "require('websocket.server.sync')"`
+- Verify backend module visibility in the same shell (either one works):
+  - `lua -e "require('websocket.server.sync')"`
+  - `lua -e "require('websocket.server_copas'); require('copas')"`
 - Start host again: `run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
 
 ### Players cannot connect

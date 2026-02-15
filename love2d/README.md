@@ -38,13 +38,15 @@ See [docs/MULTIPLAYER_TESTING.md](docs/MULTIPLAYER_TESTING.md) for replay and ho
 Websocket multiplayer depends on Lua websocket modules in **both** places below:
 
 1. **Client runtime (LÖVE app):** a module named `websocket` with `client.sync()` and a connection object that supports `connect`, `send`, and `receive`.
-2. **Host runtime (`lua` process):** a module named `websocket.server.sync` exposing `listen(host, port)`.
+2. **Host runtime (`lua` process):** either `websocket.server.sync` (`listen(host, port)`) **or** `websocket.server_copas` + `copas` (lua-websockets fallback).
 
 If either dependency is missing:
 - the client startup wiring falls back to local mode with an explicit reason, or
 - the host launcher exits with `websocket_server_module_not_found`.
 
-On Windows host startup, if you see `failed to start websocket host: websocket_server_module_not_found`, first try `luarocks install websocket`. If LuaRocks says no results for your current Lua, run `luarocks install websocket --check-lua-versions`, then install for a Lua version you actually have (for example `luarocks --lua-version=5.3 install websocket`). If LuaRocks reports `Could not find Lua <version> in PATH`, set it explicitly (example: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`) and retry. Then verify: `lua -e "require('websocket.server.sync')"`.
+On Windows host startup, if you see `failed to start websocket host: websocket_server_module_not_found`, first try `luarocks install websocket`. If LuaRocks says no results for your current Lua, run `luarocks install websocket --check-lua-versions`, then install for a Lua version you actually have (for example `luarocks --lua-version=5.3 install websocket`). If LuaRocks reports `Could not find Lua <version> in PATH`, set it explicitly (example: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`) and retry. Then verify with one of:
+- `lua -e "require('websocket.server.sync')"`
+- `lua -e "require('websocket.server_copas'); require('copas')"`
 
 ### Host process helper (LAN / online)
 
