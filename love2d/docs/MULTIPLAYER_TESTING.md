@@ -6,6 +6,19 @@ This guide covers practical test steps for the current multiplayer foundation.
 
 1. Lua 5.3+ installed and available as `lua`.
 2. (Optional) LÖVE 11.x for running the game client UI.
+3. For websocket-mode tests and runtime checks, install websocket Lua modules:
+   - client side: module `websocket` with `client.sync()`
+   - host side: module `websocket.server.sync` with `listen()`, or `websocket.server_copas` + `copas`
+
+## 0) Preflight multiplayer setup sanity check
+
+From repository root, confirm no obvious merge artifacts are present in docs/scripts:
+
+```bash
+rg -n "^(<<<<<<<|=======|>>>>>>>|@@ )" love2d
+```
+
+Expected output: no matches.
 
 ## 1) Run deterministic replay smoke test
 
