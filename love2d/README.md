@@ -1,4 +1,6 @@
-@@ -4,25 +4,101 @@ Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc
+# Battles of Masadoria (LÖVE 2D)
+
+Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc Food+Stone), turn-based worker assignment, and structure building.
 
 ## Run
 
@@ -20,11 +22,9 @@
 
 See [PROJECT_OUTLINE.md](PROJECT_OUTLINE.md) for the full MVP plan and file layout.
 
-
 ## Multiplayer migration testing
 
 See [docs/MULTIPLAYER_TESTING.md](docs/MULTIPLAYER_TESTING.md) for replay and host smoke-test steps.
-
 
 ## Runtime multiplayer environment variables
 
@@ -33,10 +33,20 @@ See [docs/MULTIPLAYER_TESTING.md](docs/MULTIPLAYER_TESTING.md) for replay and ho
 - `BOM_MATCH_ID`: optional match identifier override for local/headless setup.
 - `BOM_MULTIPLAYER_URL`: required for websocket mode (e.g. `ws://127.0.0.1:8080`).
 
-### Websocket provider note
+## Required runtime dependencies for websocket mode
 
-Websocket mode expects a runtime Lua module named `websocket` that exposes `client.sync()` and a connection with `connect/send/receive`. Startup now validates provider compatibility and falls back to local mode with an explicit reason when unavailable.
+Websocket multiplayer depends on Lua websocket modules in **both** places below:
 
+1. **Client runtime (LÖVE app):** a module named `websocket` with `client.sync()` and a connection object that supports `connect`, `send`, and `receive`.
+2. **Host runtime (`lua` process):** either `websocket.server.sync` (`listen(host, port)`) **or** `websocket.server_copas` + `copas` (lua-websockets fallback).
+
+If either dependency is missing:
+- the client startup wiring falls back to local mode with an explicit reason, or
+- the host launcher exits with `websocket_server_module_not_found`.
+
+On Windows host startup, if you see `failed to start websocket host: websocket_server_module_not_found`, first try `luarocks install websocket`. If LuaRocks says no results for your current Lua, run `luarocks install websocket --check-lua-versions`, then install for a Lua version you actually have (for example `luarocks --lua-version=5.3 install websocket`). If LuaRocks reports `Could not find Lua <version> in PATH`, set it explicitly (example: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`) and retry. Then verify with one of:
+- `lua -e "require('websocket.server.sync')"`
+- `lua -e "require('websocket.server_copas'); require('copas')"`
 
 ### Host process helper (LAN / online)
 
@@ -47,7 +57,6 @@ BOM_HOST=0.0.0.0 BOM_PORT=8080 lua love2d/scripts/run_websocket_host.lua
 ```
 
 Then point clients at `BOM_MULTIPLAYER_URL=ws://<host-ip>:8080`.
-
 
 ## Non-technical Windows guide
 
@@ -69,12 +78,16 @@ From the `love2d` folder:
 .\run_multiplayer.ps1 -Mode websocket -Url "ws://192.168.1.25:8080" -PlayerName "PlayerA" -MatchId "lan-test"
 ```
 
-### 2) Launch a websocket host from PowerShell
+### 2) Launch a websocket host
 
 From the `love2d` folder:
 
 ```powershell
+# PowerShell
 .\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
+
+# Command Prompt-safe wrapper (use this if `.ps1` opens in Notepad)
+run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
 ```
 
 ### 3) Build a distributable Windows folder
