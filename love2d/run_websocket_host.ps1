@@ -1,20 +1,37 @@
 param(
-    [string]$Host = "0.0.0.0",
+    [Alias("Host")]
+    [string]$BindHost = "0.0.0.0",
     [int]$Port = 8080,
     [string]$MatchId = ""
 )
 
 $lua = (Get-Command lua -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
 if (-not $lua) {
-    Write-Host "Lua not found in PATH. Install Lua 5.4+ and ensure 'lua' is available."
+    Write-Host "Lua not found in PATH. Install Lua and ensure 'lua' is available."
     exit 1
 }
 
-$env:BOM_HOST = $Host
+$wsCheck = "local ok, mod = pcall(require, 'websocket.server.sync'); if ok and mod and type(mod.listen) == 'function' then os.exit(0) else os.exit(3) end"
+& $lua -e $wsCheck
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Missing websocket server module: websocket.server.sync"
+    Write-Host "Install it for the same Lua runtime used by this script (for example via LuaRocks)."
+    Write-Host "Try: luarocks install websocket"
+    Write-Host "If LuaRocks reports no results for your current Lua version, run:"
+    Write-Host "  luarocks install websocket --check-lua-versions"
+    Write-Host "Then install for a Lua version you actually have installed (example uses 5.3):"
+    Write-Host "  luarocks --lua-version=5.3 install websocket"
+    Write-Host "If LuaRocks says 'Could not find Lua <version> in PATH', set the interpreter path first:"
+    Write-Host "  luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe"
+    Write-Host 'Verify with: lua -e "require(""websocket.server.sync"")"'
+    exit 1
+}
+
+$env:BOM_HOST = $BindHost
 $env:BOM_PORT = "$Port"
 if (-not [string]::IsNullOrWhiteSpace($MatchId)) { $env:BOM_MATCH_ID = $MatchId }
 
-Write-Host "Starting websocket host on $Host`:$Port"
+Write-Host "Starting websocket host on $BindHost`:$Port"
 if ($env:BOM_MATCH_ID) { Write-Host "BOM_MATCH_ID=$($env:BOM_MATCH_ID)" }
 
 & $lua "$PSScriptRoot\scripts\run_websocket_host.lua"
