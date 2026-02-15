@@ -46,15 +46,16 @@ function Install-Rock($rockName, $luaVersion) {
     return ($LASTEXITCODE -eq 0)
 }
 
-$installed = Install-Rock "websocket" $LuaVersion
+$installed = Install-Rock "lua-websockets" $LuaVersion
 if (-not $installed) {
-    Write-Host "Install of 'websocket' failed; trying lua-websockets fallback..."
-    $installed = Install-Rock "lua-websockets" $LuaVersion
+    Write-Host "Install of 'lua-websockets' failed; trying websocket backend..."
+    $installed = Install-Rock "websocket" $LuaVersion
 }
 
 if (-not $installed) {
     Write-Host "Could not install a websocket backend with LuaRocks."
-    Write-Host "Try: luarocks install websocket --check-lua-versions"
+    Write-Host "Try: luarocks install lua-websockets --check-lua-versions"
+    Write-Host "If websocket fails with Git repository errors, prefer lua-websockets."
     if ([string]::IsNullOrWhiteSpace($LuaVersion)) {
         Write-Host "Then re-run this script with -LuaVersion matching your installed Lua."
     }

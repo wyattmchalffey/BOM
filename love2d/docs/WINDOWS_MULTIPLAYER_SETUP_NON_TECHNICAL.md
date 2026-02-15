@@ -141,9 +141,10 @@ Replace `YOUR_IP` with your IPv4 address.
 
 ### “failed to start websocket host: websocket_server_module_not_found”
 - This means the websocket **server** Lua module is missing from your Lua install.
-- Install LuaRocks (if needed), then run: `luarocks install websocket`
-- If you get “No results ... for your Lua version”, check supported versions: `luarocks install websocket --check-lua-versions`
-- Install for a Lua version you actually have (example): `luarocks --lua-version=5.3 install websocket`
+- Install LuaRocks (if needed), then run: `luarocks install lua-websockets` (recommended)
+- If `luarocks install websocket` fails with Git clone/repository errors, use `lua-websockets` instead
+- If you get “No results ... for your Lua version”, check supported versions: `luarocks install lua-websockets --check-lua-versions`
+- Install for a Lua version you actually have (example): `luarocks --lua-version=5.3 install lua-websockets`
 - If you get “Could not find Lua 5.3 in PATH”, set Lua path first: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`
 - Verify backend module visibility in the same shell (either one works):
   - `lua -e "require('websocket.server.sync')"`

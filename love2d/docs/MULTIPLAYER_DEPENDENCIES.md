@@ -16,10 +16,16 @@ Use this checklist when setting up LAN/online multiplayer.
 
 ## Typical install commands (Windows PowerShell)
 
-From the `love2d` folder:
+From the `love2d` folder (recommended one-step installer):
 
 ```powershell
 .\install_multiplayer_dependencies.ps1
+```
+
+Manual fallback command:
+
+```powershell
+luarocks install lua-websockets
 ```
 
 If LuaRocks cannot find your Lua in PATH:
