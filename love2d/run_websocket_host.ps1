@@ -1,5 +1,6 @@
 param(
-    [string]$Host = "0.0.0.0",
+    [Alias("Host")]
+    [string]$BindHost = "0.0.0.0",
     [int]$Port = 8080,
     [string]$MatchId = ""
 )
@@ -10,11 +11,11 @@ if (-not $lua) {
     exit 1
 }
 
-$env:BOM_HOST = $Host
+$env:BOM_HOST = $BindHost
 $env:BOM_PORT = "$Port"
 if (-not [string]::IsNullOrWhiteSpace($MatchId)) { $env:BOM_MATCH_ID = $MatchId }
 
-Write-Host "Starting websocket host on $Host`:$Port"
+Write-Host "Starting websocket host on $BindHost`:$Port"
 if ($env:BOM_MATCH_ID) { Write-Host "BOM_MATCH_ID=$($env:BOM_MATCH_ID)" }
 
 & $lua "$PSScriptRoot\scripts\run_websocket_host.lua"
