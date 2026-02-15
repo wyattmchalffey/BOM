@@ -7,7 +7,7 @@ param(
 
 $lua = (Get-Command lua -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue)
 if (-not $lua) {
-    Write-Host "Lua not found in PATH. Install Lua 5.4+ and ensure 'lua' is available."
+    Write-Host "Lua not found in PATH. Install Lua and ensure 'lua' is available."
     exit 1
 }
 
@@ -16,8 +16,14 @@ $wsCheck = "local ok, mod = pcall(require, 'websocket.server.sync'); if ok and m
 if ($LASTEXITCODE -ne 0) {
     Write-Host "Missing websocket server module: websocket.server.sync"
     Write-Host "Install it for the same Lua runtime used by this script (for example via LuaRocks)."
-    Write-Host "Example: luarocks install websocket"
-    Write-Host 'Then verify with: lua -e "require(""websocket.server.sync"")"'
+    Write-Host "Try: luarocks install websocket"
+    Write-Host "If LuaRocks reports no results for your current Lua version, run:"
+    Write-Host "  luarocks install websocket --check-lua-versions"
+    Write-Host "Then install for a Lua version you actually have installed (example uses 5.3):"
+    Write-Host "  luarocks --lua-version=5.3 install websocket"
+    Write-Host "If LuaRocks says 'Could not find Lua <version> in PATH', set the interpreter path first:"
+    Write-Host "  luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe"
+    Write-Host 'Verify with: lua -e "require(""websocket.server.sync"")"'
     exit 1
 }
 

@@ -119,7 +119,7 @@ Replace `YOUR_IP` with your IPv4 address.
 - If it still fails, try PowerShell launch instead: `./run.ps1`.
 
 ### “Lua not found” when starting host
-- Install Lua 5.4+.
+- Install Lua (version depends on websocket module availability for your LuaRocks setup).
 - Ensure `lua` works in PowerShell (`lua -v`).
 
 ### “run_websocket_host.ps1 opens in Notepad”
@@ -130,6 +130,9 @@ Replace `YOUR_IP` with your IPv4 address.
 ### “failed to start websocket host: websocket_server_module_not_found”
 - This means the websocket **server** Lua module is missing from your Lua install.
 - Install LuaRocks (if needed), then run: `luarocks install websocket`
+- If you get “No results ... for your Lua version”, check supported versions: `luarocks install websocket --check-lua-versions`
+- Install for a Lua version you actually have (example): `luarocks --lua-version=5.3 install websocket`
+- If you get “Could not find Lua 5.3 in PATH”, set Lua path first: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`
 - Verify module visibility in the same shell: `lua -e "require('websocket.server.sync')"`
 - Start host again: `run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
 
