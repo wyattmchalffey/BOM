@@ -87,9 +87,20 @@ local function run_sync_host(service, host, port)
 
   print(string.format("websocket host listening on %s:%d (backend=websocket.server.sync)", host, port))
 
+  local connection_count = 0
   while true do
+    local prev_count = connection_count
     local step = server:step(100)
-    if not step.ok and step.reason ~= "connection_receive_failed" then
+    if server.connections then
+      connection_count = #server.connections
+    end
+    if connection_count ~= prev_count then
+      print(string.format("[host] active connections: %d", connection_count))
+    end
+    if step.meta and step.meta.handled then
+      print("[host] frame handled")
+    end
+    if not step.ok then
       io.stderr:write("host service step error: " .. tostring(step.reason) .. "\n")
     end
   end

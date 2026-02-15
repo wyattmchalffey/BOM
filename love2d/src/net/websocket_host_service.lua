@@ -26,6 +26,7 @@ function host_service.new(opts)
     provider = opts.server_provider,
     host = opts.host or "0.0.0.0",
     port = opts.port or 8080,
+    connections = {},
   }, host_service)
 end
 
@@ -51,26 +52,42 @@ function host_service:step(timeout_ms)
     return fail("service_not_started")
   end
 
-  local conn = self.listener:accept(timeout_ms)
-  if not conn then
-    return ok({ idle = true })
+  -- Use short accept timeout when we already have connections to poll,
+  -- otherwise block for the full timeout waiting for the first connection.
+  local accept_timeout = (#self.connections > 0) and 0 or timeout_ms
+  local conn = self.listener:accept(accept_timeout)
+  if conn then
+    table.insert(self.connections, conn)
   end
 
-  local frame = conn:receive_text(timeout_ms)
-  if not frame then
-    if conn.close then conn:close() end
-    return fail("connection_receive_failed")
+  -- Poll existing connections for incoming frames
+  local handled = false
+  local i = 1
+  while i <= #self.connections do
+    local c = self.connections[i]
+    local recv_ok, frame = pcall(c.receive_text, c, 0)
+
+    if not recv_ok then
+      -- Connection errored — remove it
+      if c.close then pcall(c.close, c) end
+      table.remove(self.connections, i)
+    elseif frame then
+      local response = self.frame_handler(frame)
+      local send_ok, _ = pcall(c.send_text, c, response)
+      if not send_ok then
+        if c.close then pcall(c.close, c) end
+        table.remove(self.connections, i)
+      else
+        handled = true
+        i = i + 1
+      end
+    else
+      -- No data yet, keep connection alive
+      i = i + 1
+    end
   end
 
-  local response = self.frame_handler(frame)
-  local send_ok = conn:send_text(response)
-  if send_ok == false then
-    if conn.close then conn:close() end
-    return fail("connection_send_failed")
-  end
-
-  if conn.close then conn:close() end
-  return ok({ handled = true })
+  return ok({ handled = handled, idle = not handled })
 end
 
 return host_service

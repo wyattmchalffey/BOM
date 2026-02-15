@@ -1,3 +1,7 @@
+-- Add system Lua module paths so LÖVE can find websocket modules
+package.path = package.path .. ";C:/Program Files (x86)/Lua/5.1/lua/?.lua;C:/Program Files (x86)/Lua/5.1/lua/?/init.lua"
+package.cpath = package.cpath .. ";C:/Program Files (x86)/Lua/5.1/clibs/?.dll"
+
 -- Battles of Masadoria — Entry point
 -- Delegates load/update/draw/input to current screen state.
 --
@@ -36,7 +40,9 @@ local function build_authoritative_adapter_from_env()
 
   if mode == "websocket" then
     opts.url = getenv("BOM_MULTIPLAYER_URL")
+    print("[multiplayer] resolving websocket provider...")
     local resolved = websocket_provider.resolve()
+    print("[multiplayer] resolved: ok=" .. tostring(resolved.ok) .. " reason=" .. tostring(resolved.reason) .. " source=" .. tostring(resolved.source))
     if resolved.ok then
       opts.websocket_provider = resolved.provider
     else
@@ -44,7 +50,10 @@ local function build_authoritative_adapter_from_env()
     end
   end
 
+  print("[multiplayer] building adapter, mode=" .. tostring(mode) .. " url=" .. tostring(opts.url))
   local built = runtime_multiplayer.build(opts)
+  print("[multiplayer] build result: ok=" .. tostring(built.ok) .. " reason=" .. tostring(built.reason))
+
   if not built.ok then
     return nil, built.reason
   end
@@ -92,6 +101,7 @@ end
 function love.load()
   math.randomseed(os.time())
   local adapter, err = build_authoritative_adapter_from_env()
+  print("[multiplayer] adapter=" .. tostring(adapter) .. " err=" .. tostring(err))
   current_state = GameState.new({ authoritative_adapter = adapter })
   if err then
     print("[multiplayer] disabled: " .. tostring(err))

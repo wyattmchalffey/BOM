@@ -61,12 +61,21 @@ function GameState.new(opts)
     reconnect_pending = false,
     reconnect_attempts = 0,
     reconnect_timer = 0,
+    sync_poll_timer = 0,
+    sync_poll_interval = 1.0,
   }, GameState)
   -- Cache the hand cursor once
   self._cursor_hand = love.mouse.getSystemCursor("hand")
 
   if self.authoritative_adapter then
+    print("[multiplayer] attempting adapter:connect()...")
     local connected = self.authoritative_adapter:connect()
+    print("[multiplayer] connect result: ok=" .. tostring(connected.ok) .. " reason=" .. tostring(connected.reason))
+    if connected.meta then
+      for k,v in pairs(connected.meta) do
+        print("[multiplayer]   meta." .. tostring(k) .. "=" .. tostring(v))
+      end
+    end
     if connected.ok then
       local remote_state = self.authoritative_adapter:get_state()
       if remote_state then
@@ -296,6 +305,23 @@ function GameState:update(dt)
   else
     self.tooltip_target = nil
     self.tooltip_timer = 0
+  end
+
+  -- Poll server for state updates so we see the other player's actions
+  if self.authoritative_adapter and not self.reconnect_pending then
+    self.sync_poll_timer = self.sync_poll_timer - dt
+    if self.sync_poll_timer <= 0 then
+      self.sync_poll_timer = self.sync_poll_interval
+      local snap = self.authoritative_adapter:sync_snapshot()
+      if snap.ok then
+        local remote_state = self.authoritative_adapter:get_state()
+        if remote_state then
+          self.game_state = remote_state
+        end
+      elseif should_trigger_reconnect(snap.reason) then
+        self:_queue_reconnect(snap.reason)
+      end
+    end
   end
 
   if self.reconnect_pending and self.authoritative_adapter then
