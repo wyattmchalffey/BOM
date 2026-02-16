@@ -10,6 +10,53 @@ local json = require("src.net.json_codec")
 
 local relay_host_bridge = {}
 
+local function is_local_host(url)
+  local host = url:match("^wss?://([^/:]+)")
+  if not host then
+    return false
+  end
+
+  host = host:lower()
+  return host == "localhost" or host == "127.0.0.1" or host == "::1"
+end
+
+local function should_retry_insecure(url, err)
+  if type(url) ~= "string" or not url:match("^wss://") then
+    return false
+  end
+
+  if not is_local_host(url) then
+    return false
+  end
+
+  local message = tostring(err or "")
+  if message:find("Invalid Sec%-Websocket%-Accept", 1, false) then
+    return true
+  end
+  if message:find("Websocket Handshake failed", 1, true) then
+    return true
+  end
+  return false
+end
+
+local function connect_with_local_retry(provider, relay_url)
+  local ok_connect, conn = pcall(provider.connect, relay_url, {})
+  if ok_connect and conn then
+    return true, conn, relay_url
+  end
+
+  if should_retry_insecure(relay_url, conn) then
+    local insecure_url = relay_url:gsub("^wss://", "ws://", 1)
+    local ok_retry, retry_conn = pcall(provider.connect, insecure_url, {})
+    if ok_retry and retry_conn then
+      return true, retry_conn, insecure_url
+    end
+    return false, retry_conn, insecure_url
+  end
+
+  return false, conn, relay_url
+end
+
 -- Relay control message types (not game frames)
 local RELAY_TYPES = {
   room_created = true,
@@ -52,9 +99,13 @@ function relay_host_bridge.connect(opts)
   end
 
   -- Connect to relay
-  local ok_connect, conn = pcall(resolved.provider.connect, relay_url, {})
-  if not ok_connect or not conn then
+  local connected, conn, connected_url = connect_with_local_retry(resolved.provider, relay_url)
+  if not connected or not conn then
     return { ok = false, reason = "relay_connect_failed: " .. tostring(conn) }
+  end
+
+  if connected_url ~= relay_url then
+    print("[relay_host_bridge] local relay does not support TLS, retried with " .. connected_url)
   end
 
   -- Read the first message: should be room_created
