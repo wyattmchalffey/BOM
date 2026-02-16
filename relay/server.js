@@ -32,6 +32,27 @@ const server = http.createServer((_req, res) => {
 
 const wss = new WebSocketServer({ server, perMessageDeflate: false });
 
+// Compatibility: some Lua websocket clients incorrectly look up the accept
+// header as "Sec-Websocket-Accept" (lower-case "s" in Socket) instead of the
+// RFC casing "Sec-WebSocket-Accept". Mirror the header so both casings exist.
+wss.on("headers", (headers) => {
+  let acceptValue = null;
+  for (const header of headers) {
+    const match = /^Sec-WebSocket-Accept:\s*(.+)$/i.exec(header);
+    if (match) {
+      acceptValue = match[1];
+      break;
+    }
+  }
+
+  if (!acceptValue) return;
+
+  const hasLegacyCasing = headers.some((header) => /^Sec-Websocket-Accept:/i.test(header));
+  if (!hasLegacyCasing) {
+    headers.push(`Sec-Websocket-Accept: ${acceptValue}`);
+  }
+});
+
 wss.on("connection", (ws, req) => {
   const path = req.url;
   if (path === "/host") {
