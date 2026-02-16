@@ -24,6 +24,7 @@ local BUTTON_COLORS = {
   { 0.22, 0.35, 0.65 },  -- blue  (Local)
   { 0.55, 0.18, 0.18 },  -- red   (Host)
   { 0.18, 0.50, 0.28 },  -- green (Join)
+  { 0.15, 0.55, 0.25 },  -- bright green (Play Online)
 }
 local BUTTON_HOVER = 0.15
 
@@ -47,7 +48,7 @@ function MenuState.new(callbacks)
     player_name = "Player",
     host_port = "12345",
     relay_url = "",           -- empty = LAN mode
-    server_url = "ws://localhost:12345",
+    server_url = "wss://bom-hbfv.onrender.com",
     room_code_input = "",     -- join screen: room code for relay
     active_field = "name",    -- "name" | "port" | "relay" | "url" | "room_code"
     cursor_blink = 0,
@@ -70,9 +71,10 @@ end
 -- Button definitions per screen
 local function main_buttons()
   return {
-    { label = "Local Game",  color = BUTTON_COLORS[1] },
-    { label = "Host Game",   color = BUTTON_COLORS[2] },
-    { label = "Join Game",   color = BUTTON_COLORS[3] },
+    { label = "Play Online",  color = BUTTON_COLORS[4] },
+    { label = "Local Game",   color = BUTTON_COLORS[1] },
+    { label = "Host Game",    color = BUTTON_COLORS[2] },
+    { label = "Join Game",    color = BUTTON_COLORS[3] },
   }
 end
 
@@ -417,6 +419,38 @@ local function validate_ws_url(url)
   return url:match("^wss?://") ~= nil
 end
 
+function MenuState:do_play_online()
+  local name = self:get_player_name()
+  local url = "wss://bom-hbfv.onrender.com/host"
+
+  -- Resolve websocket provider
+  local resolved = websocket_provider.resolve()
+  if not resolved.ok then
+    self.connect_error = "Websocket unavailable: " .. tostring(resolved.reason)
+    return
+  end
+
+  self.screen = "connecting"
+  self.connect_error = nil
+
+  local ok_call, built = pcall(runtime_multiplayer.build, {
+    mode = "websocket",
+    url = url,
+    player_name = name,
+    websocket_provider = resolved.provider,
+  })
+
+  if not ok_call then
+    self.connect_error = "Connection failed: " .. tostring(built)
+    return
+  end
+  if built.ok then
+    self.start_game({ authoritative_adapter = built.adapter })
+  else
+    self.connect_error = "Connection failed: " .. tostring(built.reason)
+  end
+end
+
 function MenuState:do_host()
   local name = self:get_player_name()
   local port = tonumber(self.host_port)
@@ -517,14 +551,17 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
     for i = 1, #btns do
       if point_in_rect(x, y, rects[i]) then
         if i == 1 then
+          -- Play Online
+          self:do_play_online()
+        elseif i == 2 then
           -- Local Game
           self.start_game({ authoritative_adapter = nil })
-        elseif i == 2 then
+        elseif i == 3 then
           -- Host Game
           self.screen = "host_setup"
           self.active_field = "name"
           self.connect_error = nil
-        elseif i == 3 then
+        elseif i == 4 then
           -- Join Game
           self.screen = "join_setup"
           self.active_field = "name"

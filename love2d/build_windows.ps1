@@ -49,6 +49,27 @@ Copy-Item (Join-Path $loveDir "*.dll") $outRoot -Force -ErrorAction SilentlyCont
 Copy-Item (Join-Path $loveDir "license.txt") $outRoot -Force -ErrorAction SilentlyContinue
 Copy-Item (Join-Path $loveDir "changes.txt") $outRoot -Force -ErrorAction SilentlyContinue
 
+# Copy 64-bit SSL DLLs for wss:// support
+$ssl64Dir = Join-Path $projectRoot "build\ssl64"
+$sslDll = Join-Path $ssl64Dir "ssl.dll"
+if (Test-Path $sslDll) {
+    Copy-Item $sslDll $outRoot -Force
+    Write-Host "Copied ssl.dll (64-bit LuaSec)"
+} else {
+    Write-Warning "ssl.dll not found at $sslDll — run build_ssl64.ps1 first for wss:// support"
+}
+
+$openSSLBin = "C:\Program Files\OpenSSL-Win64\bin"
+foreach ($dll in @("libssl-3-x64.dll", "libcrypto-3-x64.dll")) {
+    $src = Join-Path $openSSLBin $dll
+    if (Test-Path $src) {
+        Copy-Item $src $outRoot -Force
+        Write-Host "Copied $dll"
+    } else {
+        Write-Warning "$dll not found at $src"
+    }
+}
+
 Remove-Item -Recurse -Force $tempDir
 Write-Host "Windows build output created in: $outRoot"
 Write-Host "- $loveFile"

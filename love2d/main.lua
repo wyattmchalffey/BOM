@@ -1,6 +1,6 @@
--- Add system Lua module paths so LÖVE can find websocket modules
-package.path = package.path .. ";C:/Program Files (x86)/Lua/5.1/lua/?.lua;C:/Program Files (x86)/Lua/5.1/lua/?/init.lua"
-package.cpath = package.cpath .. ";C:/Program Files (x86)/Lua/5.1/clibs/?.dll"
+-- Native DLLs (ssl.dll etc.) sit next to the .exe
+local exe_dir = love.filesystem.getSourceBaseDirectory():gsub("\\", "/")
+package.cpath = package.cpath .. ";" .. exe_dir .. "/?.dll"
 
 -- Battles of Masadoria — Entry point
 -- Delegates load/update/draw/input to current screen state.
