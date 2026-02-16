@@ -67,6 +67,12 @@ If LuaRocks cannot find your Lua version in PATH, pass both version + exe path:
 .\install_multiplayer_dependencies.ps1 -LuaVersion 5.3 -LuaExePath "C:\path\to\lua.exe"
 ```
 
+If you have multiple Lua installs, verify with the same executable path (not just `lua` from PATH):
+
+```powershell
+& "C:\path\to\lua.exe" -e "require('ssl'); print('ssl ok')"
+```
+
 If `luasec` fails with `OPENSSL_DIR` / `openssl/ssl.h` errors, install OpenSSL and pass its path:
 
 ```powershell

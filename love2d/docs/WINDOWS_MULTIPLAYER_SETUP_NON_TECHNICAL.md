@@ -167,6 +167,8 @@ Replace `YOUR_IP` with your IPv4 address.
      - or install directly: `$env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win32"; luarocks install luasec`
 - Verify in the same shell:
   - `lua -e "require('ssl'); print('ssl ok')"`
+  - If you have multiple Lua installs, verify with the same exe you passed to the installer:
+    - `& "C:\Program Files\Lua\5.1\lua.exe" -e "require('ssl'); print('ssl ok')"`
 - Then retry Host/Join with your `wss://...onrender.com` relay URL.
 
 ### Players cannot connect
