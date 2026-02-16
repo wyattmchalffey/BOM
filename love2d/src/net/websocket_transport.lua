@@ -17,6 +17,20 @@ local function identity(v)
   return v
 end
 
+local RELAY_CONTROL_TYPES = {
+  room_created = true,
+  peer_joined = true,
+  peer_disconnected = true,
+  joined = true,
+  error = true,
+}
+
+local function is_relay_control_message(decoded)
+  return type(decoded) == "table"
+    and type(decoded.type) == "string"
+    and RELAY_CONTROL_TYPES[decoded.type] == true
+end
+
 function transport.new(opts)
   opts = opts or {}
   return setmetatable({
@@ -54,14 +68,33 @@ function transport:_request(op, payload, player_index)
     return self:_error(match_id, "transport_send_failed", { error_message = tostring(send_err) })
   end
 
-  local receive_ok, raw_response = pcall(self.client.receive, self.client, self.timeout_ms)
-  if not receive_ok then
-    return self:_error(match_id, "transport_receive_failed", { error_message = tostring(raw_response) })
+  local response = nil
+  for _ = 1, 8 do
+    local receive_ok, raw_response = pcall(self.client.receive, self.client, self.timeout_ms)
+    if not receive_ok then
+      return self:_error(match_id, "transport_receive_failed", { error_message = tostring(raw_response) })
+    end
+    if raw_response == nil then
+      return self:_error(match_id, "transport_timeout")
+    end
+
+    local decode_ok, decoded = pcall(self.decode, raw_response)
+    if not decode_ok then
+      return self:_error(match_id, "transport_decode_failed", { error_message = tostring(decoded) })
+    end
+
+    if is_relay_control_message(decoded) then
+      -- Relay may send control envelopes (for example "joined") before the
+      -- host's protocol response; skip and wait for the next frame.
+      response = nil
+    else
+      response = decoded
+      break
+    end
   end
 
-  local decode_ok, response = pcall(self.decode, raw_response)
-  if not decode_ok then
-    return self:_error(match_id, "transport_decode_failed", { error_message = tostring(response) })
+  if response == nil then
+    return self:_error(match_id, "transport_no_protocol_response")
   end
 
   if type(response) ~= "table" then
