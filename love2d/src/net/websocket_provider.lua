@@ -104,6 +104,13 @@ local function try_raw_ws_fallback(url, opts, original_err)
   return conn, nil
 end
 
+local default_ssl_params = {
+  mode = "client",
+  protocol = "any",
+  options = {"all", "no_sslv2", "no_sslv3", "no_tlsv1"},
+  verify = "none",
+}
+
 local function from_websocket_module(websocket)
   if not websocket or not websocket.client or not websocket.client.sync then
     return nil, "unsupported_websocket_module"
@@ -112,7 +119,7 @@ local function from_websocket_module(websocket)
   return {
     connect = function(url, opts)
       local conn = websocket.client.sync()
-      local ok_connect, err = conn:connect(url)
+      local ok_connect, err = conn:connect(url, nil, default_ssl_params)
       if not ok_connect then
         local raw_conn, raw_err = try_raw_ws_fallback(url, opts, err)
         if raw_conn then
@@ -126,7 +133,7 @@ local function from_websocket_module(websocket)
         if should_retry_secure(url, err) then
           local secure_url = url:gsub("^ws://", "wss://", 1)
           local secure_conn = websocket.client.sync()
-          local ok_secure, secure_err = secure_conn:connect(secure_url)
+          local ok_secure, secure_err = secure_conn:connect(secure_url, nil, default_ssl_params)
           if ok_secure then
             local normalized_secure, normalize_secure_err = normalize_connection({
               send_text = function(_, message) return secure_conn:send(message) end,
