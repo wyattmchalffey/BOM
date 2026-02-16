@@ -151,6 +151,21 @@ Replace `YOUR_IP` with your IPv4 address.
   - `lua -e "require('websocket.server_copas'); require('copas')"`
 - Start host again: `run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
 
+### “attempt to index upvalue 'ssl' (a nil value)” when using `wss://`
+- This means your Lua runtime is missing SSL support (`ssl` / LuaSec).
+- Install LuaSec in the same Lua version used by the game:
+  - `luarocks install luasec`
+  - (or versioned) `luarocks --lua-version=5.3 install luasec`
+- If install fails with `openssl/ssl.h` / `OPENSSL_DIR` errors:
+  1. Install OpenSSL (Win64), for example with winget:
+     - `winget install ShiningLight.OpenSSL.Light`
+  2. Re-run installer with OpenSSL path:
+     - `./install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win64"`
+     - or install directly: `$env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win64"; luarocks install luasec`
+- Verify in the same shell:
+  - `lua -e "require('ssl'); print('ssl ok')"`
+- Then retry Host/Join with your `wss://...onrender.com` relay URL.
+
 ### Players cannot connect
 - Confirm host used `run_websocket_host.ps1` and kept the window open.
 - Confirm everyone uses the same port (`8080` unless changed).

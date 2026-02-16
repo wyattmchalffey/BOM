@@ -1,6 +1,7 @@
 param(
     [string]$LuaVersion = "",
-    [string]$LuaExePath = ""
+    [string]$LuaExePath = "",
+    [string]$OpenSSLDir = ""
 )
 
 function Test-Command($name) {
@@ -17,6 +18,12 @@ if (-not (Test-Command "luarocks")) {
     Write-Host "LuaRocks is not available in PATH."
     Write-Host "Install LuaRocks first, then re-run this script."
     exit 1
+}
+
+
+if (-not [string]::IsNullOrWhiteSpace($OpenSSLDir)) {
+    $env:OPENSSL_DIR = $OpenSSLDir
+    Write-Host "Using OPENSSL_DIR=$OpenSSLDir"
 }
 
 if (-not [string]::IsNullOrWhiteSpace($LuaExePath)) {
@@ -62,6 +69,30 @@ if (-not $installed) {
     exit 1
 }
 
+
+$sslInstalled = Install-Rock "luasec" $LuaVersion
+if (-not $sslInstalled) {
+    Write-Host "Install of 'luasec' failed; wss:// connections may not work."
+    Write-Host "LuaSec builds require OpenSSL headers/libs (for example openssl/ssl.h)."
+    Write-Host "If you see OPENSSL errors, install OpenSSL and re-run with:"
+    Write-Host '  .\install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win64"'
+}
+
+Write-Host "Verifying SSL module for wss:// support..."
+& lua -e "local ok,ssl=pcall(require,'ssl'); if ok and ssl then os.exit(0) else os.exit(2) end"
+$hasSsl = ($LASTEXITCODE -eq 0)
+if (-not $hasSsl) {
+    Write-Host "SSL module verification failed (require('ssl'))."
+    Write-Host "wss:// relay URLs require LuaSec."
+    if ([string]::IsNullOrWhiteSpace($LuaVersion)) {
+        Write-Host "Try: luarocks install luasec"
+    }
+    else {
+        Write-Host "Try: luarocks --lua-version=$LuaVersion install luasec"
+    }
+    Write-Host "If you get OPENSSL_DIR/openssl/ssl.h errors, install OpenSSL and pass -OpenSSLDir."
+}
+
 Write-Host "Verifying client websocket module..."
 & lua -e "local ok = pcall(require, 'websocket'); if ok then os.exit(0) else os.exit(2) end"
 if ($LASTEXITCODE -ne 0) {
@@ -77,5 +108,11 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "Multiplayer websocket dependencies installed and verified."
+if ($hasSsl) {
+    Write-Host "Multiplayer websocket dependencies installed and verified (including wss:// support)."
+}
+else {
+    Write-Host "Multiplayer websocket dependencies installed for ws://."
+    Write-Host "Install LuaSec to enable wss:// connections."
+}
 Write-Host "You can now run: .\\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId \"match1\""
