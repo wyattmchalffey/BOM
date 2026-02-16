@@ -55,7 +55,11 @@ function GameState.new(opts)
       rules_version = config.rules_version,
       content_version = config.content_version,
     }), -- deterministic command stream for replay/network migration
+    return_to_menu = opts.return_to_menu,
     authoritative_adapter = opts.authoritative_adapter,
+    server_step = opts.server_step,         -- optional: pump websocket server each frame
+    server_cleanup = opts.server_cleanup,   -- optional: stop server on exit
+    room_code = opts.room_code,             -- relay room code (nil for LAN/local)
     multiplayer_error = nil,
     multiplayer_status = nil,
     reconnect_pending = false,
@@ -331,6 +335,14 @@ function GameState:update(dt)
     end
   end
 
+  -- Pump websocket server to accept connections and handle remote frames
+  if self.server_step then
+    local ok_step, step_err = pcall(self.server_step)
+    if not ok_step then
+      print("[hosted_game] server step error: " .. tostring(step_err))
+    end
+  end
+
   if self.turn_banner_timer > 0 then
     self.turn_banner_timer = self.turn_banner_timer - dt
     if self.turn_banner_timer < 0 then self.turn_banner_timer = 0 end
@@ -507,7 +519,11 @@ function GameState:draw()
 
   if self.multiplayer_status then
     local status_font = util.get_font(11)
-    local text_w = status_font:getWidth(self.multiplayer_status)
+    local status_text = self.multiplayer_status
+    if self.room_code then
+      status_text = status_text .. "  |  Room: " .. self.room_code
+    end
+    local text_w = status_font:getWidth(status_text)
     local pad_x, pad_y = 10, 6
     local box_w = math.min(420, text_w + pad_x * 2)
     local box_h = status_font:getHeight() + pad_y * 2
@@ -515,7 +531,7 @@ function GameState:draw()
     love.graphics.rectangle("fill", 12, 12, box_w, box_h, 6, 6)
     love.graphics.setColor(1, 1, 1, 0.92)
     love.graphics.setFont(status_font)
-    love.graphics.printf(self.multiplayer_status, 12 + pad_x, 12 + pad_y, box_w - pad_x * 2, "left")
+    love.graphics.printf(status_text, 12 + pad_x, 12 + pad_y, box_w - pad_x * 2, "left")
   end
 
   -- Vignette: drawn last, on top of everything
@@ -851,10 +867,21 @@ function GameState:keypressed(key, scancode, isrepeat)
     end
     return
   end
-  -- Escape to deselect hand card
-  if key == "escape" and self.hand_selected_index then
-    self.hand_selected_index = nil
-    return
+  -- Escape to deselect hand card, or return to menu
+  if key == "escape" then
+    if self.hand_selected_index then
+      self.hand_selected_index = nil
+      return
+    end
+    if self.return_to_menu then
+      if self.server_cleanup then
+        pcall(self.server_cleanup)
+        self.server_step = nil
+        self.server_cleanup = nil
+      end
+      self.return_to_menu()
+      return
+    end
   end
 end
 

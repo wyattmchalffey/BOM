@@ -12,10 +12,15 @@ package.cpath = package.cpath .. ";C:/Program Files (x86)/Lua/5.1/clibs/?.dll"
 -- so all game code transparently uses logical coordinates.
 
 local GameState = require("src.state.game")
+local MenuState = require("src.state.menu")
 local runtime_multiplayer = require("src.net.runtime_multiplayer")
 local websocket_provider = require("src.net.websocket_provider")
 
 local current_state
+
+-- Closures for state transitions (assigned in love.load)
+local start_game
+local return_to_menu
 
 local function getenv(name)
   if love.system and love.system.getOS then
@@ -100,12 +105,35 @@ end
 
 function love.load()
   math.randomseed(os.time())
-  local adapter, err = build_authoritative_adapter_from_env()
-  print("[multiplayer] adapter=" .. tostring(adapter) .. " err=" .. tostring(err))
-  current_state = GameState.new({ authoritative_adapter = adapter })
-  if err then
-    print("[multiplayer] disabled: " .. tostring(err))
+
+  -- State transition closures
+  start_game = function(opts)
+    opts = opts or {}
+    opts.return_to_menu = return_to_menu
+    current_state = GameState.new(opts)
   end
+
+  return_to_menu = function()
+    love.mouse.setCursor() -- reset cursor
+    current_state = MenuState.new({
+      start_game = start_game,
+      return_to_menu = return_to_menu,
+    })
+  end
+
+  -- Env var bypass: if BOM_MULTIPLAYER_MODE is set, skip menu
+  local mode = getenv("BOM_MULTIPLAYER_MODE")
+  if mode and mode ~= "" then
+    local adapter, err = build_authoritative_adapter_from_env()
+    print("[multiplayer] adapter=" .. tostring(adapter) .. " err=" .. tostring(err))
+    current_state = GameState.new({ authoritative_adapter = adapter, return_to_menu = return_to_menu })
+    if err then
+      print("[multiplayer] disabled: " .. tostring(err))
+    end
+  else
+    return_to_menu()
+  end
+
   update_scale()
 end
 
