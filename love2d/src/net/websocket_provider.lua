@@ -30,6 +30,16 @@ local function normalize_connection(conn)
   return nil, "unsupported_connection_contract"
 end
 
+local function is_local_host(url)
+  local host = type(url) == "string" and url:match("^wss?://([^/:]+)") or nil
+  if not host then
+    return false
+  end
+
+  host = host:lower()
+  return host == "localhost" or host == "127.0.0.1" or host == "::1" or host == "[::1]"
+end
+
 local function should_try_raw_ws(url, err)
   if type(url) ~= "string" or not url:match("^ws://") then
     return false
@@ -40,6 +50,37 @@ local function should_try_raw_ws(url, err)
     return true
   end
   if message:find("Websocket Handshake failed", 1, true) then
+    return true
+  end
+  return false
+end
+
+local function should_retry_secure(url, err)
+  if type(url) ~= "string" or not url:match("^ws://") then
+    return false
+  end
+
+  if is_local_host(url) then
+    return false
+  end
+
+  local message = tostring(err or "")
+  if message:find("HTTP/1%.1 301", 1, false) then
+    return true
+  end
+  if message:find("Moved Permanently", 1, true) then
+    return true
+  end
+
+  return false
+end
+
+local function looks_like_ssl_runtime_error(err)
+  local message = tostring(err or "")
+  if message:find("attempt to index upvalue 'ssl'", 1, true) then
+    return true
+  end
+  if message:find("module 'ssl' not found", 1, true) then
     return true
   end
   return false
@@ -82,8 +123,38 @@ local function from_websocket_module(websocket)
           return normalized_raw
         end
 
+        if should_retry_secure(url, err) then
+          local secure_url = url:gsub("^ws://", "wss://", 1)
+          local secure_conn = websocket.client.sync()
+          local ok_secure, secure_err = secure_conn:connect(secure_url)
+          if ok_secure then
+            local normalized_secure, normalize_secure_err = normalize_connection({
+              send_text = function(_, message) return secure_conn:send(message) end,
+              receive_text = function(_, timeout_ms)
+                -- websocket.client.sync receive() is blocking; ignore timeout here.
+                return secure_conn:receive()
+              end,
+              close = function(_) return secure_conn:close() end,
+            })
+            if not normalized_secure then
+              error(normalize_secure_err)
+            end
+            return normalized_secure
+          end
+
+          if looks_like_ssl_runtime_error(secure_err) then
+            error("secure_websocket_unavailable: install LuaSec/ssl for wss:// support (" .. tostring(secure_err) .. ")")
+          end
+
+          error(tostring(err or "websocket_connect_failed") .. " (secure_retry_failed: " .. tostring(secure_err) .. ")")
+        end
+
         if raw_err then
           error(tostring(err or "websocket_connect_failed") .. " (raw_fallback_failed: " .. tostring(raw_err) .. ")")
+        end
+
+        if looks_like_ssl_runtime_error(err) then
+          error("secure_websocket_unavailable: install LuaSec/ssl for wss:// support (" .. tostring(err) .. ")")
         end
 
         error(err or "websocket_connect_failed")

@@ -32,6 +32,8 @@ If you use `relay/Dockerfile` while building from repo root, Docker `COPY packag
 - No custom env vars are required.
 - Render provides `PORT` automatically; the relay reads `process.env.PORT` and falls back to `8080` locally.
 
+Client note: Render endpoints are HTTPS/TLS, so game clients should use `wss://...` and need Lua SSL support (`require('ssl')` / LuaSec) on the client machine.
+
 ## Deploy to Oracle Cloud Free Tier
 
 ### 1. Provision a VM

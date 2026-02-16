@@ -62,6 +62,26 @@ if (-not $installed) {
     exit 1
 }
 
+
+$sslInstalled = Install-Rock "luasec" $LuaVersion
+if (-not $sslInstalled) {
+    Write-Host "Install of 'luasec' failed; wss:// connections may not work."
+}
+
+Write-Host "Verifying SSL module for wss:// support..."
+& lua -e "local ok,ssl=pcall(require,'ssl'); if ok and ssl then os.exit(0) else os.exit(2) end"
+$hasSsl = ($LASTEXITCODE -eq 0)
+if (-not $hasSsl) {
+    Write-Host "SSL module verification failed (require('ssl'))."
+    Write-Host "wss:// relay URLs require LuaSec."
+    if ([string]::IsNullOrWhiteSpace($LuaVersion)) {
+        Write-Host "Try: luarocks install luasec"
+    }
+    else {
+        Write-Host "Try: luarocks --lua-version=$LuaVersion install luasec"
+    }
+}
+
 Write-Host "Verifying client websocket module..."
 & lua -e "local ok = pcall(require, 'websocket'); if ok then os.exit(0) else os.exit(2) end"
 if ($LASTEXITCODE -ne 0) {
@@ -77,5 +97,11 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "Multiplayer websocket dependencies installed and verified."
+if ($hasSsl) {
+    Write-Host "Multiplayer websocket dependencies installed and verified (including wss:// support)."
+}
+else {
+    Write-Host "Multiplayer websocket dependencies installed for ws://."
+    Write-Host "Install LuaSec to enable wss:// connections."
+}
 Write-Host "You can now run: .\\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId \"match1\""

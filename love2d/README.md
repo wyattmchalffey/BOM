@@ -46,6 +46,9 @@ If either dependency is missing:
 - the client startup wiring falls back to local mode with an explicit reason, or
 - the host launcher exits with `websocket_server_module_not_found`.
 
+For secure hosted relays (`wss://...`, for example Render), the client Lua runtime also needs `ssl` (LuaSec). Verify with:
+- `lua -e "require('ssl')"`
+
 On Windows host startup, if you see `failed to start websocket host: websocket_server_module_not_found`, first try `luarocks install lua-websockets` (recommended). If you instead try `luarocks install websocket` and get a Git clone/repository error, switch to `lua-websockets`. If LuaRocks says no results for your current Lua, run `luarocks install lua-websockets --check-lua-versions`, then install for a Lua version you actually have (for example `luarocks --lua-version=5.3 install lua-websockets`). If LuaRocks reports `Could not find Lua <version> in PATH`, set it explicitly (example: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`) and retry. Then verify with one of:
 - `lua -e "require('websocket.server.sync')"`
 - `lua -e "require('websocket.server_copas'); require('copas')"`
