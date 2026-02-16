@@ -129,6 +129,35 @@ function Install-LuaSec($luaVersion) {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Install-LuaSec($luaVersion) {
+    $args = @()
+    if (-not [string]::IsNullOrWhiteSpace($luaVersion)) {
+        $args += "--lua-version=$luaVersion"
+    }
+    $args += "install"
+    $args += "luasec"
+
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_DIR)) {
+        $args += "OPENSSL_DIR=$($env:OPENSSL_DIR)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_INCDIR)) {
+        $args += "OPENSSL_INCDIR=$($env:OPENSSL_INCDIR)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_LIBDIR)) {
+        $args += "OPENSSL_LIBDIR=$($env:OPENSSL_LIBDIR)"
+    }
+
+    Write-Host "Installing rock: luasec"
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_INCDIR)) {
+        Write-Host "  with OPENSSL_INCDIR=$($env:OPENSSL_INCDIR)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_LIBDIR)) {
+        Write-Host "  with OPENSSL_LIBDIR=$($env:OPENSSL_LIBDIR)"
+    }
+    & luarocks @args
+    return ($LASTEXITCODE -eq 0)
+}
+
 $installed = Install-Rock "lua-websockets" $LuaVersion
 if (-not $installed) {
     Write-Host "Install of 'lua-websockets' failed; trying websocket backend..."
