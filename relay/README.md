@@ -9,6 +9,24 @@ npm install
 node server.js          # listens on :8080
 ```
 
+## Deploy to Render (Docker)
+
+If your repo root is `BOM/` and the relay lives in `relay/`, use a **Render Web Service** with Docker and set:
+
+- **Root Directory**: `relay`
+- **Dockerfile Path**: `Dockerfile`
+
+If you leave **Root Directory** blank (repo root), set:
+
+- **Dockerfile Path**: `relay/Dockerfile`
+
+Do **not** set Dockerfile path to just `relay` (that is a directory, which causes `failed to read dockerfile ... relay: is a directory`).
+
+### Render environment variables
+
+- No custom env vars are required.
+- Render provides `PORT` automatically; the relay reads `process.env.PORT` and falls back to `8080` locally.
+
 ## Deploy to Oracle Cloud Free Tier
 
 ### 1. Provision a VM
@@ -31,6 +49,12 @@ sudo usermod -aG docker $USER
 ```bash
 # Copy relay/ directory to the VM, then:
 cd relay
+./scripts/deploy_oracle.sh
+```
+
+(Manual equivalent, if preferred)
+
+```bash
 docker build -t bom-relay .
 docker run -d --restart unless-stopped -p 8080:8080 --name bom-relay bom-relay
 ```
@@ -43,6 +67,13 @@ curl http://<VM_PUBLIC_IP>:8080
 ```
 
 ### 5. Use in Game
+
+If your VM has a host firewall enabled (for example `ufw`), allow the relay port there too:
+
+```bash
+sudo ufw allow 8080/tcp
+```
+
 
 - Host Game: set Relay URL to `ws://<VM_PUBLIC_IP>:8080`
 - Join Game: set Relay URL to `ws://<VM_PUBLIC_IP>:8080` and enter the room code shown on the host screen
