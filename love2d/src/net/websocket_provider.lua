@@ -21,10 +21,46 @@ local function normalize_connection(conn)
     return {
       send = function(_, message) return conn:send_text(message) end,
       receive = function(_, timeout_ms) return conn:receive_text(timeout_ms) end,
+      close = conn.close and function(_)
+        return conn:close()
+      end or nil,
     }
   end
 
   return nil, "unsupported_connection_contract"
+end
+
+local function should_try_raw_ws(url, err)
+  if type(url) ~= "string" or not url:match("^ws://") then
+    return false
+  end
+
+  local message = tostring(err or "")
+  if message:find("Invalid Sec%-Websocket%-Accept", 1, false) then
+    return true
+  end
+  if message:find("Websocket Handshake failed", 1, true) then
+    return true
+  end
+  return false
+end
+
+local function try_raw_ws_fallback(url, opts, original_err)
+  if not should_try_raw_ws(url, original_err) then
+    return nil, nil
+  end
+
+  local ok_raw, raw_ws_client = pcall(require, "src.net.raw_ws_client")
+  if not ok_raw or not raw_ws_client or type(raw_ws_client.connect) ~= "function" then
+    return nil, nil
+  end
+
+  local conn, raw_err = raw_ws_client.connect(url, opts)
+  if not conn then
+    return nil, raw_err or "raw_ws_connect_failed"
+  end
+
+  return conn, nil
 end
 
 local function from_websocket_module(websocket)
@@ -33,16 +69,30 @@ local function from_websocket_module(websocket)
   end
 
   return {
-    connect = function(url, _opts)
+    connect = function(url, opts)
       local conn = websocket.client.sync()
       local ok_connect, err = conn:connect(url)
       if not ok_connect then
+        local raw_conn, raw_err = try_raw_ws_fallback(url, opts, err)
+        if raw_conn then
+          local normalized_raw, normalize_raw_err = normalize_connection(raw_conn)
+          if not normalized_raw then
+            error(normalize_raw_err)
+          end
+          return normalized_raw
+        end
+
+        if raw_err then
+          error(tostring(err or "websocket_connect_failed") .. " (raw_fallback_failed: " .. tostring(raw_err) .. ")")
+        end
+
         error(err or "websocket_connect_failed")
       end
 
       local normalized, normalize_err = normalize_connection({
         send_text = function(_, message) return conn:send(message) end,
         receive_text = function(_, _timeout_ms) return conn:receive() end,
+        close = function(_) return conn:close() end,
       })
       if not normalized then
         error(normalize_err)
