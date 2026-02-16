@@ -87,6 +87,23 @@ function Get-LuaRocksBaseArgs($luaVersion) {
     return $args
 }
 
+if (-not [string]::IsNullOrWhiteSpace($LuaExePath) -and [string]::IsNullOrWhiteSpace($LuaVersion)) {
+    Write-Host "When -LuaExePath is set, also pass -LuaVersion (for example -LuaVersion 5.3)."
+    exit 1
+}
+
+
+function Get-LuaRocksBaseArgs($luaVersion) {
+    $args = @()
+    if (-not [string]::IsNullOrWhiteSpace($luaVersion)) {
+        $args += "--lua-version=$luaVersion"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LuaDir)) {
+        $args += "--lua-dir=$LuaDir"
+    }
+    return $args
+}
+
 function Install-Rock($rockName, $luaVersion) {
     $args = Get-LuaRocksBaseArgs $luaVersion
     $args += "install"
