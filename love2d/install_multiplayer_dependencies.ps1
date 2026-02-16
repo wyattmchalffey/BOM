@@ -1,6 +1,7 @@
 param(
     [string]$LuaVersion = "",
-    [string]$LuaExePath = ""
+    [string]$LuaExePath = "",
+    [string]$OpenSSLDir = ""
 )
 
 function Test-Command($name) {
@@ -17,6 +18,12 @@ if (-not (Test-Command "luarocks")) {
     Write-Host "LuaRocks is not available in PATH."
     Write-Host "Install LuaRocks first, then re-run this script."
     exit 1
+}
+
+
+if (-not [string]::IsNullOrWhiteSpace($OpenSSLDir)) {
+    $env:OPENSSL_DIR = $OpenSSLDir
+    Write-Host "Using OPENSSL_DIR=$OpenSSLDir"
 }
 
 if (-not [string]::IsNullOrWhiteSpace($LuaExePath)) {
@@ -66,6 +73,9 @@ if (-not $installed) {
 $sslInstalled = Install-Rock "luasec" $LuaVersion
 if (-not $sslInstalled) {
     Write-Host "Install of 'luasec' failed; wss:// connections may not work."
+    Write-Host "LuaSec builds require OpenSSL headers/libs (for example openssl/ssl.h)."
+    Write-Host "If you see OPENSSL errors, install OpenSSL and re-run with:"
+    Write-Host '  .\install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win64"'
 }
 
 Write-Host "Verifying SSL module for wss:// support..."
@@ -80,6 +90,7 @@ if (-not $hasSsl) {
     else {
         Write-Host "Try: luarocks --lua-version=$LuaVersion install luasec"
     }
+    Write-Host "If you get OPENSSL_DIR/openssl/ssl.h errors, install OpenSSL and pass -OpenSSLDir."
 }
 
 Write-Host "Verifying client websocket module..."
