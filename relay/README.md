@@ -11,16 +11,21 @@ node server.js          # listens on :8080
 
 ## Deploy to Render (Docker)
 
-If your repo root is `BOM/` and the relay lives in `relay/`, use a **Render Web Service** with Docker and set:
+For the least-friction setup, use the repository-root `Dockerfile` (added for Render compatibility):
+
+- **Root Directory**: *(leave blank)*
+- **Dockerfile Path**: `Dockerfile`
+
+This root Dockerfile copies `relay/package.json` and `relay/server.js`, so it works even when Render builds from repo root.
+
+Alternative (subdirectory build) also works:
 
 - **Root Directory**: `relay`
 - **Dockerfile Path**: `Dockerfile`
 
-If you leave **Root Directory** blank (repo root), set:
-
-- **Dockerfile Path**: `relay/Dockerfile`
-
 Do **not** set Dockerfile path to just `relay` (that is a directory, which causes `failed to read dockerfile ... relay: is a directory`).
+
+If you use `relay/Dockerfile` while building from repo root, Docker `COPY package.json` / `COPY server.js` will fail because those files are inside `relay/`.
 
 ### Render environment variables
 
