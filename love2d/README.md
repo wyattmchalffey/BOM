@@ -80,6 +80,8 @@ If `luasec` fails with `OPENSSL_DIR` / `openssl/ssl.h` errors, install OpenSSL a
 ```
 
 Use `OpenSSL-Win32` for 32-bit Lua installs (for example Lua under `Program Files (x86)`), and `OpenSSL-Win64` for 64-bit Lua installs.
+If LuaRocks build logs show `'cl' is not recognized`, rerun from a Visual Studio Developer shell (x86 Native Tools for Lua 5.1 x86).
+If `ssl51.dll` loads with `The specified procedure could not be found`, remove stale `ssl51.dll` and reinstall LuaSec with matching OpenSSL runtime DLLs on PATH.
 
 ### Host process helper (LAN / online)
 

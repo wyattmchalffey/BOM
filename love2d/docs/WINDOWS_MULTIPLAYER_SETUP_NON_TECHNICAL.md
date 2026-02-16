@@ -162,13 +162,16 @@ Replace `YOUR_IP` with your IPv4 address.
   2. Match OpenSSL bitness to your Lua runtime:
      - Lua in `C:\Program Files (x86)\...` is usually **32-bit** → use `OpenSSL-Win32`
      - Lua in `C:\Program Files\...` is usually **64-bit** → use `OpenSSL-Win64`
-  3. Re-run installer with OpenSSL path:
+  3. Make sure you run install commands from a Visual Studio Developer shell:
+     - If you see `'cl' is not recognized`, open **x86 Native Tools Command Prompt for VS** (for Lua 5.1 x86) and rerun.
+  4. Re-run installer with OpenSSL path:
      - `./install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win32"`
      - or install directly: `$env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win32"; luarocks install luasec`
 - Verify in the same shell:
   - `lua -e "require('ssl'); print('ssl ok')"`
+- If you get `ssl51.dll ... The specified procedure could not be found`, delete old `ssl51.dll`, ensure OpenSSL DLLs are on PATH for the same bitness, then reinstall LuaSec.
   - If you have multiple Lua installs, verify with the same exe you passed to the installer:
-    - `& "C:\Program Files\Lua\5.1\lua.exe" -e "require('ssl'); print('ssl ok')"`
+    - `& "C:\Program Files (x86)\Lua\5.1\lua.exe" -e "require('ssl'); print('ssl ok')"`
 - Then retry Host/Join with your `wss://...onrender.com` relay URL.
 
 ### Players cannot connect

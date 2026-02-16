@@ -87,6 +87,23 @@ function Get-LuaRocksBaseArgs($luaVersion) {
     return $args
 }
 
+if (-not [string]::IsNullOrWhiteSpace($LuaExePath) -and [string]::IsNullOrWhiteSpace($LuaVersion)) {
+    Write-Host "When -LuaExePath is set, also pass -LuaVersion (for example -LuaVersion 5.3)."
+    exit 1
+}
+
+
+function Get-LuaRocksBaseArgs($luaVersion) {
+    $args = @()
+    if (-not [string]::IsNullOrWhiteSpace($luaVersion)) {
+        $args += "--lua-version=$luaVersion"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($LuaDir)) {
+        $args += "--lua-dir=$LuaDir"
+    }
+    return $args
+}
+
 function Install-Rock($rockName, $luaVersion) {
     $args = Get-LuaRocksBaseArgs $luaVersion
     $args += "install"
@@ -129,35 +146,6 @@ function Install-LuaSec($luaVersion) {
     return ($LASTEXITCODE -eq 0)
 }
 
-function Install-LuaSec($luaVersion) {
-    $args = @()
-    if (-not [string]::IsNullOrWhiteSpace($luaVersion)) {
-        $args += "--lua-version=$luaVersion"
-    }
-    $args += "install"
-    $args += "luasec"
-
-    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_DIR)) {
-        $args += "OPENSSL_DIR=$($env:OPENSSL_DIR)"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_INCDIR)) {
-        $args += "OPENSSL_INCDIR=$($env:OPENSSL_INCDIR)"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_LIBDIR)) {
-        $args += "OPENSSL_LIBDIR=$($env:OPENSSL_LIBDIR)"
-    }
-
-    Write-Host "Installing rock: luasec"
-    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_INCDIR)) {
-        Write-Host "  with OPENSSL_INCDIR=$($env:OPENSSL_INCDIR)"
-    }
-    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_LIBDIR)) {
-        Write-Host "  with OPENSSL_LIBDIR=$($env:OPENSSL_LIBDIR)"
-    }
-    & luarocks @args
-    return ($LASTEXITCODE -eq 0)
-}
-
 $installed = Install-Rock "lua-websockets" $LuaVersion
 if (-not $installed) {
     Write-Host "Install of 'lua-websockets' failed; trying websocket backend..."
@@ -175,7 +163,18 @@ if (-not $installed) {
 }
 
 
-$sslInstalled = Install-LuaSec $LuaVersion
+$canBuildLuaSec = Test-Command "cl"
+if (-not $canBuildLuaSec) {
+    Write-Host "MSVC compiler 'cl' was not found in this shell."
+    Write-Host "Open 'x86 Native Tools Command Prompt for VS' (or run vcvarsall.bat x86) before installing LuaSec for Lua 5.1 x86."
+}
+
+if ($canBuildLuaSec) {
+    $sslInstalled = Install-LuaSec $LuaVersion
+}
+else {
+    $sslInstalled = $false
+}
 if (-not $sslInstalled) {
     Write-Host "Install of 'luasec' failed; wss:// connections may not work."
     Write-Host "LuaSec builds require OpenSSL headers/libs (for example openssl/ssl.h)."
@@ -197,6 +196,7 @@ if (-not $hasSsl) {
         Write-Host "Try: luarocks --lua-version=$LuaVersion install luasec"
     }
     Write-Host "If you get OPENSSL_DIR/openssl/ssl.h errors, install OpenSSL and pass -OpenSSLDir."
+    Write-Host "If you get 'The specified procedure could not be found' from ssl51.dll, ensure OpenSSL DLL bitness/version matches LuaSec build and remove stale ssl51.dll before reinstalling."
 }
 
 Write-Host "Verifying client websocket module..."
