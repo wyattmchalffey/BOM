@@ -70,8 +70,10 @@ If LuaRocks cannot find your Lua version in PATH, pass both version + exe path:
 If `luasec` fails with `OPENSSL_DIR` / `openssl/ssl.h` errors, install OpenSSL and pass its path:
 
 ```powershell
-.\install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win64"
+.\install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win32"
 ```
+
+Use `OpenSSL-Win32` for 32-bit Lua installs (for example Lua under `Program Files (x86)`), and `OpenSSL-Win64` for 64-bit Lua installs.
 
 ### Host process helper (LAN / online)
 

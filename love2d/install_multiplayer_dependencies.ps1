@@ -1,7 +1,9 @@
 param(
     [string]$LuaVersion = "",
     [string]$LuaExePath = "",
-    [string]$OpenSSLDir = ""
+    [string]$OpenSSLDir = "",
+    [string]$OpenSSLIncDir = "",
+    [string]$OpenSSLLibDir = ""
 )
 
 function Test-Command($name) {
@@ -24,6 +26,34 @@ if (-not (Test-Command "luarocks")) {
 if (-not [string]::IsNullOrWhiteSpace($OpenSSLDir)) {
     $env:OPENSSL_DIR = $OpenSSLDir
     Write-Host "Using OPENSSL_DIR=$OpenSSLDir"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($OpenSSLIncDir)) {
+    $env:OPENSSL_INCDIR = $OpenSSLIncDir
+    Write-Host "Using OPENSSL_INCDIR=$OpenSSLIncDir"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($OpenSSLLibDir)) {
+    $env:OPENSSL_LIBDIR = $OpenSSLLibDir
+    Write-Host "Using OPENSSL_LIBDIR=$OpenSSLLibDir"
+}
+
+if ([string]::IsNullOrWhiteSpace($env:OPENSSL_INCDIR) -and -not [string]::IsNullOrWhiteSpace($env:OPENSSL_DIR)) {
+    $env:OPENSSL_INCDIR = Join-Path $env:OPENSSL_DIR "include"
+}
+
+if ([string]::IsNullOrWhiteSpace($env:OPENSSL_LIBDIR) -and -not [string]::IsNullOrWhiteSpace($env:OPENSSL_DIR)) {
+    $libCandidates = @(
+        (Join-Path $env:OPENSSL_DIR "lib\VC\x64\MD"),
+        (Join-Path $env:OPENSSL_DIR "lib\VC\x86\MD"),
+        (Join-Path $env:OPENSSL_DIR "lib")
+    )
+    foreach ($candidate in $libCandidates) {
+        if (Test-Path $candidate) {
+            $env:OPENSSL_LIBDIR = $candidate
+            break
+        }
+    }
 }
 
 if (-not [string]::IsNullOrWhiteSpace($LuaExePath)) {
@@ -53,6 +83,35 @@ function Install-Rock($rockName, $luaVersion) {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Install-LuaSec($luaVersion) {
+    $args = @()
+    if (-not [string]::IsNullOrWhiteSpace($luaVersion)) {
+        $args += "--lua-version=$luaVersion"
+    }
+    $args += "install"
+    $args += "luasec"
+
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_DIR)) {
+        $args += "OPENSSL_DIR=$($env:OPENSSL_DIR)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_INCDIR)) {
+        $args += "OPENSSL_INCDIR=$($env:OPENSSL_INCDIR)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_LIBDIR)) {
+        $args += "OPENSSL_LIBDIR=$($env:OPENSSL_LIBDIR)"
+    }
+
+    Write-Host "Installing rock: luasec"
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_INCDIR)) {
+        Write-Host "  with OPENSSL_INCDIR=$($env:OPENSSL_INCDIR)"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($env:OPENSSL_LIBDIR)) {
+        Write-Host "  with OPENSSL_LIBDIR=$($env:OPENSSL_LIBDIR)"
+    }
+    & luarocks @args
+    return ($LASTEXITCODE -eq 0)
+}
+
 $installed = Install-Rock "lua-websockets" $LuaVersion
 if (-not $installed) {
     Write-Host "Install of 'lua-websockets' failed; trying websocket backend..."
@@ -70,12 +129,13 @@ if (-not $installed) {
 }
 
 
-$sslInstalled = Install-Rock "luasec" $LuaVersion
+$sslInstalled = Install-LuaSec $LuaVersion
 if (-not $sslInstalled) {
     Write-Host "Install of 'luasec' failed; wss:// connections may not work."
     Write-Host "LuaSec builds require OpenSSL headers/libs (for example openssl/ssl.h)."
-    Write-Host "If you see OPENSSL errors, install OpenSSL and re-run with:"
-    Write-Host '  .\install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win64"'
+    Write-Host "If you see OPENSSL errors, install OpenSSL matching your Lua bitness and re-run with:"
+    Write-Host '  .\install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win32"'
+    Write-Host '  (or Win64 path if your Lua is 64-bit)'
 }
 
 Write-Host "Verifying SSL module for wss:// support..."

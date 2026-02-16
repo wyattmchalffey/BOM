@@ -159,9 +159,12 @@ Replace `YOUR_IP` with your IPv4 address.
 - If install fails with `openssl/ssl.h` / `OPENSSL_DIR` errors:
   1. Install OpenSSL (Win64), for example with winget:
      - `winget install ShiningLight.OpenSSL.Light`
-  2. Re-run installer with OpenSSL path:
-     - `./install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win64"`
-     - or install directly: `$env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win64"; luarocks install luasec`
+  2. Match OpenSSL bitness to your Lua runtime:
+     - Lua in `C:\Program Files (x86)\...` is usually **32-bit** → use `OpenSSL-Win32`
+     - Lua in `C:\Program Files\...` is usually **64-bit** → use `OpenSSL-Win64`
+  3. Re-run installer with OpenSSL path:
+     - `./install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win32"`
+     - or install directly: `$env:OPENSSL_DIR="C:\Program Files\OpenSSL-Win32"; luarocks install luasec`
 - Verify in the same shell:
   - `lua -e "require('ssl'); print('ssl ok')"`
 - Then retry Host/Join with your `wss://...onrender.com` relay URL.
