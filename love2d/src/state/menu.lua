@@ -1,10 +1,8 @@
 -- Main menu state: title screen with Local / Host / Join options.
--- Internal state machine: "main", "browse", "host_setup", "join_setup", "connecting"
+-- Internal state machine: "main", "browse", "connecting"
 
 local util = require("src.ui.util")
 local runtime_multiplayer = require("src.net.runtime_multiplayer")
-local hosted_game = require("src.net.hosted_game")
-local websocket_provider = require("src.net.websocket_provider")
 local threaded_relay = require("src.net.threaded_relay")
 local headless_host_service = require("src.net.headless_host_service")
 local authoritative_client_game = require("src.net.authoritative_client_game")
@@ -13,6 +11,9 @@ local websocket_transport = require("src.net.websocket_transport")
 local json = require("src.net.json_codec")
 local textures = require("src.fx.textures")
 local room_list_fetcher = require("src.net.room_list_fetcher")
+local sound = require("src.fx.sound")
+local settings = require("src.settings")
+local factions_data = require("src.data.factions")
 
 local MenuState = {}
 MenuState.__index = MenuState
@@ -23,22 +24,14 @@ local GOLD = { 0.92, 0.78, 0.35 }
 local WHITE = { 0.92, 0.92, 0.96 }
 local DIM = { 0.55, 0.55, 0.65 }
 local ERROR_COLOR = { 0.95, 0.35, 0.35 }
-local INPUT_BG = { 0.12, 0.12, 0.18 }
-local INPUT_BORDER = { 0.3, 0.3, 0.4 }
-local INPUT_ACTIVE_BORDER = { 0.5, 0.65, 1.0 }
-
 local BUTTON_COLORS = {
-  { 0.22, 0.35, 0.65 },  -- blue  (Local)
-  { 0.55, 0.18, 0.18 },  -- red   (Host)
-  { 0.18, 0.50, 0.28 },  -- green (Join)
-  { 0.15, 0.55, 0.25 },  -- bright green (Play Online)
+  { 0.15, 0.55, 0.25 },  -- green (Play Online)
+  { 0.30, 0.33, 0.45 },  -- gray-blue (Settings)
 }
 local BUTTON_HOVER = 0.15
 
 local BUTTON_W = 360
 local BUTTON_H = 60
-local INPUT_W = 400
-local INPUT_H = 40
 
 function MenuState.new(callbacks)
   callbacks = callbacks or {}
@@ -46,33 +39,26 @@ function MenuState.new(callbacks)
     start_game = callbacks.start_game,
     return_to_menu = callbacks.return_to_menu,
 
-    screen = "main",          -- "main" | "host_setup" | "join_setup" | "connecting"
-    hover_button = nil,       -- index of hovered button (1-based)
+    screen = "main",          -- "main" | "browse" | "connecting"
+    hover_button = nil,
     cursor_hand = love.mouse.getSystemCursor("hand"),
     current_cursor = "arrow",
 
-    -- Input fields
-    player_name = "Player",
-    host_port = "12345",
-    relay_url = "",           -- empty = LAN mode
-    server_url = "wss://bom-hbfv.onrender.com",
-    room_code_input = "",     -- join screen: room code for relay
-    active_field = "name",    -- "name" | "port" | "relay" | "url" | "room_code"
+    player_name = callbacks.player_name or "Player",
     cursor_blink = 0,
 
-    -- Host status
-    host_status = nil,        -- nil | "listening" | "local_only" | "error"
-    host_status_msg = nil,
-    host_room_code = nil,     -- room code from relay (displayed on host screen)
+    -- Settings screen state
+    settings_volume = settings.values.sfx_volume,
+    settings_fullscreen = settings.values.fullscreen,
+    settings_dragging_slider = false,
 
-    -- Websocket availability
-    ws_available = nil,       -- nil = not checked, true/false
-    ws_reason = nil,
+    -- Deck builder screen state
+    deckbuilder_hover = nil,
 
     -- Connection state
     connect_error = nil,
 
-    -- Threaded relay for Play Online
+    -- Threaded relay for Play Online (host)
     _relay = nil,
     _relay_service = nil,
 
@@ -82,8 +68,8 @@ function MenuState.new(callbacks)
     -- Browse screen
     _room_fetcher = nil,
     browse_scroll = 0,
-    browse_hover_join = nil,   -- index of hovered join button in room list
-    browse_hover_host = false, -- hovering the "Host Game" button
+    browse_hover_join = nil,
+    browse_hover_host = false,
   }, MenuState)
   return self
 end
@@ -91,22 +77,10 @@ end
 -- Button definitions per screen
 local function main_buttons()
   return {
-    { label = "Play Online",  color = BUTTON_COLORS[4] },
-    { label = "Local Game",   color = BUTTON_COLORS[1] },
-    { label = "Host Game",    color = BUTTON_COLORS[2] },
-    { label = "Join Game",    color = BUTTON_COLORS[3] },
-  }
-end
-
-local function host_buttons()
-  return {
-    { label = "Start Hosting", color = BUTTON_COLORS[2] },
-  }
-end
-
-local function join_buttons(ws_ok)
-  return {
-    { label = "Connect", color = BUTTON_COLORS[3], disabled = not ws_ok },
+    { label = "Play Online",  color = BUTTON_COLORS[1] },
+    { label = "Deck Builder", color = BUTTON_COLORS[2] },
+    { label = "Settings",     color = BUTTON_COLORS[2] },
+    { label = "Quit",         color = { 0.55, 0.15, 0.15 } },
   }
 end
 
@@ -132,19 +106,6 @@ local function button_rects(buttons)
     }
   end
   return rects
-end
-
-local function input_rect(index)
-  local gw = love.graphics.getWidth()
-  local gh = love.graphics.getHeight()
-  local x = (gw - INPUT_W) / 2
-  local base_y = gh / 2 - 60
-  return {
-    x = x,
-    y = base_y + (index - 1) * (INPUT_H + 40),
-    w = INPUT_W,
-    h = INPUT_H,
-  }
 end
 
 local function back_button_rect()
@@ -188,45 +149,6 @@ local function draw_button(r, label, color, hovered, disabled)
   love.graphics.printf(label, r.x, r.y + (r.h - font:getHeight()) / 2, r.w, "center")
 end
 
-local function draw_input_field(r, label, value, active, cursor_visible)
-  local font = util.get_font(14)
-  love.graphics.setFont(font)
-
-  -- Label above
-  love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
-  love.graphics.print(label, r.x, r.y - 22)
-
-  -- Background
-  love.graphics.setColor(INPUT_BG[1], INPUT_BG[2], INPUT_BG[3], 1)
-  love.graphics.rectangle("fill", r.x, r.y, r.w, r.h, 6, 6)
-
-  -- Border
-  if active then
-    love.graphics.setColor(INPUT_ACTIVE_BORDER[1], INPUT_ACTIVE_BORDER[2], INPUT_ACTIVE_BORDER[3], 1)
-  else
-    love.graphics.setColor(INPUT_BORDER[1], INPUT_BORDER[2], INPUT_BORDER[3], 1)
-  end
-  love.graphics.setLineWidth(active and 2 or 1)
-  love.graphics.rectangle("line", r.x, r.y, r.w, r.h, 6, 6)
-  love.graphics.setLineWidth(1)
-
-  -- Text
-  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
-  local pad = 10
-  love.graphics.setScissor(r.x + pad, r.y, r.w - pad * 2, r.h)
-  love.graphics.print(value, r.x + pad, r.y + (r.h - font:getHeight()) / 2)
-  love.graphics.setScissor()
-
-  -- Blinking cursor
-  if active and cursor_visible then
-    local text_w = font:getWidth(value)
-    local cx = r.x + pad + text_w + 1
-    local cy = r.y + 6
-    love.graphics.setColor(INPUT_ACTIVE_BORDER[1], INPUT_ACTIVE_BORDER[2], INPUT_ACTIVE_BORDER[3], 1)
-    love.graphics.rectangle("fill", cx, cy, 2, r.h - 12)
-  end
-end
-
 local function draw_back_button(hovered)
   local r = back_button_rect()
   if hovered then
@@ -239,6 +161,191 @@ local function draw_back_button(hovered)
   local font = util.get_font(14)
   love.graphics.setFont(font)
   love.graphics.printf("< Back", r.x, r.y + (r.h - font:getHeight()) / 2, r.w, "center")
+end
+
+-- Settings screen layout constants
+local SETTINGS_LEFT = 340
+local SETTINGS_LABEL_W = 160
+local SETTINGS_INPUT_X = SETTINGS_LEFT + SETTINGS_LABEL_W + 20
+local SETTINGS_ROW_Y_START = 180
+local SETTINGS_ROW_H = 60
+local SETTINGS_NAME_W = 300
+local SETTINGS_NAME_H = 40
+local SETTINGS_SLIDER_W = 300
+local SETTINGS_SLIDER_H = 8
+local SETTINGS_KNOB_R = 12
+local SETTINGS_TOGGLE_W = 80
+local SETTINGS_TOGGLE_H = 36
+
+function MenuState:settings_slider_rect()
+  local y = SETTINGS_ROW_Y_START + SETTINGS_ROW_H + (SETTINGS_ROW_H - SETTINGS_SLIDER_H) / 2
+  return { x = SETTINGS_INPUT_X, y = y, w = SETTINGS_SLIDER_W, h = SETTINGS_SLIDER_H }
+end
+
+function MenuState:draw_settings()
+  local gw = love.graphics.getWidth()
+  draw_back_button(self.hover_button == -1)
+
+  -- Title
+  local title_font = util.get_title_font(32)
+  love.graphics.setFont(title_font)
+  love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
+  love.graphics.printf("Settings", 0, 30, gw, "center")
+
+  local label_font = util.get_title_font(20)
+  local value_font = util.get_font(16)
+
+  -- Row 1: Player Name
+  local row_y = SETTINGS_ROW_Y_START
+  love.graphics.setFont(label_font)
+  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+  love.graphics.print("Player Name", SETTINGS_LEFT, row_y + (SETTINGS_NAME_H - label_font:getHeight()) / 2)
+
+  -- Name input box
+  local name_r = { x = SETTINGS_INPUT_X, y = row_y, w = SETTINGS_NAME_W, h = SETTINGS_NAME_H }
+  love.graphics.setColor(0.12, 0.12, 0.18, 1)
+  love.graphics.rectangle("fill", name_r.x, name_r.y, name_r.w, name_r.h, 6, 6)
+  love.graphics.setColor(1, 1, 1, 0.2)
+  love.graphics.rectangle("line", name_r.x, name_r.y, name_r.w, name_r.h, 6, 6)
+
+  love.graphics.setFont(value_font)
+  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+  local display_name = self.player_name
+  -- Blinking cursor
+  local show_cursor = (math.floor(self.cursor_blink * 2) % 2 == 0)
+  if show_cursor then
+    display_name = display_name .. "|"
+  end
+  love.graphics.print(display_name, name_r.x + 10, name_r.y + (name_r.h - value_font:getHeight()) / 2)
+
+  -- Row 2: SFX Volume
+  row_y = SETTINGS_ROW_Y_START + SETTINGS_ROW_H
+  love.graphics.setFont(label_font)
+  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+  love.graphics.print("SFX Volume", SETTINGS_LEFT, row_y + (SETTINGS_ROW_H - label_font:getHeight()) / 2)
+
+  -- Slider track
+  local sr = self:settings_slider_rect()
+  love.graphics.setColor(0.2, 0.2, 0.28, 1)
+  love.graphics.rectangle("fill", sr.x, sr.y, sr.w, sr.h, 4, 4)
+
+  -- Filled portion
+  local fill_w = sr.w * self.settings_volume
+  love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 0.8)
+  love.graphics.rectangle("fill", sr.x, sr.y, fill_w, sr.h, 4, 4)
+
+  -- Knob
+  local knob_x = sr.x + fill_w
+  local knob_y = sr.y + sr.h / 2
+  love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
+  love.graphics.circle("fill", knob_x, knob_y, SETTINGS_KNOB_R)
+  love.graphics.setColor(1, 1, 1, 0.3)
+  love.graphics.circle("line", knob_x, knob_y, SETTINGS_KNOB_R)
+
+  -- Volume percentage
+  love.graphics.setFont(value_font)
+  love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
+  love.graphics.print(math.floor(self.settings_volume * 100 + 0.5) .. "%", sr.x + sr.w + 16, sr.y - 6)
+
+  -- Row 3: Fullscreen
+  row_y = SETTINGS_ROW_Y_START + SETTINGS_ROW_H * 2
+  love.graphics.setFont(label_font)
+  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+  love.graphics.print("Fullscreen", SETTINGS_LEFT, row_y + (SETTINGS_TOGGLE_H - label_font:getHeight()) / 2)
+
+  -- Toggle button
+  local tog_r = { x = SETTINGS_INPUT_X, y = row_y, w = SETTINGS_TOGGLE_W, h = SETTINGS_TOGGLE_H }
+  if self.settings_fullscreen then
+    love.graphics.setColor(0.15, 0.55, 0.25, 1)
+  else
+    love.graphics.setColor(0.25, 0.25, 0.32, 1)
+  end
+  love.graphics.rectangle("fill", tog_r.x, tog_r.y, tog_r.w, tog_r.h, 6, 6)
+  love.graphics.setColor(1, 1, 1, 0.2)
+  love.graphics.rectangle("line", tog_r.x, tog_r.y, tog_r.w, tog_r.h, 6, 6)
+
+  love.graphics.setFont(value_font)
+  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+  love.graphics.printf(self.settings_fullscreen and "On" or "Off", tog_r.x, tog_r.y + (tog_r.h - value_font:getHeight()) / 2, tog_r.w, "center")
+end
+
+-- Deck builder constants
+local DECK_FACTIONS = { "Human", "Orc" }
+local DECK_CARD_W = 260
+local DECK_CARD_H = 160
+local DECK_CARD_GAP = 40
+
+function MenuState:draw_deckbuilder()
+  local gw = love.graphics.getWidth()
+  draw_back_button(self.hover_button == -1)
+
+  -- Title
+  local title_font = util.get_title_font(32)
+  love.graphics.setFont(title_font)
+  love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
+  love.graphics.printf("Deck Builder", 0, 30, gw, "center")
+
+  -- Subtitle
+  local sub_font = util.get_font(14)
+  love.graphics.setFont(sub_font)
+  love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
+  love.graphics.printf("Choose your faction", 0, 70, gw, "center")
+
+  -- Faction cards
+  local total_w = #DECK_FACTIONS * DECK_CARD_W + (#DECK_FACTIONS - 1) * DECK_CARD_GAP
+  local start_x = (gw - total_w) / 2
+  local card_y = 140
+
+  local label_font = util.get_title_font(26)
+  local detail_font = util.get_font(13)
+
+  for i, fname in ipairs(DECK_FACTIONS) do
+    local fdata = factions_data[fname]
+    local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
+    local selected = (settings.values.faction == fname)
+    local hovered = (self.deckbuilder_hover == i)
+
+    -- Card background
+    if selected then
+      love.graphics.setColor(fdata.color[1] * 0.35, fdata.color[2] * 0.35, fdata.color[3] * 0.35, 1)
+    elseif hovered then
+      love.graphics.setColor(0.18, 0.18, 0.28, 0.9)
+    else
+      love.graphics.setColor(0.14, 0.14, 0.22, 0.7)
+    end
+    love.graphics.rectangle("fill", cx, card_y, DECK_CARD_W, DECK_CARD_H, 10, 10)
+
+    -- Border (faction color if selected, subtle otherwise)
+    if selected then
+      love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], 0.9)
+      love.graphics.setLineWidth(3)
+    else
+      love.graphics.setColor(1, 1, 1, hovered and 0.25 or 0.1)
+      love.graphics.setLineWidth(2)
+    end
+    love.graphics.rectangle("line", cx, card_y, DECK_CARD_W, DECK_CARD_H, 10, 10)
+    love.graphics.setLineWidth(1)
+
+    -- Faction name
+    love.graphics.setFont(label_font)
+    love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], 1)
+    love.graphics.printf(fname, cx, card_y + 30, DECK_CARD_W, "center")
+
+    -- Stats
+    love.graphics.setFont(detail_font)
+    love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
+    love.graphics.printf(
+      "Workers: " .. (fdata.default_starting_workers or 2) .. "/" .. (fdata.default_max_workers or 8),
+      cx, card_y + 75, DECK_CARD_W, "center"
+    )
+
+    -- Selected indicator
+    if selected then
+      love.graphics.setFont(detail_font)
+      love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], 0.9)
+      love.graphics.printf("Selected", cx, card_y + DECK_CARD_H - 30, DECK_CARD_W, "center")
+    end
+  end
 end
 
 -- Screen drawing
@@ -259,104 +366,6 @@ function MenuState:draw_main()
   local rects = button_rects(btns)
   for i, btn in ipairs(btns) do
     draw_button(rects[i], btn.label, btn.color, self.hover_button == i)
-  end
-end
-
-function MenuState:draw_host_setup()
-  local gw = love.graphics.getWidth()
-  draw_back_button(self.hover_button == -1)
-
-  local title_font = util.get_title_font(32)
-  love.graphics.setFont(title_font)
-  love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
-  love.graphics.printf("Host Game", 0, 80, gw, "center")
-
-  local cursor_visible = math.floor(self.cursor_blink * 2) % 2 == 0
-  local r1 = input_rect(1)
-  local r2 = input_rect(2)
-  local r3 = input_rect(3)
-  draw_input_field(r1, "Player Name", self.player_name, self.active_field == "name", cursor_visible)
-  draw_input_field(r2, "Port (LAN mode)", self.host_port, self.active_field == "port", cursor_visible)
-  draw_input_field(r3, "Relay URL (empty = LAN only)", self.relay_url, self.active_field == "relay", cursor_visible)
-
-  -- Host status message
-  local status_y = r3.y + r3.h + 8
-  if self.host_status_msg then
-    local status_font = util.get_font(12)
-    love.graphics.setFont(status_font)
-    if self.host_status == "error" then
-      love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 1)
-    else
-      love.graphics.setColor(0.3, 0.85, 0.4, 1)
-    end
-    love.graphics.printf(self.host_status_msg, 0, status_y, gw, "center")
-    status_y = status_y + 18
-  end
-
-  -- Room code display
-  if self.host_room_code then
-    local code_font = util.get_title_font(28)
-    love.graphics.setFont(code_font)
-    love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
-    love.graphics.printf("Room Code: " .. self.host_room_code, 0, status_y, gw, "center")
-    status_y = status_y + 36
-  end
-
-  local btns = host_buttons()
-  local rects = button_rects(btns)
-  rects[1].y = r3.y + r3.h + 40
-  for i, btn in ipairs(btns) do
-    draw_button(rects[i], btn.label, btn.color, self.hover_button == i)
-  end
-
-  -- Error message
-  if self.connect_error then
-    love.graphics.setFont(util.get_font(13))
-    love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 1)
-    love.graphics.printf(self.connect_error, center_x(INPUT_W), rects[1].y + rects[1].h + 16, INPUT_W, "center")
-  end
-end
-
-function MenuState:draw_join_setup()
-  local gw = love.graphics.getWidth()
-  draw_back_button(self.hover_button == -1)
-
-  local title_font = util.get_title_font(32)
-  love.graphics.setFont(title_font)
-  love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
-  love.graphics.printf("Join Game", 0, 80, gw, "center")
-
-  -- Websocket status
-  local status_font = util.get_font(12)
-  love.graphics.setFont(status_font)
-  if self.ws_available == true then
-    love.graphics.setColor(0.3, 0.85, 0.4, 1)
-    love.graphics.printf("Websocket module available", 0, 120, gw, "center")
-  elseif self.ws_available == false then
-    love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 1)
-    love.graphics.printf("Websocket module not found: " .. tostring(self.ws_reason), 0, 120, gw, "center")
-  end
-
-  local cursor_visible = math.floor(self.cursor_blink * 2) % 2 == 0
-  local r1 = input_rect(1)
-  local r2 = input_rect(2)
-  local r3 = input_rect(3)
-  draw_input_field(r1, "Player Name", self.player_name, self.active_field == "name", cursor_visible)
-  draw_input_field(r2, "Server URL (LAN) or Relay URL", self.server_url, self.active_field == "url", cursor_visible)
-  draw_input_field(r3, "Room Code (relay only, leave empty for LAN)", self.room_code_input, self.active_field == "room_code", cursor_visible)
-
-  local btns = join_buttons(self.ws_available)
-  local rects = button_rects(btns)
-  rects[1].y = r3.y + r3.h + 40
-  for i, btn in ipairs(btns) do
-    draw_button(rects[i], btn.label, btn.color, self.hover_button == i, btn.disabled)
-  end
-
-  -- Error message
-  if self.connect_error then
-    love.graphics.setFont(util.get_font(13))
-    love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 1)
-    love.graphics.printf(self.connect_error, center_x(INPUT_W), rects[1].y + rects[1].h + 16, INPUT_W, "center")
   end
 end
 
@@ -499,7 +508,7 @@ function MenuState:draw_connecting()
   if self.connect_error then
     love.graphics.setFont(util.get_font(13))
     love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 1)
-    love.graphics.printf(self.connect_error, center_x(INPUT_W), gh / 2 + 20, INPUT_W, "center")
+    love.graphics.printf(self.connect_error, center_x(BUTTON_W), gh / 2 + 20, BUTTON_W, "center")
   end
 end
 
@@ -512,12 +521,12 @@ function MenuState:draw()
     self:draw_main()
   elseif self.screen == "browse" then
     self:draw_browse()
-  elseif self.screen == "host_setup" then
-    self:draw_host_setup()
-  elseif self.screen == "join_setup" then
-    self:draw_join_setup()
   elseif self.screen == "connecting" then
     self:draw_connecting()
+  elseif self.screen == "settings" then
+    self:draw_settings()
+  elseif self.screen == "deckbuilder" then
+    self:draw_deckbuilder()
   end
 
   -- Version text
@@ -544,10 +553,11 @@ function MenuState:poll_joiner()
       authoritative_adapter = adapter,
     })
   elseif self._joiner_adapter.connect_error then
-    self.connect_error = self._joiner_adapter.connect_error
+    local err = self._joiner_adapter.connect_error
     self._joiner_adapter:cleanup()
     self._joiner_adapter = nil
-    self.screen = "join_setup"
+    self:enter_browse()
+    self.connect_error = err
   end
 end
 
@@ -580,9 +590,6 @@ end
 
 function MenuState:go_back()
   self.connect_error = nil
-  self.host_room_code = nil
-  self.host_status = nil
-  self.host_status_msg = nil
   self.screen = "main"
   self.hover_button = nil
   -- Clean up any in-progress relay connection
@@ -610,9 +617,14 @@ function MenuState:get_player_name()
   return name
 end
 
--- Validate ws:// or wss:// prefix
-local function validate_ws_url(url)
-  return url:match("^wss?://") ~= nil
+function MenuState:save_settings_and_back()
+  settings.values.player_name = self.player_name ~= "" and self.player_name or "Player"
+  settings.values.sfx_volume = self.settings_volume
+  settings.values.fullscreen = self.settings_fullscreen
+  settings.save()
+  self.screen = "main"
+  self.hover_button = nil
+  self.settings_dragging_slider = false
 end
 
 function MenuState:enter_browse()
@@ -731,92 +743,6 @@ function MenuState:poll_relay()
   end
 end
 
-function MenuState:do_host()
-  local name = self:get_player_name()
-  local port = tonumber(self.host_port)
-  local relay = self.relay_url ~= "" and self.relay_url or nil
-
-  if not relay then
-    if not port or port < 1 or port > 65535 then
-      self.connect_error = "Invalid port number"
-      return
-    end
-  end
-
-  local ok_call, result = pcall(hosted_game.start, {
-    player_name = name,
-    port = port,
-    relay_url = relay,
-  })
-  if not ok_call then
-    self.connect_error = "Failed to create host: " .. tostring(result)
-    return
-  end
-  if result.ok then
-    if result.room_code then
-      self.host_status = "listening"
-      self.host_status_msg = "Connected to relay (room " .. result.room_code .. ")"
-      self.host_room_code = result.room_code
-    elseif result.ws_available then
-      self.host_status = "listening"
-      self.host_status_msg = "Listening on port " .. tostring(result.port) .. " (" .. tostring(result.backend) .. ")"
-    else
-      self.host_status = "local_only"
-      self.host_status_msg = "Websocket server unavailable — local only"
-    end
-    self.start_game({
-      authoritative_adapter = result.adapter,
-      server_step = result.step_fn,
-      server_cleanup = result.cleanup_fn,
-      room_code = result.room_code,
-    })
-  else
-    self.connect_error = "Failed to create host: " .. tostring(result.reason)
-  end
-end
-
-function MenuState:do_join()
-  local url = self.server_url
-  local room_code = self.room_code_input:match("^%s*(.-)%s*$")  -- trim
-
-  -- If room code is provided, construct relay join URL
-  if room_code ~= "" then
-    if not validate_ws_url(url) then
-      self.connect_error = "URL must start with ws:// or wss://"
-      return
-    end
-    -- Strip trailing slash and append /join/<CODE>
-    local base = url:gsub("/$", "")
-    url = base .. "/join/" .. room_code:upper()
-  else
-    if not validate_ws_url(url) then
-      self.connect_error = "URL must start with ws:// or wss://"
-      return
-    end
-  end
-
-  local name = self:get_player_name()
-
-  -- Use threaded (non-blocking) websocket connection
-  local ok_call, built = pcall(runtime_multiplayer.build, {
-    mode = "threaded_websocket",
-    url = url,
-    player_name = name,
-  })
-
-  if not ok_call then
-    self.connect_error = "Connection failed: " .. tostring(built)
-    return
-  end
-  if built.ok then
-    self._joiner_adapter = built.adapter
-    self.screen = "connecting"
-    self.connect_error = nil
-  else
-    self.connect_error = "Connection failed: " .. tostring(built.reason)
-  end
-end
-
 function MenuState:mousepressed(x, y, button, istouch, presses)
   if button ~= 1 then return end
 
@@ -826,28 +752,65 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
     for i = 1, #btns do
       if point_in_rect(x, y, rects[i]) then
         if i == 1 then
-          -- Play Online → Browse Games
           self:enter_browse()
         elseif i == 2 then
-          -- Local Game
-          self.start_game({ authoritative_adapter = nil })
+          self.screen = "deckbuilder"
+          self.hover_button = nil
         elseif i == 3 then
-          -- Host Game
-          self.screen = "host_setup"
-          self.active_field = "name"
-          self.connect_error = nil
+          self.screen = "settings"
+          self.hover_button = nil
         elseif i == 4 then
-          -- Join Game
-          self.screen = "join_setup"
-          self.active_field = "name"
-          self.connect_error = nil
-          -- Check websocket availability
-          local resolved = websocket_provider.resolve()
-          self.ws_available = resolved.ok
-          self.ws_reason = resolved.reason
+          love.event.quit()
         end
         return
       end
+    end
+
+  elseif self.screen == "deckbuilder" then
+    -- Back button
+    if point_in_rect(x, y, back_button_rect()) then
+      self.screen = "main"
+      self.hover_button = nil
+      return
+    end
+    -- Faction cards
+    local gw = love.graphics.getWidth()
+    local total_w = #DECK_FACTIONS * DECK_CARD_W + (#DECK_FACTIONS - 1) * DECK_CARD_GAP
+    local start_x = (gw - total_w) / 2
+    local card_y = 140
+    for i, fname in ipairs(DECK_FACTIONS) do
+      local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
+      local r = { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }
+      if point_in_rect(x, y, r) then
+        settings.values.faction = fname
+        settings.save()
+        return
+      end
+    end
+
+  elseif self.screen == "settings" then
+    -- Back button
+    if point_in_rect(x, y, back_button_rect()) then
+      self:save_settings_and_back()
+      return
+    end
+    -- Volume slider
+    local sr = self:settings_slider_rect()
+    local slider_hit = { x = sr.x - SETTINGS_KNOB_R, y = sr.y - SETTINGS_KNOB_R, w = sr.w + SETTINGS_KNOB_R * 2, h = sr.h + SETTINGS_KNOB_R * 2 }
+    if point_in_rect(x, y, slider_hit) then
+      self.settings_dragging_slider = true
+      local pct = math.max(0, math.min(1, (x - sr.x) / sr.w))
+      self.settings_volume = pct
+      sound.set_master_volume(pct)
+      return
+    end
+    -- Fullscreen toggle
+    local row_y = SETTINGS_ROW_Y_START + SETTINGS_ROW_H * 2
+    local tog_r = { x = SETTINGS_INPUT_X, y = row_y, w = SETTINGS_TOGGLE_W, h = SETTINGS_TOGGLE_H }
+    if point_in_rect(x, y, tog_r) then
+      self.settings_fullscreen = not self.settings_fullscreen
+      love.window.setFullscreen(self.settings_fullscreen)
+      return
     end
 
   elseif self.screen == "browse" then
@@ -889,69 +852,12 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
       end
     end
 
-  elseif self.screen == "host_setup" then
-    -- Back button
-    if point_in_rect(x, y, back_button_rect()) then
-      self:go_back()
-      return
-    end
-    -- Name input click
-    local r1 = input_rect(1)
-    if point_in_rect(x, y, r1) then
-      self.active_field = "name"
-      return
-    end
-    -- Port input click
-    local r2 = input_rect(2)
-    if point_in_rect(x, y, r2) then
-      self.active_field = "port"
-      return
-    end
-    -- Relay URL input click
-    local r3 = input_rect(3)
-    if point_in_rect(x, y, r3) then
-      self.active_field = "relay"
-      return
-    end
-    -- Start Hosting button
-    local btns = host_buttons()
-    local rects = button_rects(btns)
-    rects[1].y = r3.y + r3.h + 40
-    if point_in_rect(x, y, rects[1]) then
-      self:do_host()
-      return
-    end
+  end
+end
 
-  elseif self.screen == "join_setup" then
-    -- Back button
-    if point_in_rect(x, y, back_button_rect()) then
-      self:go_back()
-      return
-    end
-    -- Input field clicks
-    local r1 = input_rect(1)
-    local r2 = input_rect(2)
-    local r3 = input_rect(3)
-    if point_in_rect(x, y, r1) then
-      self.active_field = "name"
-      return
-    end
-    if point_in_rect(x, y, r2) then
-      self.active_field = "url"
-      return
-    end
-    if point_in_rect(x, y, r3) then
-      self.active_field = "room_code"
-      return
-    end
-    -- Connect button
-    local btns = join_buttons(self.ws_available)
-    local rects = button_rects(btns)
-    rects[1].y = r3.y + r3.h + 40
-    if point_in_rect(x, y, rects[1]) and not btns[1].disabled then
-      self:do_join()
-      return
-    end
+function MenuState:mousereleased(x, y, button, istouch, presses)
+  if self.settings_dragging_slider then
+    self.settings_dragging_slider = false
   end
 end
 
@@ -966,6 +872,52 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
         self.hover_button = i
         return
       end
+    end
+
+  elseif self.screen == "deckbuilder" then
+    self.deckbuilder_hover = nil
+    if point_in_rect(x, y, back_button_rect()) then
+      self.hover_button = -1
+      return
+    end
+    local gw = love.graphics.getWidth()
+    local total_w = #DECK_FACTIONS * DECK_CARD_W + (#DECK_FACTIONS - 1) * DECK_CARD_GAP
+    local start_x = (gw - total_w) / 2
+    local card_y = 140
+    for i, fname in ipairs(DECK_FACTIONS) do
+      local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
+      if point_in_rect(x, y, { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }) then
+        self.deckbuilder_hover = i
+        self.hover_button = -2
+        return
+      end
+    end
+
+  elseif self.screen == "settings" then
+    -- Slider drag
+    if self.settings_dragging_slider then
+      local sr = self:settings_slider_rect()
+      local pct = math.max(0, math.min(1, (x - sr.x) / sr.w))
+      self.settings_volume = pct
+      sound.set_master_volume(pct)
+    end
+    -- Back button hover
+    if point_in_rect(x, y, back_button_rect()) then
+      self.hover_button = -1
+      return
+    end
+    -- Slider/toggle hover for hand cursor
+    local sr = self:settings_slider_rect()
+    local slider_hit = { x = sr.x - SETTINGS_KNOB_R, y = sr.y - SETTINGS_KNOB_R, w = sr.w + SETTINGS_KNOB_R * 2, h = sr.h + SETTINGS_KNOB_R * 2 }
+    if point_in_rect(x, y, slider_hit) then
+      self.hover_button = -2
+      return
+    end
+    local row_y = SETTINGS_ROW_Y_START + SETTINGS_ROW_H * 2
+    local tog_r = { x = SETTINGS_INPUT_X, y = row_y, w = SETTINGS_TOGGLE_W, h = SETTINGS_TOGGLE_H }
+    if point_in_rect(x, y, tog_r) then
+      self.hover_button = -2
+      return
     end
 
   elseif self.screen == "browse" then
@@ -1004,126 +956,38 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
       end
     end
 
-  elseif self.screen == "host_setup" then
-    if point_in_rect(x, y, back_button_rect()) then
-      self.hover_button = -1
-      return
-    end
-    local r3 = input_rect(3)
-    local btns = host_buttons()
-    local rects = button_rects(btns)
-    rects[1].y = r3.y + r3.h + 40
-    for i = 1, #btns do
-      if point_in_rect(x, y, rects[i]) then
-        self.hover_button = i
-        return
-      end
-    end
-
-  elseif self.screen == "join_setup" then
-    if point_in_rect(x, y, back_button_rect()) then
-      self.hover_button = -1
-      return
-    end
-    local r3 = input_rect(3)
-    local btns = join_buttons(self.ws_available)
-    local rects = button_rects(btns)
-    rects[1].y = r3.y + r3.h + 40
-    for i = 1, #btns do
-      if point_in_rect(x, y, rects[i]) and not btns[i].disabled then
-        self.hover_button = i
-        return
-      end
-    end
   end
 end
 
 function MenuState:keypressed(key, scancode, isrepeat)
-  if self.screen == "browse" then
-    if key == "escape" then
-      self:go_back()
-    end
-    return
-  end
-
-  if self.screen ~= "main" and self.screen ~= "connecting" then
-    if key == "escape" then
-      self:go_back()
-      return
-    end
-
-    if key == "backspace" then
-      if self.active_field == "name" and #self.player_name > 0 then
-        self.player_name = self.player_name:sub(1, -2)
-      elseif self.active_field == "port" and #self.host_port > 0 then
-        self.host_port = self.host_port:sub(1, -2)
-      elseif self.active_field == "relay" and #self.relay_url > 0 then
-        self.relay_url = self.relay_url:sub(1, -2)
-      elseif self.active_field == "url" and #self.server_url > 0 then
-        self.server_url = self.server_url:sub(1, -2)
-      elseif self.active_field == "room_code" and #self.room_code_input > 0 then
-        self.room_code_input = self.room_code_input:sub(1, -2)
-      end
-      self.cursor_blink = 0
-      return
-    end
-
-    if key == "tab" then
-      if self.screen == "host_setup" then
-        local cycle = { name = "port", port = "relay", relay = "name" }
-        self.active_field = cycle[self.active_field] or "name"
-        self.cursor_blink = 0
-      elseif self.screen == "join_setup" then
-        local cycle = { name = "url", url = "room_code", room_code = "name" }
-        self.active_field = cycle[self.active_field] or "name"
-        self.cursor_blink = 0
-      end
-      return
-    end
-
-    if key == "return" or key == "kpenter" then
-      if self.screen == "host_setup" then
-        self:do_host()
-      elseif self.screen == "join_setup" and self.ws_available then
-        self:do_join()
-      end
-      return
-    end
-  end
-
-  if self.screen == "connecting" and key == "escape" then
+  if (self.screen == "browse" or self.screen == "connecting") and key == "escape" then
     self:go_back()
+  elseif self.screen == "deckbuilder" and key == "escape" then
+    self.screen = "main"
+    self.hover_button = nil
+  elseif self.screen == "settings" then
+    if key == "escape" then
+      self:save_settings_and_back()
+    elseif key == "backspace" then
+      if #self.player_name > 0 then
+        self.player_name = self.player_name:sub(1, -2)
+      end
+    end
   end
 end
 
 function MenuState:wheelmoved(x, y)
   if self.screen == "browse" then
     self.browse_scroll = self.browse_scroll - y * 30
-    -- Clamp will happen in draw
     if self.browse_scroll < 0 then self.browse_scroll = 0 end
   end
 end
 
 function MenuState:textinput(text)
-  if self.screen == "host_setup" or self.screen == "join_setup" then
-    if self.active_field == "name" and #self.player_name < 20 then
+  if self.screen == "settings" then
+    if #self.player_name < 20 then
       self.player_name = self.player_name .. text
-    elseif self.active_field == "port" and #self.host_port < 5 then
-      -- Only allow digits for port
-      if text:match("^%d+$") then
-        self.host_port = self.host_port .. text
-      end
-    elseif self.active_field == "relay" and #self.relay_url < 100 then
-      self.relay_url = self.relay_url .. text
-    elseif self.active_field == "url" and #self.server_url < 100 then
-      self.server_url = self.server_url .. text
-    elseif self.active_field == "room_code" and #self.room_code_input < 6 then
-      -- Only allow alphanumeric for room codes
-      if text:match("^%w+$") then
-        self.room_code_input = self.room_code_input .. text:upper()
-      end
     end
-    self.cursor_blink = 0
   end
 end
 

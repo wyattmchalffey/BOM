@@ -25,7 +25,12 @@ GameState.__index = GameState
 
 function GameState.new(opts)
   opts = opts or {}
-  local initial_state = game_state_module.create_initial_game_state()
+  local setup = opts.setup or nil
+  if not setup then
+    local settings = require("src.settings")
+    setup = { players = { [1] = { faction = settings.values.faction } } }
+  end
+  local initial_state = game_state_module.create_initial_game_state(setup)
   local self = setmetatable({
     game_state = initial_state,
     show_blueprint_for_player = nil, -- 0 or 1 when modal open

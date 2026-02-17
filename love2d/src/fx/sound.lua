@@ -3,6 +3,7 @@
 local sound = {}
 
 local SAMPLE_RATE = 44100
+local _master_volume = 1.0
 
 local function clamp(x, lo, hi)
   if x < lo then return lo end
@@ -98,13 +99,17 @@ local function _init()
   end
 end
 
+function sound.set_master_volume(v)
+  _master_volume = math.max(0, math.min(1, v))
+end
+
 function sound.play(name, volume)
   local pool = _pools[name]
   if not pool then return end
   local idx = _pool_index[name]
   local source = pool[idx]
   source:stop()
-  source:setVolume(volume or 1.0)
+  source:setVolume((volume or 1.0) * _master_volume)
   source:play()
   _pool_index[name] = (idx % #pool) + 1
 end

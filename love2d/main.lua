@@ -15,6 +15,8 @@ local GameState = require("src.state.game")
 local MenuState = require("src.state.menu")
 local runtime_multiplayer = require("src.net.runtime_multiplayer")
 local websocket_provider = require("src.net.websocket_provider")
+local settings = require("src.settings")
+local sound = require("src.fx.sound")
 
 local current_state
 
@@ -106,6 +108,11 @@ end
 function love.load()
   math.randomseed(os.time())
 
+  -- Load persisted settings and apply them
+  settings.load()
+  sound.set_master_volume(settings.values.sfx_volume)
+  love.window.setFullscreen(settings.values.fullscreen)
+
   -- State transition closures
   start_game = function(opts)
     opts = opts or {}
@@ -118,6 +125,7 @@ function love.load()
     current_state = MenuState.new({
       start_game = start_game,
       return_to_menu = return_to_menu,
+      player_name = settings.values.player_name,
     })
   end
 
