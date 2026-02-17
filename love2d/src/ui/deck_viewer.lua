@@ -303,9 +303,9 @@ function viewer.draw()
         typeLine = (def.faction or "") .. " — " .. (def.kind or ""),
         text = def.text,
         costs = def.costs,
-        population = def.population,
         tier = def.tier,
         abilities_list = def.abilities,
+        show_ability_text = true,
       })
 
       -- Card overlay (caller-provided: dim, badges, highlights)

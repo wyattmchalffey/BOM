@@ -17,7 +17,7 @@ local board = {}
 local MARGIN = 20
 local TOP_MARGIN = 10      -- less space above opponent's board
 local GAP_BETWEEN_PANELS = 8
-local MARGIN_BOTTOM = 115  -- room for resource bar + hand strip below player's board
+local MARGIN_BOTTOM = 85  -- room for hand strip below player's board
 local CARD_W = card_frame.CARD_W
 local CARD_H = card_frame.CARD_H
 local RESOURCE_NODE_W = card_frame.RESOURCE_NODE_W
@@ -35,8 +35,9 @@ local END_TURN_BTN_W = 100
 local END_TURN_BTN_H = 32
 local STRUCT_TILE_W = 90
 local STRUCT_TILE_H_BASE = 50  -- just name + kind
-local STRUCT_TILE_AB_H = 20    -- per activated ability button
+local STRUCT_TILE_AB_H = 26    -- per activated ability button
 local STRUCT_TILE_GAP = 8
+local BASE_CARD_H = 170  -- shorter than normal cards
 local RESOURCE_BAR_H = 26
 
 -- Hand card display constants
@@ -91,9 +92,9 @@ function board.base_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   if panel_index == 1 then
     y = panel_y + 20  -- opponent: base at top (back of their board)
   else
-    y = panel_y + panel_h - CARD_H - 20  -- you: base at bottom
+    y = panel_y + panel_h - BASE_CARD_H - 20  -- you: base at bottom
   end
-  return x, y, CARD_W, CARD_H
+  return x, y, CARD_W, BASE_CARD_H
 end
 
 -- Resource nodes: at each player's board edge (front line).
@@ -155,10 +156,15 @@ function board.structure_tile_rect(panel_x, panel_y, panel_w, panel_h, tile_inde
   return tx, ay, STRUCT_TILE_W, th
 end
 
--- Resource bar: below the player's panel in the bottom margin area
+-- Resource bar: above buttons for local player, bottom of panel for opponent
 function board.resource_bar_rect(panel_index)
   local px, py, pw, ph = board.panel_rect(panel_index)
-  return px, py + ph + 3, pw, RESOURCE_BAR_H
+  if panel_index == 0 then
+    local btn_y = py + ph - PASS_BTN_H - 12
+    return px + 20, btn_y - RESOURCE_BAR_H - 4, pw - 40, RESOURCE_BAR_H
+  else
+    return px + 20, py + ph - RESOURCE_BAR_H - 8, pw - 40, RESOURCE_BAR_H
+  end
 end
 
 -- Pass button: bottom left of each player's panel (for priority passing)
@@ -638,9 +644,9 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       text = base_def.text,
       costs = base_def.costs,
       health = player.life,
-      population = base_def.population,
       tier = base_def.tier,
       is_base = true,
+      h = BASE_CARD_H,
       abilities_list = base_def.abilities,
       used_abilities = base_used_abs,
       can_activate_abilities = base_can_act_abs,
@@ -712,50 +718,75 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       local wcy = uay + uah / 2
       draw_worker_circle(wcx, wcy, is_active, is_active)
     end
+    -- Worker count label (top-right corner of pool)
+    local wcount_str = player.totalWorkers .. "/" .. max_workers
+    local wcount_font = util.get_font(9)
+    love.graphics.setFont(wcount_font)
+    local wcount_tw = wcount_font:getWidth(wcount_str)
+    local wcount_x = uax + uaw - wcount_tw - 4
+    local wcount_y = uay + 2
+    -- Small dark backing for readability
+    love.graphics.setColor(0, 0, 0, 0.5)
+    love.graphics.rectangle("fill", wcount_x - 3, wcount_y - 1, wcount_tw + 6, 13, 3, 3)
+    love.graphics.setColor(0.75, 0.76, 0.88, is_active and 0.9 or 0.5)
+    love.graphics.print(wcount_str, wcount_x, wcount_y)
 
-    -- Pass button (beveled style)
-    local pbx, pby, pbw, pbh = board.pass_button_rect(px, py, pw, ph)
-    local pass_hovered = is_hovered(hover, "pass", pi)
-    local pass_pressed = pass_hovered and mouse_down
-    draw_button(pbx, pby, pbw, pbh, "Pass", pass_hovered, pass_pressed, 0.2, 0.22, 0.28)
+    -- Pass and End Turn buttons (local player only)
+    if panel == 0 then
+      local pbx, pby, pbw, pbh = board.pass_button_rect(px, py, pw, ph)
+      local pass_hovered = is_hovered(hover, "pass", pi)
+      local pass_pressed = pass_hovered and mouse_down
+      draw_button(pbx, pby, pbw, pbh, "Pass", pass_hovered, pass_pressed, 0.2, 0.22, 0.28)
 
-    -- End Turn button (beveled, with active accent)
-    local ebx, eby, ebw, ebh = board.end_turn_button_rect(px, py, pw, ph)
-    local et_hovered = is_hovered(hover, "end_turn", pi)
-    local et_pressed = et_hovered and mouse_down
-    if is_active then
-      draw_button(ebx, eby, ebw, ebh, "End Turn", et_hovered, et_pressed, 0.14, 0.28, 0.22)
-    else
-      draw_button(ebx, eby, ebw, ebh, "End Turn", et_hovered, et_pressed, 0.2, 0.22, 0.28)
+      local ebx, eby, ebw, ebh = board.end_turn_button_rect(px, py, pw, ph)
+      local et_hovered = is_hovered(hover, "end_turn", pi)
+      local et_pressed = et_hovered and mouse_down
+      if is_active then
+        draw_button(ebx, eby, ebw, ebh, "End Turn", et_hovered, et_pressed, 0.14, 0.28, 0.22)
+      else
+        draw_button(ebx, eby, ebw, ebh, "End Turn", et_hovered, et_pressed, 0.2, 0.22, 0.28)
+      end
     end
 
-    -- Resource bar (local player only — below panel in the bottom margin)
-    if panel == 0 then
-      local rbx, rby, rbw, rbh = board.resource_bar_rect(panel)
-      -- Background
-      love.graphics.setColor(0.06, 0.07, 0.10, 0.92)
-      love.graphics.rectangle("fill", rbx, rby, rbw, rbh, 5, 5)
-      -- Accent line at top
-      love.graphics.setColor(accent[1], accent[2], accent[3], 0.4)
-      love.graphics.rectangle("fill", rbx + 4, rby, rbw - 8, 1)
-      -- Subtle border
-      love.graphics.setColor(0.18, 0.20, 0.25, 0.6)
-      love.graphics.rectangle("line", rbx, rby, rbw, rbh, 5, 5)
-      -- Resource badges (conditional: only show when count > 0)
-      local badge_x = rbx + 8
-      local badge_cy = rby + (rbh - 22) / 2
+    -- Resource bar (both panels — dynamically sized, left-justified)
+    do
+      local rbx, rby, _, rbh = board.resource_bar_rect(panel)
+      -- First pass: measure how wide the content is
+      local content_w = 8  -- left padding
       for _, key in ipairs(config.resource_types) do
         local count = player.resources[key] or 0
         local display_val = dr and dr[key]
         if count > 0 or (display_val and display_val > 0.5) then
-          local rdef = res_registry[key]
-          if rdef then
-            local rc, gc, bc = rdef.color[1], rdef.color[2], rdef.color[3]
-            badge_x = badge_x + draw_resource_badge(badge_x, badge_cy, key, rdef.letter, count, rc, gc, bc, display_val)
+          content_w = content_w + 54  -- badge_w (50) + gap (4)
+        end
+      end
+      -- Only draw if there are resources to show
+      if content_w > 8 then
+        local rbw = content_w + 4  -- right padding
+        -- Background
+        love.graphics.setColor(0.06, 0.07, 0.10, 0.92)
+        love.graphics.rectangle("fill", rbx, rby, rbw, rbh, 5, 5)
+        -- Accent line at top
+        love.graphics.setColor(accent[1], accent[2], accent[3], 0.4)
+        love.graphics.rectangle("fill", rbx + 4, rby, rbw - 8, 1)
+        -- Subtle border
+        love.graphics.setColor(0.18, 0.20, 0.25, 0.6)
+        love.graphics.rectangle("line", rbx, rby, rbw, rbh, 5, 5)
+        -- Resource badges
+        local badge_x = rbx + 8
+        local badge_cy = rby + (rbh - 22) / 2
+        for _, key in ipairs(config.resource_types) do
+          local count = player.resources[key] or 0
+          local display_val = dr and dr[key]
+          if count > 0 or (display_val and display_val > 0.5) then
+            local rdef = res_registry[key]
+            if rdef then
+              local rc, gc, bc = rdef.color[1], rdef.color[2], rdef.color[3]
+              badge_x = badge_x + draw_resource_badge(badge_x, badge_cy, key, rdef.letter, count, rc, gc, bc, display_val)
+            end
           end
         end
       end
-      draw_worker_badge(badge_x, badge_cy, player.totalWorkers, max_workers)
     end
   end
 
@@ -796,9 +827,9 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
             costs = def.costs,
             attack = def.attack,
             health = def.health,
-            population = def.population,
             tier = def.tier,
             abilities_list = def.abilities,
+            show_ability_text = true,
           })
           love.graphics.pop()
           -- Selected glow
@@ -838,9 +869,9 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
           costs = def.costs,
           attack = def.attack,
           health = def.health,
-          population = def.population,
           tier = def.tier,
           abilities_list = def.abilities,
+          show_ability_text = true,
         })
         love.graphics.pop()
         -- Bright hover border
@@ -884,30 +915,36 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
     local player = game_state.players[pi + 1]
     local res_left = (player.faction == "Human") and "wood" or "food"
 
-    -- Pass and End turn on both panels (for testing either can end turn)
-    local pbx, pby, pbw, pbh = board.pass_button_rect(px, py, pw, ph)
-    if util.point_in_rect(mx, my, pbx, pby, pbw, pbh) then
-      return "pass", pi
-    end
-    local ebx, eby, ebw, ebh = board.end_turn_button_rect(px, py, pw, ph)
-    if util.point_in_rect(mx, my, ebx, eby, ebw, ebh) then
-      return "end_turn", pi
+    -- Pass and End Turn hit test (local player only)
+    if panel == 0 then
+      local pbx, pby, pbw, pbh = board.pass_button_rect(px, py, pw, ph)
+      if util.point_in_rect(mx, my, pbx, pby, pbw, pbh) then
+        return "pass", pi
+      end
+      local ebx, eby, ebw, ebh = board.end_turn_button_rect(px, py, pw, ph)
+      if util.point_in_rect(mx, my, ebx, eby, ebw, ebh) then
+        return "end_turn", pi
+      end
     end
 
     -- Activate base ability (new: per-ability rects)
     local base_x, base_y = board.base_rect(px, py, pw, ph, panel)
     local base_def = cards.get_card_def(player.baseId)
 
-    if base_def.abilities and pi == game_state.activePlayer then
-      local ab_rects = card_frame.get_ability_rects(base_x, base_y, CARD_W, CARD_H, base_def.abilities)
+    if base_def.abilities then
+      local ab_rects = card_frame.get_ability_rects(base_x, base_y, CARD_W, BASE_CARD_H, base_def.abilities)
       for _, ar in ipairs(ab_rects) do
         local ai = ar.ability_index
         local ab = base_def.abilities[ai]
-        local key = tostring(pi) .. ":base:" .. ai
-        local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
-        local can_act = (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
-        if can_act and util.point_in_rect(mx, my, ar.x, ar.y, ar.w, ar.h) then
-          return "activate_ability", pi, { source = "base", ability_index = ai }
+        if util.point_in_rect(mx, my, ar.x, ar.y, ar.w, ar.h) then
+          local key = tostring(pi) .. ":base:" .. ai
+          local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
+          local can_act = pi == game_state.activePlayer and (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
+          if can_act then
+            return "activate_ability", pi, { source = "base", ability_index = ai }
+          else
+            return "ability_hover", pi, { source = "base", ability_index = ai }
+          end
         end
       end
     end
@@ -926,7 +963,7 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
           local ab_btn_y = ty + 36
           for ai, ab in ipairs(sdef.abilities) do
             if ab.type == "activated" then
-              local btn_x, btn_w, btn_h = tx + 4, tw - 8, 18
+              local btn_x, btn_w, btn_h = tx + 4, tw - 8, 24
               if util.point_in_rect(mx, my, btn_x, ab_btn_y, btn_w, btn_h) then
                 local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
                 local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]

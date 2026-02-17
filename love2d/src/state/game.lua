@@ -453,7 +453,16 @@ function GameState:draw()
         if ok and def then
           local mx, my = love.mouse.getPosition()
           local gw, gh = love.graphics.getDimensions()
-          local tw, th = card_frame.CARD_W, card_frame.CARD_H
+          -- Enlarged preview with ability text
+          local tw, th = 200, 280
+          local n_activated = 0
+          if def.abilities then
+            for _, ab in ipairs(def.abilities) do
+              if ab.type == "activated" then n_activated = n_activated + 1 end
+            end
+          end
+          if n_activated > 0 then th = th + n_activated * 12 end
+
           local tx = mx + 16
           local ty = my - th / 2
           if tx + tw > gw - 10 then tx = mx - tw - 16 end
@@ -480,17 +489,19 @@ function GameState:draw()
           love.graphics.push()
           love.graphics.setColor(1, 1, 1, fade_in)
           card_frame.draw(tx, ty, {
+            w = tw,
+            h = th,
             title = def.name,
             faction = def.faction,
             kind = def.kind,
             typeLine = def.faction .. " — " .. def.kind,
             text = def.text,
             costs = def.costs,
-            population = def.population,
             tier = def.tier,
             abilities_list = def.abilities,
             used_abilities = used_abs,
             can_activate_abilities = can_act_abs,
+            show_ability_text = true,
           })
           love.graphics.pop()
         end
@@ -503,59 +514,66 @@ function GameState:draw()
       local pi = self.hover.pi
       local info = self.hover.idx
       local player = self.game_state.players[pi + 1]
+      -- Resolve the ability from either a board structure or the base
+      local ab = nil
       if player and info.source == "board" then
         local entry = player.board[info.board_index]
         if entry then
           local ok_d, def = pcall(cards.get_card_def, entry.card_id)
           if ok_d and def and def.abilities then
-            local ab = def.abilities[info.ability_index]
-            if ab then
-              local mx, my = love.mouse.getPosition()
-              local gw, gh = love.graphics.getDimensions()
-              local effect_text = card_frame.ability_effect_text(ab)
-              local cost_parts = {}
-              for _, c in ipairs(ab.cost or {}) do
-                local rdef = res_registry[c.type]
-                local letter = rdef and rdef.letter or "?"
-                cost_parts[#cost_parts + 1] = c.amount .. letter
-              end
-              local cost_str = #cost_parts > 0 and ("Cost: " .. table.concat(cost_parts, " + ")) or "Free"
-              local lines = { effect_text, cost_str }
-              if ab.once_per_turn then
-                lines[#lines + 1] = "Once per turn"
-              end
-              local font = util.get_font(10)
-              local max_line_w = 0
-              for _, line in ipairs(lines) do
-                max_line_w = math.max(max_line_w, font:getWidth(line))
-              end
-              local pad_x, pad_y = 10, 6
-              local tw = max_line_w + pad_x * 2
-              local line_h = font:getHeight() + 2
-              local th = #lines * line_h + pad_y * 2
-              local tx = mx + 16
-              local ty = my - th - 4
-              if tx + tw > gw - 10 then tx = mx - tw - 16 end
-              if ty < 10 then ty = 10 end
-
-              local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
-              -- Dark rounded-rect background
-              love.graphics.setColor(0.06, 0.07, 0.1, 0.92 * fade_in)
-              love.graphics.rectangle("fill", tx, ty, tw, th, 5, 5)
-              love.graphics.setColor(0.3, 0.35, 0.5, 0.5 * fade_in)
-              love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
-              -- Lines
-              love.graphics.setFont(font)
-              for li, line in ipairs(lines) do
-                if li == 1 then
-                  love.graphics.setColor(0.9, 0.92, 1.0, fade_in)
-                else
-                  love.graphics.setColor(0.65, 0.67, 0.75, fade_in)
-                end
-                love.graphics.print(line, tx + pad_x, ty + pad_y + (li - 1) * line_h)
-              end
-            end
+            ab = def.abilities[info.ability_index]
           end
+        end
+      elseif player and info.source == "base" then
+        local ok_d, def = pcall(cards.get_card_def, player.baseId)
+        if ok_d and def and def.abilities then
+          ab = def.abilities[info.ability_index]
+        end
+      end
+      if ab then
+        local mx, my = love.mouse.getPosition()
+        local gw, gh = love.graphics.getDimensions()
+        local effect_text = card_frame.ability_effect_text(ab)
+        local cost_parts = {}
+        for _, c in ipairs(ab.cost or {}) do
+          local rdef = res_registry[c.type]
+          local letter = rdef and rdef.letter or "?"
+          cost_parts[#cost_parts + 1] = c.amount .. letter
+        end
+        local cost_str = #cost_parts > 0 and ("Cost: " .. table.concat(cost_parts, " + ")) or "Free"
+        local lines = { effect_text, cost_str }
+        if ab.once_per_turn then
+          lines[#lines + 1] = "Once per turn"
+        end
+        local font = util.get_font(10)
+        local max_line_w = 0
+        for _, line in ipairs(lines) do
+          max_line_w = math.max(max_line_w, font:getWidth(line))
+        end
+        local pad_x, pad_y = 10, 6
+        local tw = max_line_w + pad_x * 2
+        local line_h = font:getHeight() + 2
+        local th = #lines * line_h + pad_y * 2
+        local tx = mx + 16
+        local ty = my - th - 4
+        if tx + tw > gw - 10 then tx = mx - tw - 16 end
+        if ty < 10 then ty = 10 end
+
+        local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
+        -- Dark rounded-rect background
+        love.graphics.setColor(0.06, 0.07, 0.1, 0.92 * fade_in)
+        love.graphics.rectangle("fill", tx, ty, tw, th, 5, 5)
+        love.graphics.setColor(0.3, 0.35, 0.5, 0.5 * fade_in)
+        love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
+        -- Lines
+        love.graphics.setFont(font)
+        for li, line in ipairs(lines) do
+          if li == 1 then
+            love.graphics.setColor(0.9, 0.92, 1.0, fade_in)
+          else
+            love.graphics.setColor(0.65, 0.67, 0.75, fade_in)
+          end
+          love.graphics.print(line, tx + pad_x, ty + pad_y + (li - 1) * line_h)
         end
       end
     end

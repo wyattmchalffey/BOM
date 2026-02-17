@@ -81,66 +81,6 @@ local function draw_frequency_icon(ab, x, y, size, alpha)
   return size + 3
 end
 
-local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
-  opts = opts or {}
-  local can_activate = opts.can_activate ~= false
-  local is_used = opts.is_used or false
-  local is_hov = opts.is_hovered or false
-  local alpha = (can_activate and not is_used) and 1.0 or 0.45
-  local line_h = 20
-  local icon_s = 12
-  local font = util.get_font(9)
-
-  -- Background bar for the ability
-  local bar_alpha = (can_activate and not is_used) and 0.2 or 0.08
-  if is_hov and can_activate and not is_used then bar_alpha = 0.32 end
-  love.graphics.setColor(0.2, 0.25, 0.4, bar_alpha)
-  love.graphics.rectangle("fill", ab_x, ab_y, max_w, line_h, 3, 3)
-  -- Left accent mark
-  love.graphics.setColor(0.35, 0.6, 1.0, (can_activate and not is_used) and 0.7 or 0.2)
-  love.graphics.rectangle("fill", ab_x, ab_y, 2, line_h, 1, 1)
-  -- Hover border glow
-  if is_hov and can_activate and not is_used then
-    love.graphics.setColor(0.4, 0.6, 1.0, 0.4)
-    love.graphics.rectangle("line", ab_x, ab_y, max_w, line_h, 3, 3)
-  end
-
-  local cx = ab_x + 4
-  local cy_icon = ab_y + (line_h - icon_s) / 2
-
-  -- Frequency icon (once-per-turn or repeatable)
-  local freq_w = draw_frequency_icon(ab, cx, cy_icon, icon_s, alpha)
-  cx = cx + freq_w
-
-  -- Draw cost icons
-  local cost_w = draw_cost_cluster(ab.cost, cx, cy_icon, icon_s, alpha)
-  cx = cx + cost_w
-
-  -- Colon separator
-  love.graphics.setColor(0.7, 0.72, 0.82, alpha)
-  love.graphics.setFont(font)
-  love.graphics.print(":", cx, ab_y + 4)
-  cx = cx + font:getWidth(":") + 4
-
-  -- Effect text (short description)
-  local effect_text = opts.effect_text or ab.effect or "?"
-  love.graphics.setColor(0.82, 0.83, 0.88, alpha)
-  love.graphics.setFont(font)
-  local remaining_w = max_w - (cx - ab_x) - 4
-  love.graphics.printf(effect_text, cx, ab_y + 4, math.max(remaining_w, 20), "left")
-
-  -- "Used" overlay
-  if is_used then
-    love.graphics.setColor(0, 0, 0, 0.3)
-    love.graphics.rectangle("fill", ab_x, ab_y, max_w, line_h, 3, 3)
-    love.graphics.setColor(0.6, 0.3, 0.3, 0.7)
-    love.graphics.setFont(util.get_font(8))
-    love.graphics.printf("USED", ab_x, ab_y + 5, max_w, "center")
-  end
-
-  return line_h + 2
-end
-
 ---------------------------------------------------------
 -- Generate a short effect description from ability data
 ---------------------------------------------------------
@@ -170,6 +110,205 @@ local function ability_effect_text(ab)
   return e or "?"
 end
 
+local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
+  opts = opts or {}
+  local can_activate = opts.can_activate ~= false
+  local is_used = opts.is_used or false
+  local is_hov = opts.is_hovered or false
+  local alpha = (can_activate and not is_used) and 1.0 or 0.45
+  local line_h = 26
+  local icon_s = 16
+  local r = 4
+
+  -- Background: subtle gradient-like two-layer fill
+  local bar_alpha = (can_activate and not is_used) and 0.22 or 0.08
+  if is_hov and can_activate and not is_used then bar_alpha = 0.38 end
+  love.graphics.setColor(0.15, 0.18, 0.32, bar_alpha)
+  love.graphics.rectangle("fill", ab_x, ab_y, max_w, line_h, r, r)
+  -- Lighter inner highlight at top
+  love.graphics.setColor(0.3, 0.35, 0.55, bar_alpha * 0.5)
+  love.graphics.rectangle("fill", ab_x + 1, ab_y + 1, max_w - 2, line_h * 0.4, r, r)
+  -- Left accent mark
+  local accent_a = (can_activate and not is_used) and 0.8 or 0.2
+  love.graphics.setColor(0.35, 0.6, 1.0, accent_a)
+  love.graphics.rectangle("fill", ab_x, ab_y + 2, 3, line_h - 4, 1, 1)
+  -- Border
+  if is_hov and can_activate and not is_used then
+    love.graphics.setColor(0.45, 0.65, 1.0, 0.5)
+    love.graphics.rectangle("line", ab_x, ab_y, max_w, line_h, r, r)
+  else
+    love.graphics.setColor(0.25, 0.28, 0.4, alpha * 0.35)
+    love.graphics.rectangle("line", ab_x, ab_y, max_w, line_h, r, r)
+  end
+
+  local show_text = opts.show_ability_text
+  local font = util.get_font(9)
+
+  if show_text then
+    -- Left-aligned layout: icons then effect text
+    local cx = ab_x + 5
+    local cy_icon = ab_y + (line_h - icon_s) / 2
+
+    local freq_w = draw_frequency_icon(ab, cx, cy_icon, icon_s, alpha)
+    cx = cx + freq_w
+
+    local cost_w = draw_cost_cluster(ab.cost, cx, cy_icon, icon_s, alpha)
+    cx = cx + cost_w
+
+    -- Colon separator
+    love.graphics.setColor(0.7, 0.72, 0.82, alpha)
+    love.graphics.setFont(font)
+    love.graphics.print(":", cx, ab_y + (line_h - 12) / 2)
+    cx = cx + font:getWidth(":") + 4
+
+    -- Effect text
+    local effect_text = ability_effect_text(ab)
+    love.graphics.setColor(0.85, 0.87, 0.95, alpha)
+    love.graphics.setFont(font)
+    local remaining_w = max_w - (cx - ab_x) - 4
+    love.graphics.printf(effect_text, cx, ab_y + (line_h - 12) / 2, math.max(remaining_w, 20), "left")
+  else
+    -- Centered icons only (compact mode)
+    local freq_w_est = draw_frequency_icon(ab, -1000, -1000, icon_s, 0)
+    local cost_w_est = draw_cost_cluster(ab.cost, -1000, -1000, icon_s, 0)
+    local total_content_w = freq_w_est + cost_w_est
+    local cx = ab_x + (max_w - total_content_w) / 2
+    local cy_icon = ab_y + (line_h - icon_s) / 2
+
+    local freq_w = draw_frequency_icon(ab, cx, cy_icon, icon_s, alpha)
+    cx = cx + freq_w
+    draw_cost_cluster(ab.cost, cx, cy_icon, icon_s, alpha)
+  end
+
+  -- "Used" overlay
+  if is_used then
+    love.graphics.setColor(0, 0, 0, 0.35)
+    love.graphics.rectangle("fill", ab_x, ab_y, max_w, line_h, r, r)
+    love.graphics.setColor(0.6, 0.3, 0.3, 0.8)
+    love.graphics.setFont(font)
+    love.graphics.printf("USED", ab_x, ab_y + (line_h - 12) / 2, max_w, "center")
+  end
+
+  return line_h + 3
+end
+
+---------------------------------------------------------
+-- Generate a short description for a single non-activated ability
+---------------------------------------------------------
+local function passive_ability_text(ab)
+  local e = ab.effect
+  local args = ab.effect_args or {}
+  local trigger = ab.trigger
+
+  if ab.type == "static" then
+    if e == "produce" then
+      local res = args.resource or "?"
+      if args.per_worker then
+        local cap = args.max_workers and (" (max " .. args.max_workers .. ")") or ""
+        return "Produce " .. args.per_worker .. " " .. res .. "/worker" .. cap
+      end
+      return "Produce " .. (args.amount or 1) .. " " .. res
+    elseif e == "skip_draw" then
+      return "You do not draw at the start of your turn"
+    elseif e == "bonus_production" then
+      return "+" .. (args.bonus or 1) .. " resource per " .. (args.per_workers or 3) .. " workers"
+    elseif e == "prevent_rot" then
+      return "Prevent " .. (args.amount or 0) .. " " .. (args.resource or "?") .. " rot"
+    elseif e == "double_production" then
+      return "Double production"
+    elseif e == "global_buff" then
+      local sub = args.subtypes and table.concat(args.subtypes, "/") or "units"
+      return "+" .. (args.attack or 0) .. " ATK to " .. sub
+    elseif e == "sacrifice_upgrade" then
+      local sub = args.subtypes and table.concat(args.subtypes, "/") or "units"
+      return "Sacrifice " .. sub .. " to upgrade"
+    elseif e == "monument_cost" then
+      return "Monument (" .. (args.min_counters or "?") .. " counters)"
+    elseif e == "water_level" then
+      return "Water Level +" .. (args.amount or 0)
+    elseif e == "double_gain" then
+      return "Double " .. (args.resource or "?") .. " gain"
+    elseif e == "play_cost_sacrifice" then
+      return "Sacrifice to play"
+    elseif e == "can_attack_non_rested" then
+      return "Can attack without resting"
+    elseif e == "stats_equal_resource" then
+      return "Stats = " .. (args.resource or "?") .. " count"
+    elseif e == "double_end_of_turn_triggers" then
+      return "End of turn triggers twice"
+    end
+    return e or "?"
+  end
+
+  if ab.type == "triggered" then
+    local prefix = ""
+    if trigger == "end_of_turn" then prefix = "End of turn: "
+    elseif trigger == "start_of_turn" then prefix = "Start of turn: "
+    elseif trigger == "on_construct" then prefix = "Construct: "
+    elseif trigger == "on_ally_death" then prefix = "Ally death: "
+    elseif trigger == "on_attack" then prefix = "On attack: "
+    elseif trigger == "on_mass_attack" then prefix = "Mass attack: "
+    elseif trigger == "on_base_damage" then prefix = "Base dmg: "
+    elseif trigger == "on_destroyed" then prefix = "On death: "
+    elseif trigger == "on_play" then prefix = "On play: "
+    elseif trigger == "after_combat" then prefix = "After combat: "
+    elseif trigger == "on_fire_structure_damage" then prefix = "Fire dmg: "
+    end
+
+    if e == "produce" then
+      return prefix .. "Create " .. (args.amount or 1) .. " " .. (args.resource or "?")
+    elseif e == "draw_cards" then
+      return prefix .. "Draw " .. (args.amount or 1)
+    elseif e == "place_counter" then
+      return prefix .. "+" .. (args.amount or 1) .. " " .. (args.counter or "?") .. " counter"
+    elseif e == "opt" then
+      return prefix .. "Opt " .. (args.base or 1)
+    elseif e == "buff_ally_attacker" then
+      return prefix .. "+" .. (args.attack or 0) .. " ATK to ally"
+    elseif e == "conditional_damage" then
+      return prefix .. "Deal " .. (args.damage or 0) .. " dmg"
+    elseif e == "buff_warriors_per_scholar" then
+      return prefix .. "Buff warriors per scholar"
+    elseif e == "grant_keyword" or e == "gain_keyword" then
+      return prefix .. "Grant " .. (args.keyword or "?")
+    elseif e == "unrest_target" then
+      return prefix .. "Cause unrest"
+    elseif e == "steal_resource" then
+      return prefix .. "Steal " .. (args.amount or 1) .. " resource"
+    elseif e == "discard_random" then
+      return prefix .. "Discard " .. (args.amount or 1)
+    elseif e == "return_from_graveyard" then
+      return prefix .. "Return " .. (args.kind or "card") .. " from graveyard"
+    elseif e == "return_to_hand" then
+      return prefix .. "Return to hand"
+    elseif e == "destroy_all_units" then
+      return prefix .. "Destroy all units"
+    elseif e == "worker_deal_damage" then
+      return prefix .. "Worker deals " .. (args.damage or 0) .. " dmg"
+    elseif e == "double_resource" then
+      return prefix .. "Double " .. (args.resource or "?")
+    end
+    return prefix .. (e or "?")
+  end
+
+  return e or "?"
+end
+
+---------------------------------------------------------
+-- Build display text from only the non-activated abilities
+---------------------------------------------------------
+local function non_activated_text(abilities_list)
+  if not abilities_list or #abilities_list == 0 then return nil end
+  local parts = {}
+  for _, ab in ipairs(abilities_list) do
+    if ab.type ~= "activated" then
+      parts[#parts + 1] = passive_ability_text(ab)
+    end
+  end
+  if #parts == 0 then return nil end
+  return table.concat(parts, ". ") .. "."
+end
+
 ---------------------------------------------------------
 -- Compact ability button for structure tiles on the board.
 -- Fits in ~82x18px with same visual language as ability lines.
@@ -182,56 +321,54 @@ function card_frame.draw_ability_button(ab, bx, by, bw, opts)
   local is_used = opts.is_used or false
   local is_hov = opts.is_hovered or false
   local alpha = (can_activate and not is_used) and 1.0 or 0.4
-  local btn_h = 18
-  local icon_s = 10
-  local font = util.get_font(8)
+  local btn_h = 24
+  local icon_s = 14
+  local r = 4
 
-  -- Button background
-  local bg_alpha = (can_activate and not is_used) and 0.25 or 0.1
-  if is_hov and can_activate and not is_used then bg_alpha = 0.4 end
-  love.graphics.setColor(0.15, 0.2, 0.35, bg_alpha)
-  love.graphics.rectangle("fill", bx, by, bw, btn_h, 3, 3)
+  -- Button background: two-layer fill for depth
+  local bg_alpha = (can_activate and not is_used) and 0.28 or 0.1
+  if is_hov and can_activate and not is_used then bg_alpha = 0.45 end
+  love.graphics.setColor(0.12, 0.16, 0.3, bg_alpha)
+  love.graphics.rectangle("fill", bx, by, bw, btn_h, r, r)
+  -- Lighter inner highlight at top
+  love.graphics.setColor(0.25, 0.3, 0.5, bg_alpha * 0.4)
+  love.graphics.rectangle("fill", bx + 1, by + 1, bw - 2, btn_h * 0.4, r, r)
 
   -- Left accent
-  love.graphics.setColor(0.35, 0.6, 1.0, (can_activate and not is_used) and 0.6 or 0.15)
-  love.graphics.rectangle("fill", bx, by, 2, btn_h, 1, 1)
+  local accent_a = (can_activate and not is_used) and 0.7 or 0.15
+  love.graphics.setColor(0.35, 0.6, 1.0, accent_a)
+  love.graphics.rectangle("fill", bx, by + 2, 3, btn_h - 4, 1, 1)
 
-  -- Hover glow border
+  -- Border
   if is_hov and can_activate and not is_used then
-    love.graphics.setColor(0.4, 0.6, 1.0, 0.5)
-    love.graphics.rectangle("line", bx, by, bw, btn_h, 3, 3)
+    love.graphics.setColor(0.45, 0.65, 1.0, 0.55)
+    love.graphics.rectangle("line", bx, by, bw, btn_h, r, r)
   else
-    love.graphics.setColor(0.25, 0.28, 0.4, alpha * 0.5)
-    love.graphics.rectangle("line", bx, by, bw, btn_h, 3, 3)
+    love.graphics.setColor(0.25, 0.28, 0.4, alpha * 0.4)
+    love.graphics.rectangle("line", bx, by, bw, btn_h, r, r)
   end
 
-  local cx = bx + 4
+  -- Measure content width to center icons
+  local freq_w_est = draw_frequency_icon(ab, -1000, -1000, icon_s, 0)
+  local cost_w_est = draw_cost_cluster(ab.cost, -1000, -1000, icon_s, 0)
+  local total_w = freq_w_est + cost_w_est
+  local cx = bx + (bw - total_w) / 2
   local cy = by + (btn_h - icon_s) / 2
 
-  -- Frequency icon (compact)
+  -- Frequency icon
   local freq_w = draw_frequency_icon(ab, cx, cy, icon_s, alpha)
   cx = cx + freq_w
 
   -- Cost icons
-  local cost_w = draw_cost_cluster(ab.cost, cx, cy, icon_s, alpha)
-  cx = cx + cost_w
-
-  -- Effect text (truncated to fit)
-  local effect_text = opts.effect_text or ability_effect_text(ab)
-  love.graphics.setColor(0.8, 0.82, 0.9, alpha)
-  love.graphics.setFont(font)
-  local remaining_w = bw - (cx - bx) - 4
-  if remaining_w > 10 then
-    love.graphics.printf(effect_text, cx + 2, by + 4, math.max(remaining_w, 10), "left")
-  end
+  draw_cost_cluster(ab.cost, cx, cy, icon_s, alpha)
 
   -- "Used" overlay
   if is_used then
     love.graphics.setColor(0, 0, 0, 0.35)
-    love.graphics.rectangle("fill", bx, by, bw, btn_h, 3, 3)
+    love.graphics.rectangle("fill", bx, by, bw, btn_h, r, r)
     love.graphics.setColor(0.6, 0.3, 0.3, 0.8)
-    love.graphics.setFont(util.get_font(7))
-    love.graphics.printf("USED", bx, by + 4, bw, "center")
+    love.graphics.setFont(util.get_font(8))
+    love.graphics.printf("USED", bx, by + (btn_h - 10) / 2, bw, "center")
   end
 
   return btn_h
@@ -253,7 +390,6 @@ function card_frame.draw(x, y, params)
   local costs = params.costs or {}
   local attack = params.attack
   local health = params.health
-  local population = params.population
   local tier = params.tier
   local is_base = params.is_base or false
   -- New: full abilities list for standardized rendering
@@ -264,6 +400,7 @@ function card_frame.draw(x, y, params)
   local activated_ability = params.activated_ability
   local ability_used_this_turn = params.ability_used_this_turn
   local ability_can_activate = params.ability_can_activate ~= false
+  local show_ability_text = params.show_ability_text or false
 
   local strip_color = get_strip_color(faction)
   local bg_dark = { 0.08, 0.09, 0.13, 1.0 }
@@ -371,18 +508,10 @@ function card_frame.draw(x, y, params)
   end
   cy = cy + 13
 
-  -- Population line
-  if population then
-    love.graphics.setColor(muted[1], muted[2], muted[3], 0.7)
-    love.graphics.setFont(util.get_font(8))
-    love.graphics.print("Pop " .. population, cx + 2, cy)
-    cy = cy + 10
-  else
-    cy = cy + 2
-  end
+  cy = cy + 2
 
   -- ===================== ART BOX =====================
-  local art_h = 62
+  local art_h = math.min(62, h - 130)  -- scales down for shorter cards (e.g. bases)
   local art_w = header_w
   -- Art background
   love.graphics.setColor(art_bg)
@@ -421,11 +550,10 @@ function card_frame.draw(x, y, params)
         has_activated_abilities = true
         local is_used = used_abilities[ai] or false
         local can_act = can_activate_abilities[ai] or false
-        local effect_text = ability_effect_text(ab)
         local consumed = draw_ability_line(ab, cx, ab_y, art_w, {
           can_activate = can_act,
           is_used = is_used,
-          effect_text = effect_text,
+          show_ability_text = show_ability_text,
         })
         ab_y = ab_y + consumed
       end
@@ -435,24 +563,28 @@ function card_frame.draw(x, y, params)
     has_activated_abilities = true
     local is_used = ability_used_this_turn and activated_ability.once_per_turn
     local can_act = ability_can_activate and not is_used
-    local effect_text = ability_effect_text(activated_ability)
     local consumed = draw_ability_line(activated_ability, cx, ab_y, art_w, {
       can_activate = can_act,
       is_used = is_used,
-      effect_text = effect_text,
+      show_ability_text = show_ability_text,
     })
     ab_y = ab_y + consumed
   end
 
-  -- Always draw rules text if present (below abilities if any, otherwise at top of text area)
-  if text and text ~= "" then
+  -- Show rules text: when show_ability_text is on (preview mode), show the full original
+  -- text since all info is readable. Otherwise, strip activated ability descriptions.
+  local display_text = text
+  if has_activated_abilities and not show_ability_text then
+    display_text = non_activated_text(abilities_list) or non_activated_text(activated_ability and { activated_ability } or nil)
+  end
+  if display_text and display_text ~= "" then
     love.graphics.setColor(text_color[1], text_color[2], text_color[3], 0.9)
     love.graphics.setFont(util.get_font(9))
     local text_y = has_activated_abilities and (ab_y + 2) or (cy + 1)
     -- Ensure text doesn't go below the stat bar
     local max_text_y = y + h - pad - stat_bar_h - 20
     if text_y < max_text_y then
-      love.graphics.printf(text, cx + 2, text_y, art_w - 4, "left")
+      love.graphics.printf(display_text, cx + 2, text_y, art_w - 4, "left")
     end
   end
 
@@ -559,15 +691,15 @@ function card_frame.get_ability_rects(card_x, card_y, card_w, card_h, abilities_
   local rects = {}
   local pad = 6
   local header_h = 22 + 3  -- header + gap
-  local type_h = 13 + 2    -- type line + pop line estimate
-  local art_h = 62 + 4     -- art + gap
+  local type_h = 13 + 2    -- type line + gap
+  local art_h = math.min(62, card_h - 130) + 4  -- matches draw's dynamic art_h + gap
   local ab_y = card_y + pad + header_h + type_h + art_h
   local ab_w = card_w - pad * 2
-  local line_h = 22  -- ability line height + gap
+  local line_h = 29  -- ability line height (26) + gap (3)
 
   for ai, ab in ipairs(abilities_list) do
     if ab.type == "activated" then
-      rects[#rects + 1] = { x = card_x + pad, y = ab_y, w = ab_w, h = 20, ability_index = ai }
+      rects[#rects + 1] = { x = card_x + pad, y = ab_y, w = ab_w, h = 26, ability_index = ai }
       ab_y = ab_y + line_h
     end
   end
@@ -579,10 +711,10 @@ function card_frame.activate_icon_rect(card_x, card_y, card_w, card_h)
   local pad = 6
   local header_h = 22 + 3
   local type_h = 13 + 2
-  local art_h = 62 + 4
+  local art_h = math.min(62, card_h - 130) + 4
   local ab_y = card_y + pad + header_h + type_h + art_h
   local ab_w = card_w - pad * 2
-  return card_x + pad, ab_y, ab_w, 20
+  return card_x + pad, ab_y, ab_w, 26
 end
 
 card_frame.CARD_W = CARD_W
