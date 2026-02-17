@@ -25,7 +25,9 @@ function service.new(opts)
   })
 
   return setmetatable({
+    _host = host,
     gateway = host_gateway.new(host),
+    _pending_pushes = {},
   }, service)
 end
 
@@ -40,12 +42,27 @@ function service:handle_frame(frame)
     return safe_error("service_gateway_failure", { error_message = tostring(response) })
   end
 
+  -- Queue a state push after successful submit
+  if response and response.ok and request.op == "submit" then
+    local push_msg = self._host:generate_state_push()
+    local ok_push_encode, push_frame = pcall(json.encode, push_msg)
+    if ok_push_encode then
+      self._pending_pushes[#self._pending_pushes + 1] = push_frame
+    end
+  end
+
   local ok_encode, out = pcall(json.encode, response)
   if not ok_encode then
     return safe_error("service_encode_failure", { error_message = tostring(out) })
   end
 
   return out
+end
+
+function service:pop_pushes()
+  local pushes = self._pending_pushes
+  self._pending_pushes = {}
+  return pushes
 end
 
 return service

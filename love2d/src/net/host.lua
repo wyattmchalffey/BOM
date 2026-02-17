@@ -263,6 +263,16 @@ function host:get_state_snapshot_message()
   return protocol.state_snapshot(self.match_id, payload)
 end
 
+function host:generate_state_push()
+  local payload = {
+    active_player = self.state.activePlayer,
+    turn_number = self.state.turnNumber,
+    checksum = checksum.game_state(self.state),
+    state = self:get_state_snapshot(),
+  }
+  return protocol.state_push(self.match_id, payload)
+end
+
 function host:get_replay_snapshot()
   return replay.snapshot(self.replay_log)
 end

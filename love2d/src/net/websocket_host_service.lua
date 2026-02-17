@@ -24,6 +24,7 @@ function host_service.new(opts)
   return setmetatable({
     frame_handler = opts.frame_handler,
     provider = opts.server_provider,
+    push_source = opts.push_source,
     host = opts.host or "0.0.0.0",
     port = opts.port or 8080,
     connections = {},
@@ -78,12 +79,33 @@ function host_service:step(timeout_ms)
         if c.close then pcall(c.close, c) end
         table.remove(self.connections, i)
       else
+        -- Send any queued state pushes to all OTHER connections
+        if self.push_source then
+          local pushes = self.push_source:pop_pushes()
+          for _, push in ipairs(pushes) do
+            for j, other in ipairs(self.connections) do
+              if j ~= i then
+                pcall(other.send_text, other, push)
+              end
+            end
+          end
+        end
         handled = true
         i = i + 1
       end
     else
       -- No data yet, keep connection alive
       i = i + 1
+    end
+  end
+
+  -- Flush any pending state pushes (e.g. from host's own moves) to ALL connections
+  if self.push_source and #self.connections > 0 then
+    local pushes = self.push_source:pop_pushes()
+    for _, push in ipairs(pushes) do
+      for _, c in ipairs(self.connections) do
+        pcall(c.send_text, c, push)
+      end
     end
   end
 

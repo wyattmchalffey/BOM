@@ -181,9 +181,16 @@ function GameState:dispatch_command(command)
     end
 
     if result.ok then
-      local remote_state = self.authoritative_adapter:get_state()
-      if remote_state then
-        self.game_state = remote_state
+      if self.authoritative_adapter.poll then
+        -- Threaded adapter (joiner): apply command locally for instant feedback.
+        -- The authoritative state arrives via state_push shortly after.
+        result = commands.execute(self.game_state, command)
+      else
+        -- In-process adapter (host): state is already updated server-side.
+        local remote_state = self.authoritative_adapter:get_state()
+        if remote_state then
+          self.game_state = remote_state
+        end
       end
       self.multiplayer_status = "Connected (authoritative)"
     else
@@ -322,8 +329,18 @@ function GameState:update(dt)
     self.tooltip_timer = 0
   end
 
-  -- Poll server for state updates so we see the other player's actions
-  if self.authoritative_adapter and not self.reconnect_pending then
+  -- Poll adapter for push-based state updates (threaded adapters)
+  if self.authoritative_adapter and self.authoritative_adapter.poll then
+    self.authoritative_adapter:poll()
+    if self.authoritative_adapter.state_changed then
+      self.authoritative_adapter.state_changed = false
+      local remote_state = self.authoritative_adapter:get_state()
+      if remote_state then
+        self.game_state = remote_state
+      end
+    end
+  elseif self.authoritative_adapter and not self.reconnect_pending then
+    -- Fallback sync poll for in-process adapters (host side)
     self.sync_poll_timer = self.sync_poll_timer - dt
     if self.sync_poll_timer <= 0 then
       self.sync_poll_timer = self.sync_poll_interval

@@ -74,6 +74,9 @@ function MenuState.new(callbacks)
     -- Threaded relay for Play Online
     _relay = nil,
     _relay_service = nil,
+
+    -- Threaded joiner adapter for Join Game
+    _joiner_adapter = nil,
   }, MenuState)
   return self
 end
@@ -392,11 +395,34 @@ function MenuState:draw()
   textures.draw_vignette()
 end
 
+function MenuState:poll_joiner()
+  if not self._joiner_adapter then return end
+
+  self._joiner_adapter:poll()
+
+  if self._joiner_adapter.connected then
+    local adapter = self._joiner_adapter
+    self._joiner_adapter = nil
+
+    self.start_game({
+      authoritative_adapter = adapter,
+    })
+  elseif self._joiner_adapter.connect_error then
+    self.connect_error = self._joiner_adapter.connect_error
+    self._joiner_adapter:cleanup()
+    self._joiner_adapter = nil
+    self.screen = "join_setup"
+  end
+end
+
 function MenuState:update(dt)
   self.cursor_blink = self.cursor_blink + dt
 
   -- Poll threaded relay connection
   self:poll_relay()
+
+  -- Poll threaded joiner connection
+  self:poll_joiner()
 
   -- Update cursor
   local want_hand = self.hover_button ~= nil
@@ -423,6 +449,11 @@ function MenuState:go_back()
     self._relay:cleanup()
     self._relay = nil
     self._relay_service = nil
+  end
+  -- Clean up any in-progress joiner connection
+  if self._joiner_adapter then
+    self._joiner_adapter:cleanup()
+    self._joiner_adapter = nil
   end
 end
 
@@ -574,18 +605,11 @@ function MenuState:do_join()
 
   local name = self:get_player_name()
 
-  -- Resolve websocket provider
-  local resolved = websocket_provider.resolve()
-  if not resolved.ok then
-    self.connect_error = "Websocket unavailable: " .. tostring(resolved.reason)
-    return
-  end
-
+  -- Use threaded (non-blocking) websocket connection
   local ok_call, built = pcall(runtime_multiplayer.build, {
-    mode = "websocket",
+    mode = "threaded_websocket",
     url = url,
     player_name = name,
-    websocket_provider = resolved.provider,
   })
 
   if not ok_call then
@@ -593,7 +617,9 @@ function MenuState:do_join()
     return
   end
   if built.ok then
-    self.start_game({ authoritative_adapter = built.adapter })
+    self._joiner_adapter = built.adapter
+    self.screen = "connecting"
+    self.connect_error = nil
   else
     self.connect_error = "Connection failed: " .. tostring(built.reason)
   end

@@ -9,6 +9,7 @@ local client_session = require("src.net.client_session")
 local websocket_transport = require("src.net.websocket_transport")
 local websocket_client = require("src.net.websocket_client")
 local headless_host_service = require("src.net.headless_host_service")
+local threaded_client_adapter = require("src.net.threaded_client_adapter")
 local json = require("src.net.json_codec")
 
 local runtime_multiplayer = {}
@@ -76,6 +77,15 @@ function runtime_multiplayer.build(opts)
       encode = json.encode,
       decode = json.decode,
     })
+  elseif opts.mode == "threaded_websocket" then
+    if type(opts.url) ~= "string" or opts.url == "" then
+      return fail("missing_websocket_url")
+    end
+    local adapter = threaded_client_adapter.start({
+      url = opts.url,
+      player_name = opts.player_name,
+    })
+    return ok(adapter)
   else
     return fail("unsupported_multiplayer_mode", { mode = opts.mode })
   end

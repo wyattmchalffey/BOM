@@ -278,6 +278,14 @@ function threaded_relay:poll()
             end
         end
     end
+
+    -- Flush any pending state pushes (from host's own moves OR joiner frames)
+    if self._service then
+        local pushes = self._service:pop_pushes()
+        for _, push in ipairs(pushes) do
+            self._outbox_ch:push(push)
+        end
+    end
 end
 
 function threaded_relay:cleanup()

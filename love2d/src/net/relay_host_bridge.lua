@@ -130,27 +130,34 @@ function relay_host_bridge.connect(opts)
 
     -- Poll with 0 timeout (non-blocking)
     local frame = conn:receive(0)
-    if not frame then return end
-
-    local is_ctrl2, ctrl2 = is_relay_control(frame)
-    if is_ctrl2 then
-      if ctrl2.type == "peer_joined" then
-        peer_joined = true
-        print("[relay_host_bridge] peer joined room " .. room_code)
-      elseif ctrl2.type == "peer_disconnected" then
-        print("[relay_host_bridge] peer disconnected from room " .. room_code)
-        peer_joined = false
-      elseif ctrl2.type == "error" then
-        print("[relay_host_bridge] relay error: " .. tostring(ctrl2.message))
-        connected = false
+    if frame then
+      local is_ctrl2, ctrl2 = is_relay_control(frame)
+      if is_ctrl2 then
+        if ctrl2.type == "peer_joined" then
+          peer_joined = true
+          print("[relay_host_bridge] peer joined room " .. room_code)
+        elseif ctrl2.type == "peer_disconnected" then
+          print("[relay_host_bridge] peer disconnected from room " .. room_code)
+          peer_joined = false
+        elseif ctrl2.type == "error" then
+          print("[relay_host_bridge] relay error: " .. tostring(ctrl2.message))
+          connected = false
+        end
+      else
+        -- Game frame from joiner — handle via headless host service
+        local response = service:handle_frame(frame)
+        if response and connected then
+          pcall(conn.send, conn, response)
+        end
       end
-      return
     end
 
-    -- Game frame from joiner — handle via headless host service
-    local response = service:handle_frame(frame)
-    if response and connected then
-      pcall(conn.send, conn, response)
+    -- Flush any pending state pushes (from host's own moves OR joiner frames)
+    local pushes = service:pop_pushes()
+    for _, push in ipairs(pushes) do
+      if connected then
+        pcall(conn.send, conn, push)
+      end
     end
   end
 

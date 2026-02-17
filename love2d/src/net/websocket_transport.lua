@@ -31,6 +31,12 @@ local function is_relay_control_message(decoded)
     and RELAY_CONTROL_TYPES[decoded.type] == true
 end
 
+-- Messages that are unsolicited server pushes, not responses to requests
+local function is_unsolicited_push(decoded)
+  return type(decoded) == "table"
+    and decoded.type == "state_push"
+end
+
 function transport.new(opts)
   opts = opts or {}
   return setmetatable({
@@ -83,9 +89,10 @@ function transport:_request(op, payload, player_index)
       return self:_error(match_id, "transport_decode_failed", { error_message = tostring(decoded) })
     end
 
-    if is_relay_control_message(decoded) then
-      -- Relay may send control envelopes (for example "joined") before the
-      -- host's protocol response; skip and wait for the next frame.
+    if is_relay_control_message(decoded) or is_unsolicited_push(decoded) then
+      -- Relay may send control envelopes (for example "joined") or
+      -- unsolicited state_push messages before the host's protocol response;
+      -- skip and wait for the next frame.
       response = nil
     else
       response = decoded

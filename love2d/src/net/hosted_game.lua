@@ -139,6 +139,7 @@ local function try_sync_server(service, host, port)
       return service:handle_frame(frame)
     end,
     server_provider = provider,
+    push_source = service,
     host = host,
     port = port,
   })

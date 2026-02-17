@@ -127,6 +127,15 @@ function protocol.resync_required(match_id, payload)
   }
 end
 
+function protocol.state_push(match_id, payload)
+  return {
+    type = "state_push",
+    protocol_version = protocol.VERSION,
+    match_id = match_id,
+    payload = payload,
+  }
+end
+
 function protocol.error_message(match_id, reason, payload)
   return {
     type = "error",
