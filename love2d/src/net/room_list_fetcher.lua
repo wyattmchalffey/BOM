@@ -51,6 +51,11 @@ local function https_get(url)
         return nil, "ssl wrap: " .. tostring(wrap_err)
     end
 
+    -- Set SNI hostname (required by most modern HTTPS servers)
+    if wrapped.sni then
+        wrapped:sni(host)
+    end
+
     local hs_ok, hs_err = wrapped:dohandshake()
     if not hs_ok then
         wrapped:close()
@@ -81,9 +86,27 @@ local function https_get(url)
     local response = table.concat(chunks)
     -- Parse status line
     local status_code = tonumber(response:match("^HTTP/%d%.%d (%d+)"))
-    -- Extract body after headers
-    local body = response:match("\r\n\r\n(.*)")
-    return body, nil, status_code
+    -- Split headers and body
+    local header_block, raw_body = response:match("^(.-)\r\n\r\n(.*)")
+    if not raw_body then return nil, "malformed response" end
+
+    -- Decode chunked transfer encoding if present
+    if header_block:lower():find("transfer%-encoding:%s*chunked") then
+        local decoded = {}
+        local pos = 1
+        while pos <= #raw_body do
+            local hex_end = raw_body:find("\r\n", pos)
+            if not hex_end then break end
+            local chunk_size = tonumber(raw_body:sub(pos, hex_end - 1), 16)
+            if not chunk_size or chunk_size == 0 then break end
+            local chunk_data = raw_body:sub(hex_end + 2, hex_end + 1 + chunk_size)
+            table.insert(decoded, chunk_data)
+            pos = hex_end + 2 + chunk_size + 2  -- skip data + trailing \r\n
+        end
+        raw_body = table.concat(decoded)
+    end
+
+    return raw_body, nil, status_code
 end
 
 while true do
