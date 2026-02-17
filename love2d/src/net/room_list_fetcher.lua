@@ -15,19 +15,6 @@ local json = require("src.net.json_codec")
 local THREAD_CODE = [[
 require("love.filesystem")
 
--- Custom loader for modules inside the .love archive
-local searchers = package.loaders or package.searchers
-table.insert(searchers, 2, function(modname)
-    local path = modname:gsub("%.", "/") .. ".lua"
-    if love.filesystem.getInfo(path) then
-        return load(love.filesystem.read(path), "@" .. path)
-    end
-    path = modname:gsub("%.", "/") .. "/init.lua"
-    if love.filesystem.getInfo(path) then
-        return load(love.filesystem.read(path), "@" .. path)
-    end
-end)
-
 -- Native DLLs (ssl.dll) sit next to the exe
 local exe_dir = love.filesystem.getSourceBaseDirectory():gsub("\\", "/")
 package.cpath = package.cpath .. ";" .. exe_dir .. "/?.dll"
@@ -36,19 +23,68 @@ local request_ch = love.thread.getChannel("roomlist_request")
 local result_ch  = love.thread.getChannel("roomlist_result")
 local quit_ch    = love.thread.getChannel("roomlist_quit")
 
--- We need https support
-local ok_https, https = pcall(require, "ssl.https")
-if not ok_https then
-    -- Try luasec directly
-    ok_https, https = pcall(function()
-        local ssl = require("ssl")
-        return require("ssl.https")
-    end)
-end
+local socket = require("socket")
+local ssl = require("ssl")
 
--- Fallback to plain http if https not available
-local ok_http, http = pcall(require, "socket.http")
-local ltn12 = require("ltn12")
+-- Minimal HTTPS GET using raw socket + ssl (no ssl.https needed)
+local function https_get(url)
+    local host, path = url:match("^https://([^/]+)(.*)")
+    if not host then return nil, "invalid URL" end
+    if path == "" then path = "/" end
+
+    local sock = socket.tcp()
+    sock:settimeout(10)
+    local ok, err = sock:connect(host, 443)
+    if not ok then
+        sock:close()
+        return nil, "connect: " .. tostring(err)
+    end
+
+    local wrapped, wrap_err = ssl.wrap(sock, {
+        mode = "client",
+        protocol = "any",
+        verify = "none",
+        options = {"all", "no_sslv2", "no_sslv3", "no_tlsv1"},
+    })
+    if not wrapped then
+        sock:close()
+        return nil, "ssl wrap: " .. tostring(wrap_err)
+    end
+
+    local hs_ok, hs_err = wrapped:dohandshake()
+    if not hs_ok then
+        wrapped:close()
+        return nil, "ssl handshake: " .. tostring(hs_err)
+    end
+
+    wrapped:send(
+        "GET " .. path .. " HTTP/1.1\r\n" ..
+        "Host: " .. host .. "\r\n" ..
+        "Connection: close\r\n" ..
+        "Accept: application/json\r\n\r\n"
+    )
+
+    local chunks = {}
+    while true do
+        local data, read_err, partial = wrapped:receive("*a")
+        if data then
+            table.insert(chunks, data)
+        elseif partial and #partial > 0 then
+            table.insert(chunks, partial)
+        end
+        if read_err == "closed" or (read_err and read_err ~= "timeout") then
+            break
+        end
+    end
+    wrapped:close()
+
+    local response = table.concat(chunks)
+    -- Parse status line
+    local status_code = tonumber(response:match("^HTTP/%d%.%d (%d+)"))
+    -- Extract body after headers
+    local body = response:match("\r\n\r\n(.*)")
+    return body, nil, status_code
+end
 
 while true do
     -- Wait for a request (blocks until one arrives or check quit)
@@ -56,37 +92,17 @@ while true do
 
     if quit_ch:pop() then break end
 
-    if url then
-        local chunks = {}
-        local ok, status_code, headers
-        if url:match("^https://") and ok_https then
-            ok, status_code, headers = https.request({
-                url = url,
-                sink = ltn12.sink.table(chunks),
-                protocol = "any",
-                options = {"all", "no_sslv2", "no_sslv3", "no_tlsv1"},
-                verify = "none",
-            })
-        elseif ok_http then
-            ok, status_code, headers = http.request({
-                url = url,
-                sink = ltn12.sink.table(chunks),
-            })
-        else
-            result_ch:push('{"error":"no http library available"}')
-            goto continue
-        end
-
-        if not ok then
-            result_ch:push('{"error":' .. ("%q"):format(tostring(status_code)) .. '}')
+    if url and url ~= "" then
+        local body, err, status_code = https_get(url)
+        if err then
+            result_ch:push('{"error":' .. string.format("%q", err) .. '}')
         elseif status_code ~= 200 then
             result_ch:push('{"error":"HTTP ' .. tostring(status_code) .. '"}')
-        else
-            local body = table.concat(chunks)
+        elseif body then
             result_ch:push(body)
+        else
+            result_ch:push('{"error":"empty response"}')
         end
-
-        ::continue::
     end
 
     if quit_ch:pop() then break end
