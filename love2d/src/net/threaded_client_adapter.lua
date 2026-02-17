@@ -139,31 +139,39 @@ while true do
     -- Check for commands from main thread
     local cmd_json = cmd_ch:pop()
     if cmd_json then
-        local cmd = json.decode(cmd_json)
-        local submit_result = session:submit_with_resync(cmd)
+        local ok_cmd, cmd_err = pcall(function()
+            local cmd = json.decode(cmd_json)
+            local submit_result = session:submit_with_resync(cmd)
 
-        if not submit_result.ok and submit_result.reason == "resynced_retry_required" then
-            -- Retry once after resync
-            submit_result = session:submit_with_resync(cmd)
+            if not submit_result.ok and submit_result.reason == "resynced_retry_required" then
+                submit_result = session:submit_with_resync(cmd)
+            end
+
+            response_ch:push(json.encode({
+                ok = submit_result.ok,
+                reason = submit_result.reason,
+                checksum = submit_result.meta and submit_result.meta.checksum,
+            }))
+        end)
+        if not ok_cmd then
+            result_ch:push(json.encode({ ok = false, reason = "receive_error: " .. tostring(cmd_err) }))
+            return
         end
-
-        -- Push result to response channel (state update comes via state_push)
-        response_ch:push(json.encode({
-            ok = submit_result.ok,
-            reason = submit_result.reason,
-            checksum = submit_result.meta and submit_result.meta.checksum,
-        }))
-
-        -- Reset fallback timer after any command
         fallback_poll_timer = 0
     end
 
     -- Try to receive unsolicited messages (state_push) from server
     local received_push = false
     if use_select then
-        local readable, _, _ = socket.select({raw_sock}, nil, 0.05)
+        local ok_sel, readable_or_err = pcall(function()
+            return socket.select({raw_sock}, nil, 0.05)
+        end)
+        if not ok_sel then
+            result_ch:push(json.encode({ ok = false, reason = "receive_error: select failed - " .. tostring(readable_or_err) }))
+            return
+        end
+        local readable = readable_or_err
         if readable and #readable > 0 then
-            -- Brief socket timeout so receive doesn't block
             if raw_sock.settimeout then raw_sock:settimeout(0.1) end
             local ok_recv, frame_or_err = pcall(function() return conn:receive() end)
             if ok_recv and frame_or_err then
@@ -172,15 +180,12 @@ while true do
                     push_ch:push(frame_or_err)
                     received_push = true
                 end
-                -- Ignore other unsolicited messages (relay control etc)
             elseif not ok_recv and not tostring(frame_or_err):find("timeout") then
-                -- Connection error
                 result_ch:push(json.encode({ ok = false, reason = "receive_error: " .. tostring(frame_or_err) }))
                 return
             end
         end
     else
-        -- Fallback: short-timeout receive using raw socket timeout
         if raw_sock and raw_sock.settimeout then
             raw_sock:settimeout(0.05)
         end
@@ -204,8 +209,8 @@ while true do
         fallback_poll_timer = fallback_poll_timer + 0.05
         if fallback_poll_timer >= FALLBACK_POLL_INTERVAL then
             fallback_poll_timer = 0
-            local poll_snap = session:request_snapshot()
-            if poll_snap.ok and poll_snap.meta and poll_snap.meta.state then
+            local ok_snap, poll_snap = pcall(function() return session:request_snapshot() end)
+            if ok_snap and poll_snap.ok and poll_snap.meta and poll_snap.meta.state then
                 push_ch:push(json.encode({
                     type = "state_push",
                     payload = {
@@ -215,6 +220,9 @@ while true do
                         turn_number = poll_snap.meta.turn_number,
                     },
                 }))
+            elseif not ok_snap then
+                result_ch:push(json.encode({ ok = false, reason = "receive_error: snapshot failed - " .. tostring(poll_snap) }))
+                return
             end
         end
     else
@@ -346,13 +354,19 @@ function threaded_client_adapter:poll()
     end
   end
 
-  -- Check for async errors from the thread
+  -- Check for async errors from the thread and detect disconnection
   if self.connected then
     local err_json = self._result_ch:pop()
     if err_json then
       local ok_dec, err_msg = pcall(json.decode, err_json)
       if ok_dec and not err_msg.ok then
         print("[threaded_client_adapter] async error: " .. tostring(err_msg.reason))
+        -- Receive errors mean the connection is dead
+        if tostring(err_msg.reason):find("receive_error") then
+          self.connected = false
+          self._disconnected = true
+          print("[threaded_client_adapter] connection lost, marking disconnected")
+        end
       end
     end
 
@@ -360,6 +374,14 @@ function threaded_client_adapter:poll()
       local thread_err = self._thread:getError()
       if thread_err then
         print("[threaded_client_adapter] thread error: " .. tostring(thread_err))
+        self.connected = false
+        self._disconnected = true
+      end
+      -- If the thread has stopped running, the connection is dead
+      if not self._thread:isRunning() and not self._disconnected then
+        print("[threaded_client_adapter] thread stopped, marking disconnected")
+        self.connected = false
+        self._disconnected = true
       end
     end
   end

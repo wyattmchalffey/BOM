@@ -170,11 +170,38 @@ function GameState:_attempt_reconnect()
   return false
 end
 
+function GameState:_handle_disconnect(message)
+  print("[game] disconnect: " .. tostring(message))
+  -- Clean up server if hosting
+  if self.server_cleanup then
+    pcall(self.server_cleanup)
+    self.server_step = nil
+    self.server_cleanup = nil
+  end
+  -- Clean up adapter
+  if self.authoritative_adapter and self.authoritative_adapter.cleanup then
+    pcall(function() self.authoritative_adapter:cleanup() end)
+  end
+  self.authoritative_adapter = nil
+  self.reconnect_pending = false
+  -- Show popup and return to menu after a moment
+  self._disconnect_message = message
+  self._disconnect_timer = 3.0
+end
+
 function GameState:dispatch_command(command)
+  -- Don't process commands during disconnect
+  if self._disconnect_timer then return { ok = false, reason = "disconnected" } end
+
   local result
 
   if self.authoritative_adapter then
-    result = self.authoritative_adapter:submit(command)
+    local ok_submit, submit_result = pcall(function() return self.authoritative_adapter:submit(command) end)
+    if not ok_submit then
+      self:_handle_disconnect("Connection lost")
+      return { ok = false, reason = "disconnected" }
+    end
+    result = submit_result
 
     if not result.ok and result.reason == "resynced_retry_required" then
       result = self.authoritative_adapter:submit(command)
@@ -338,12 +365,19 @@ function GameState:update(dt)
 
   -- Poll adapter for push-based state updates (threaded adapters)
   if self.authoritative_adapter and self.authoritative_adapter.poll then
-    self.authoritative_adapter:poll()
-    if self.authoritative_adapter.state_changed then
-      self.authoritative_adapter.state_changed = false
-      local remote_state = self.authoritative_adapter:get_state()
-      if remote_state then
-        self.game_state = remote_state
+    local ok_poll, poll_err = pcall(function() self.authoritative_adapter:poll() end)
+    if not ok_poll then
+      print("[game] poll error: " .. tostring(poll_err))
+      self:_handle_disconnect("Connection lost")
+    elseif self.authoritative_adapter._disconnected then
+      self:_handle_disconnect("Opponent disconnected")
+    else
+      if self.authoritative_adapter.state_changed then
+        self.authoritative_adapter.state_changed = false
+        local remote_state = self.authoritative_adapter:get_state()
+        if remote_state then
+          self.game_state = remote_state
+        end
       end
     end
   elseif self.authoritative_adapter and not self.reconnect_pending then
@@ -351,8 +385,11 @@ function GameState:update(dt)
     self.sync_poll_timer = self.sync_poll_timer - dt
     if self.sync_poll_timer <= 0 then
       self.sync_poll_timer = self.sync_poll_interval
-      local snap = self.authoritative_adapter:sync_snapshot()
-      if snap.ok then
+      local ok_sync, snap = pcall(function() return self.authoritative_adapter:sync_snapshot() end)
+      if not ok_sync then
+        print("[game] sync_snapshot error: " .. tostring(snap))
+        self:_handle_disconnect("Connection lost")
+      elseif snap.ok then
         local remote_state = self.authoritative_adapter:get_state()
         if remote_state then
           self.game_state = remote_state
@@ -367,6 +404,19 @@ function GameState:update(dt)
     self.reconnect_timer = self.reconnect_timer - dt
     if self.reconnect_timer <= 0 then
       self:_attempt_reconnect()
+    end
+  end
+
+  -- Disconnect countdown: show message then return to menu
+  if self._disconnect_timer then
+    self._disconnect_timer = self._disconnect_timer - dt
+    if self._disconnect_timer <= 0 then
+      self._disconnect_timer = nil
+      self._disconnect_message = nil
+      if self.return_to_menu then
+        self.return_to_menu()
+        return
+      end
     end
   end
 
@@ -631,6 +681,26 @@ function GameState:draw()
     love.graphics.setFont(util.get_title_font(28))
     love.graphics.setColor(1, 1, 1, alpha)
     love.graphics.printf(self.turn_banner_text, 0, gh / 2 - 16, gw, "center")
+  end
+
+  -- Disconnect banner overlay
+  if self._disconnect_message then
+    local gw, gh = love.graphics.getDimensions()
+    local alpha = math.min(1, (3.0 - (self._disconnect_timer or 0)) / 0.3)
+    -- Dark overlay
+    love.graphics.setColor(0, 0, 0, 0.65 * alpha)
+    love.graphics.rectangle("fill", 0, gh / 2 - 50, gw, 100)
+    -- Red accent line
+    love.graphics.setColor(0.8, 0.2, 0.2, 0.8 * alpha)
+    love.graphics.rectangle("fill", 0, gh / 2 - 50, gw, 3)
+    -- Message
+    love.graphics.setFont(util.get_title_font(24))
+    love.graphics.setColor(1, 0.3, 0.3, alpha)
+    love.graphics.printf(self._disconnect_message, 0, gh / 2 - 20, gw, "center")
+    -- Subtitle
+    love.graphics.setFont(util.get_font(12))
+    love.graphics.setColor(0.7, 0.7, 0.8, alpha * 0.8)
+    love.graphics.printf("Returning to menu...", 0, gh / 2 + 14, gw, "center")
   end
 
   if self.multiplayer_status then
