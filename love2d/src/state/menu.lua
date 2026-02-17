@@ -1,5 +1,5 @@
 -- Main menu state: title screen with Local / Host / Join options.
--- Internal state machine: "main", "host_setup", "join_setup", "connecting"
+-- Internal state machine: "main", "browse", "host_setup", "join_setup", "connecting"
 
 local util = require("src.ui.util")
 local runtime_multiplayer = require("src.net.runtime_multiplayer")
@@ -12,6 +12,7 @@ local client_session = require("src.net.client_session")
 local websocket_transport = require("src.net.websocket_transport")
 local json = require("src.net.json_codec")
 local textures = require("src.fx.textures")
+local room_list_fetcher = require("src.net.room_list_fetcher")
 
 local MenuState = {}
 MenuState.__index = MenuState
@@ -77,6 +78,12 @@ function MenuState.new(callbacks)
 
     -- Threaded joiner adapter for Join Game
     _joiner_adapter = nil,
+
+    -- Browse screen
+    _room_fetcher = nil,
+    browse_scroll = 0,
+    browse_hover_join = nil,   -- index of hovered join button in room list
+    browse_hover_host = false, -- hovering the "Host Game" button
   }, MenuState)
   return self
 end
@@ -353,6 +360,133 @@ function MenuState:draw_join_setup()
   end
 end
 
+-- Browse screen constants
+local BROWSE_ROW_H = 56
+local BROWSE_ROW_PAD = 8
+local BROWSE_LIST_X_PAD = 60
+local BROWSE_JOIN_W = 100
+local BROWSE_JOIN_H = 36
+local BROWSE_HOST_COLOR = { 0.15, 0.55, 0.25 }
+
+function MenuState:draw_browse()
+  local gw = love.graphics.getWidth()
+  local gh = love.graphics.getHeight()
+  draw_back_button(self.hover_button == -1)
+
+  -- Title
+  local title_font = util.get_title_font(32)
+  love.graphics.setFont(title_font)
+  love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
+  love.graphics.printf("Browse Games", 0, 30, gw, "center")
+
+  -- "Host Game" button (top area)
+  local host_btn = {
+    x = center_x(BUTTON_W),
+    y = 80,
+    w = BUTTON_W,
+    h = BUTTON_H,
+  }
+  draw_button(host_btn, "Host Game", BROWSE_HOST_COLOR, self.browse_hover_host)
+
+  -- Room list area
+  local list_top = 160
+  local list_bottom = gh - 40
+  local list_h = list_bottom - list_top
+  local list_x = BROWSE_LIST_X_PAD
+  local list_w = gw - BROWSE_LIST_X_PAD * 2
+
+  -- Status / error text
+  local status_font = util.get_font(13)
+  love.graphics.setFont(status_font)
+
+  if self.connect_error then
+    love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 1)
+    love.graphics.printf(self.connect_error, 0, list_top, gw, "center")
+    return
+  end
+
+  local rooms = self._room_fetcher and self._room_fetcher.rooms or {}
+  local fetcher_error = self._room_fetcher and self._room_fetcher.error
+
+  if fetcher_error then
+    love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 0.8)
+    love.graphics.printf("Error: " .. tostring(fetcher_error), 0, list_bottom + 4, gw, "center")
+  end
+
+  if #rooms == 0 then
+    love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
+    local msg = "No games found"
+    if self._room_fetcher and self._room_fetcher.loading then
+      msg = "Searching for games..."
+    end
+    love.graphics.printf(msg, 0, list_top + list_h / 2 - 10, gw, "center")
+    return
+  end
+
+  -- Clamp scroll
+  local total_h = #rooms * (BROWSE_ROW_H + BROWSE_ROW_PAD)
+  local max_scroll = math.max(0, total_h - list_h)
+  self.browse_scroll = math.max(0, math.min(self.browse_scroll, max_scroll))
+
+  -- Draw room rows with scissor clipping
+  love.graphics.setScissor(list_x, list_top, list_w, list_h)
+
+  local row_font = util.get_title_font(20)
+  local small_font = util.get_font(12)
+
+  for i, room in ipairs(rooms) do
+    local ry = list_top + (i - 1) * (BROWSE_ROW_H + BROWSE_ROW_PAD) - self.browse_scroll
+
+    -- Skip if off-screen
+    if ry + BROWSE_ROW_H >= list_top and ry <= list_bottom then
+      -- Row background
+      local hovered = self.browse_hover_join == i
+      if hovered then
+        love.graphics.setColor(0.18, 0.18, 0.28, 0.9)
+      else
+        love.graphics.setColor(0.14, 0.14, 0.22, 0.7)
+      end
+      love.graphics.rectangle("fill", list_x, ry, list_w, BROWSE_ROW_H, 8, 8)
+
+      -- Row border
+      love.graphics.setColor(1, 1, 1, 0.08)
+      love.graphics.setLineWidth(1)
+      love.graphics.rectangle("line", list_x, ry, list_w, BROWSE_ROW_H, 8, 8)
+
+      -- Host name
+      love.graphics.setFont(row_font)
+      love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+      love.graphics.print(room.hostName or "Player", list_x + 16, ry + (BROWSE_ROW_H - row_font:getHeight()) / 2)
+
+      -- Join button
+      local join_x = list_x + list_w - BROWSE_JOIN_W - 12
+      local join_y = ry + (BROWSE_ROW_H - BROWSE_JOIN_H) / 2
+      local join_hovered = hovered
+      if join_hovered then
+        love.graphics.setColor(0.2, 0.58, 0.35, 1)
+      else
+        love.graphics.setColor(0.18, 0.50, 0.28, 1)
+      end
+      love.graphics.rectangle("fill", join_x, join_y, BROWSE_JOIN_W, BROWSE_JOIN_H, 6, 6)
+      love.graphics.setColor(1, 1, 1, 0.3)
+      love.graphics.rectangle("line", join_x, join_y, BROWSE_JOIN_W, BROWSE_JOIN_H, 6, 6)
+
+      love.graphics.setFont(small_font)
+      love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+      love.graphics.printf("Join", join_x, join_y + (BROWSE_JOIN_H - small_font:getHeight()) / 2, BROWSE_JOIN_W, "center")
+    end
+  end
+
+  love.graphics.setScissor()
+
+  -- Loading indicator
+  if self._room_fetcher and self._room_fetcher.loading then
+    love.graphics.setFont(small_font)
+    love.graphics.setColor(DIM[1], DIM[2], DIM[3], 0.7)
+    love.graphics.printf("Refreshing...", 0, list_bottom + 4, gw, "center")
+  end
+end
+
 function MenuState:draw_connecting()
   local gw = love.graphics.getWidth()
   local gh = love.graphics.getHeight()
@@ -376,6 +510,8 @@ function MenuState:draw()
 
   if self.screen == "main" then
     self:draw_main()
+  elseif self.screen == "browse" then
+    self:draw_browse()
   elseif self.screen == "host_setup" then
     self:draw_host_setup()
   elseif self.screen == "join_setup" then
@@ -424,6 +560,11 @@ function MenuState:update(dt)
   -- Poll threaded joiner connection
   self:poll_joiner()
 
+  -- Poll room list fetcher
+  if self.screen == "browse" and self._room_fetcher then
+    self._room_fetcher:poll(dt)
+  end
+
   -- Update cursor
   local want_hand = self.hover_button ~= nil
   local desired = want_hand and "hand" or "arrow"
@@ -455,6 +596,11 @@ function MenuState:go_back()
     self._joiner_adapter:cleanup()
     self._joiner_adapter = nil
   end
+  -- Clean up room fetcher
+  if self._room_fetcher then
+    self._room_fetcher:cleanup()
+    self._room_fetcher = nil
+  end
 end
 
 -- Get effective player name (default if empty)
@@ -469,16 +615,60 @@ local function validate_ws_url(url)
   return url:match("^wss?://") ~= nil
 end
 
+function MenuState:enter_browse()
+  self.screen = "browse"
+  self.connect_error = nil
+  self.browse_scroll = 0
+  self.browse_hover_join = nil
+  self.browse_hover_host = false
+  self.hover_button = nil
+
+  -- Start fetching room list
+  if self._room_fetcher then
+    self._room_fetcher:cleanup()
+  end
+  self._room_fetcher = room_list_fetcher.new("https://bom-hbfv.onrender.com/rooms")
+end
+
 function MenuState:do_play_online()
   self.screen = "connecting"
   self.connect_error = nil
 
   -- Start threaded connection (non-blocking)
-  self._relay = threaded_relay.start("wss://bom-hbfv.onrender.com")
+  self._relay = threaded_relay.start("wss://bom-hbfv.onrender.com", self:get_player_name())
 
   -- Create headless host service (local game logic authority)
   self._relay_service = headless_host_service.new({})
   self._relay:attach_service(self._relay_service)
+end
+
+function MenuState:do_browse_join(room_code)
+  local url = "wss://bom-hbfv.onrender.com/join/" .. room_code
+  local name = self:get_player_name()
+
+  -- Clean up fetcher
+  if self._room_fetcher then
+    self._room_fetcher:cleanup()
+    self._room_fetcher = nil
+  end
+
+  local ok_call, built = pcall(runtime_multiplayer.build, {
+    mode = "threaded_websocket",
+    url = url,
+    player_name = name,
+  })
+
+  if not ok_call then
+    self.connect_error = "Connection failed: " .. tostring(built)
+    return
+  end
+  if built.ok then
+    self._joiner_adapter = built.adapter
+    self.screen = "connecting"
+    self.connect_error = nil
+  else
+    self.connect_error = "Connection failed: " .. tostring(built.reason)
+  end
 end
 
 -- Called from update() when relay is active
@@ -532,10 +722,12 @@ function MenuState:poll_relay()
       room_code = relay.room_code,
     })
   elseif self._relay.state == "error" then
-    self.connect_error = self._relay.error_msg
+    local err = self._relay.error_msg
     self._relay = nil
     self._relay_service = nil
-    self.screen = "main"
+    -- Go back to browse screen (re-start fetcher) so user sees the error
+    self:enter_browse()
+    self.connect_error = err
   end
 end
 
@@ -634,8 +826,8 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
     for i = 1, #btns do
       if point_in_rect(x, y, rects[i]) then
         if i == 1 then
-          -- Play Online
-          self:do_play_online()
+          -- Play Online → Browse Games
+          self:enter_browse()
         elseif i == 2 then
           -- Local Game
           self.start_game({ authoritative_adapter = nil })
@@ -655,6 +847,45 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
           self.ws_reason = resolved.reason
         end
         return
+      end
+    end
+
+  elseif self.screen == "browse" then
+    -- Back button
+    if point_in_rect(x, y, back_button_rect()) then
+      self:go_back()
+      return
+    end
+    -- Host Game button
+    local host_btn = {
+      x = center_x(BUTTON_W),
+      y = 80,
+      w = BUTTON_W,
+      h = BUTTON_H,
+    }
+    if point_in_rect(x, y, host_btn) then
+      if self._room_fetcher then
+        self._room_fetcher:cleanup()
+        self._room_fetcher = nil
+      end
+      self:do_play_online()
+      return
+    end
+    -- Room list join clicks
+    local rooms = self._room_fetcher and self._room_fetcher.rooms or {}
+    local list_top = 160
+    local list_bottom = love.graphics.getHeight() - 40
+    local list_x = BROWSE_LIST_X_PAD
+    local list_w = love.graphics.getWidth() - BROWSE_LIST_X_PAD * 2
+    for i, room in ipairs(rooms) do
+      local ry = list_top + (i - 1) * (BROWSE_ROW_H + BROWSE_ROW_PAD) - self.browse_scroll
+      if ry + BROWSE_ROW_H >= list_top and ry <= list_bottom then
+        local join_x = list_x + list_w - BROWSE_JOIN_W - 12
+        local join_y = ry + (BROWSE_ROW_H - BROWSE_JOIN_H) / 2
+        if point_in_rect(x, y, { x = join_x, y = join_y, w = BROWSE_JOIN_W, h = BROWSE_JOIN_H }) then
+          self:do_browse_join(room.code)
+          return
+        end
       end
     end
 
@@ -737,6 +968,42 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
       end
     end
 
+  elseif self.screen == "browse" then
+    self.browse_hover_join = nil
+    self.browse_hover_host = false
+    if point_in_rect(x, y, back_button_rect()) then
+      self.hover_button = -1
+      return
+    end
+    -- Host Game button
+    local host_btn = {
+      x = center_x(BUTTON_W),
+      y = 80,
+      w = BUTTON_W,
+      h = BUTTON_H,
+    }
+    if point_in_rect(x, y, host_btn) then
+      self.browse_hover_host = true
+      self.hover_button = -2  -- set to non-nil so cursor becomes hand
+      return
+    end
+    -- Room list rows
+    local rooms = self._room_fetcher and self._room_fetcher.rooms or {}
+    local list_top = 160
+    local list_bottom = love.graphics.getHeight() - 40
+    local list_x = BROWSE_LIST_X_PAD
+    local list_w = love.graphics.getWidth() - BROWSE_LIST_X_PAD * 2
+    for i, room in ipairs(rooms) do
+      local ry = list_top + (i - 1) * (BROWSE_ROW_H + BROWSE_ROW_PAD) - self.browse_scroll
+      if ry + BROWSE_ROW_H >= list_top and ry <= list_bottom then
+        if point_in_rect(x, y, { x = list_x, y = ry, w = list_w, h = BROWSE_ROW_H }) then
+          self.browse_hover_join = i
+          self.hover_button = -2
+          return
+        end
+      end
+    end
+
   elseif self.screen == "host_setup" then
     if point_in_rect(x, y, back_button_rect()) then
       self.hover_button = -1
@@ -772,6 +1039,13 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
 end
 
 function MenuState:keypressed(key, scancode, isrepeat)
+  if self.screen == "browse" then
+    if key == "escape" then
+      self:go_back()
+    end
+    return
+  end
+
   if self.screen ~= "main" and self.screen ~= "connecting" then
     if key == "escape" then
       self:go_back()
@@ -819,6 +1093,14 @@ function MenuState:keypressed(key, scancode, isrepeat)
 
   if self.screen == "connecting" and key == "escape" then
     self:go_back()
+  end
+end
+
+function MenuState:wheelmoved(x, y)
+  if self.screen == "browse" then
+    self.browse_scroll = self.browse_scroll - y * 30
+    -- Clamp will happen in draw
+    if self.browse_scroll < 0 then self.browse_scroll = 0 end
   end
 end
 

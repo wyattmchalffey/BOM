@@ -26,6 +26,22 @@ function cleanupRoom(code) {
 }
 
 const server = http.createServer((_req, res) => {
+  if (_req.method === "GET" && _req.url === "/rooms") {
+    const waiting = [];
+    for (const [code, room] of rooms) {
+      if (room.status === "waiting") {
+        waiting.push({ code, hostName: room.hostName, createdAt: room.createdAt });
+      }
+    }
+    const body = JSON.stringify(waiting);
+    res.writeHead(200, {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET",
+    });
+    res.end(body);
+    return;
+  }
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end(`BOM Relay — ${rooms.size} active rooms\n`);
 });
@@ -69,8 +85,10 @@ wss.on("headers", (headers) => {
 
 wss.on("connection", (ws, req) => {
   const path = req.url;
-  if (path === "/host") {
-    handleHost(ws);
+  if (path === "/host" || path.startsWith("/host?")) {
+    const url = new URL(path, "http://localhost");
+    const hostName = url.searchParams.get("name") || "Player";
+    handleHost(ws, hostName);
   } else if (path.startsWith("/join/")) {
     const code = path.slice(6).toUpperCase();
     handleJoin(ws, code);
@@ -79,7 +97,7 @@ wss.on("connection", (ws, req) => {
   }
 });
 
-function handleHost(ws) {
+function handleHost(ws, hostName) {
   const code = generateCode();
   if (!code) {
     ws.send(JSON.stringify({ type: "error", message: "server_full" }));
@@ -94,7 +112,7 @@ function handleHost(ws) {
     cleanupRoom(code);
   }, ROOM_EXPIRY_MS);
 
-  const room = { host: ws, joiner: null, timer };
+  const room = { host: ws, joiner: null, timer, hostName, status: "waiting", createdAt: Date.now() };
   rooms.set(code, room);
 
   ws.send(JSON.stringify({ type: "room_created", room: code }));
@@ -130,6 +148,7 @@ function handleJoin(ws, code) {
 
   // Pair them
   room.joiner = ws;
+  room.status = "playing";
   clearTimeout(room.timer);
 
   room.host.send(JSON.stringify({ type: "peer_joined" }));

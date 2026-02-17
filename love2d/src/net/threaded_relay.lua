@@ -38,15 +38,24 @@ local outbox_ch  = love.thread.getChannel("relay_outbox")
 local quit_ch    = love.thread.getChannel("relay_quit")
 
 local relay_url = args_ch:demand()
+local host_name = args_ch:demand(1) or "Player"
 
--- Append /host if needed
-if not relay_url:match("/host$") then
+-- Simple URL-encode for the name parameter
+local function url_encode(str)
+    return str:gsub("([^%w%-%.%_%~])", function(c)
+        return string.format("%%%02X", string.byte(c))
+    end)
+end
+
+-- Append /host?name=... if needed
+if not relay_url:match("/host") then
     if relay_url:sub(-1) == "/" then
         relay_url = relay_url .. "host"
     else
         relay_url = relay_url .. "/host"
     end
 end
+relay_url = relay_url .. "?name=" .. url_encode(host_name)
 
 -- Load websocket
 local ok_ws, websocket = pcall(require, "websocket")
@@ -179,7 +188,7 @@ local function is_relay_control(frame)
     return false, nil
 end
 
-function threaded_relay.start(relay_url)
+function threaded_relay.start(relay_url, host_name)
     local self = setmetatable({
         state = "connecting",   -- "connecting" | "connected" | "error"
         room_code = nil,
@@ -204,6 +213,7 @@ function threaded_relay.start(relay_url)
     -- Start thread
     self._thread = love.thread.newThread(THREAD_CODE)
     self._args_ch:push(relay_url)
+    self._args_ch:push(host_name or "Player")
     self._thread:start()
 
     return self
