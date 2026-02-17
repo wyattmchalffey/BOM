@@ -96,9 +96,19 @@ end
 result_ch:push("ok:" .. room_code)
 
 -- Bridge loop: forward between websocket and channels
--- Use socket.select to avoid blocking receive
+-- Use socket.select to avoid blocking receive when raw socket is available
 local socket = require("socket")
 local raw_sock = conn.sock
+
+-- If no raw socket available, fall back to short-timeout blocking receive
+local use_select = raw_sock ~= nil
+if use_select then
+    -- Verify select works with this socket
+    local sel_ok, sel_err = pcall(socket.select, {raw_sock}, nil, 0)
+    if not sel_ok then
+        use_select = false
+    end
+end
 
 while true do
     -- Check quit signal
@@ -115,16 +125,32 @@ while true do
         end
     end
 
-    -- Check if data available on socket (non-blocking)
-    local readable, _, sel_err = socket.select({raw_sock}, nil, 0.05)
-    if readable and #readable > 0 then
-        -- Data available, safe to call receive
-        local ok_recv, frame_or_err, opcode = pcall(function() return conn:receive() end)
+    if use_select then
+        -- Check if data available on socket (non-blocking)
+        local readable, _, sel_err = socket.select({raw_sock}, nil, 0.05)
+        if readable and #readable > 0 then
+            local ok_recv, frame_or_err, opcode = pcall(function() return conn:receive() end)
+            if ok_recv and frame_or_err then
+                inbox_ch:push(frame_or_err)
+            elseif not ok_recv then
+                result_ch:push("error:receive failed: " .. tostring(frame_or_err))
+                return
+            end
+        end
+    else
+        -- Fallback: brief sleep then try non-blocking receive via settimeout
+        if conn.sock and conn.sock.settimeout then
+            conn.sock:settimeout(0.05)
+        end
+        local ok_recv, frame_or_err = pcall(function() return conn:receive() end)
         if ok_recv and frame_or_err then
             inbox_ch:push(frame_or_err)
-        elseif not ok_recv then
+        elseif not ok_recv and not tostring(frame_or_err):find("timeout") then
             result_ch:push("error:receive failed: " .. tostring(frame_or_err))
             return
+        else
+            -- No data or timeout, just sleep briefly
+            love.timer.sleep(0.05)
         end
     end
 end

@@ -112,6 +112,17 @@ function adapter:submit(command)
     return fail(submitted.reason, submitted.meta)
   end
 
+  -- Use state from submit response if available (avoids a second round-trip)
+  if submitted.meta and submitted.meta.state then
+    self.state = deep_copy(submitted.meta.state)
+    return ok({
+      checksum = submitted.meta.checksum,
+      active_player = submitted.meta.active_player,
+      turn_number = submitted.meta.turn_number,
+    })
+  end
+
+  -- Fallback: fetch snapshot separately
   local snap = self:sync_snapshot()
   if not snap.ok then
     return fail("post_submit_snapshot_failed", {

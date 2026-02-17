@@ -186,6 +186,24 @@ function host:submit(player_index, envelope)
     }, player_index))
   end
 
+  -- After a successful END_TURN, automatically execute START_TURN for the new
+  -- active player so clients don't need to send it (the host would stamp the
+  -- wrong player_index on a client-sent START_TURN).
+  if command.type == "END_TURN" then
+    local start_cmd = { type = "START_TURN", player_index = self.state.activePlayer }
+    local start_result = commands.execute(self.state, start_cmd)
+    replay.append(self.replay_log, start_cmd, start_result, self.state)
+    if start_result.ok then
+      local events = result.events or {}
+      if start_result.events then
+        for _, e in ipairs(start_result.events) do
+          events[#events + 1] = e
+        end
+      end
+      result = { ok = true, meta = result.meta, events = events }
+    end
+  end
+
   self.last_seq_by_player[player_index] = envelope.seq
 
   return ok({
@@ -195,6 +213,7 @@ function host:submit(player_index, envelope)
     events = result.events or {},
     checksum = checksum.game_state(self.state),
     next_expected_seq = self.last_seq_by_player[player_index] + 1,
+    state = deep_copy(self.state),
   })
 end
 

@@ -393,7 +393,7 @@ local function draw_button(bx, by, bw, bh, label, is_hov, is_press, accent_r, ac
   love.graphics.print(label, bx + (bw - tw) / 2, dy + (bh - 13) / 2)
 end
 
-function board.draw(game_state, drag, hover, mouse_down, display_resources, hand_state)
+function board.draw(game_state, drag, hover, mouse_down, display_resources, hand_state, local_player_index)
   -- Lazy-init textures on first draw (must happen during love.draw, not love.load)
   textures.init()
 
@@ -418,15 +418,18 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
   textures.draw_tiled(textures.noise, 0, 0, gw, gh, 0.04)
 
   -- Radial warm glow behind active player's panel
+  local_player_index = local_player_index or 0
   local active_pi = game_state.activePlayer
   local active_player = game_state.players[active_pi + 1]
   local active_accent = get_faction_color(active_player.faction)
-  local apx, apy, apw, aph = board.panel_rect(active_pi)
+  local active_panel = (local_player_index == 0) and active_pi or (1 - active_pi)
+  local apx, apy, apw, aph = board.panel_rect(active_panel)
   love.graphics.setColor(active_accent[1], active_accent[2], active_accent[3], 0.06)
   love.graphics.ellipse("fill", apx + apw / 2, apy + aph / 2, apw * 0.5, aph * 0.6)
 
-  for pi = 0, 1 do
-    local px, py, pw, ph = board.panel_rect(pi)
+  for panel = 0, 1 do
+    local pi = (local_player_index == 0) and panel or (1 - panel)
+    local px, py, pw, ph = board.panel_rect(panel)
     local player = game_state.players[pi + 1]
     local base_def = cards.get_card_def(player.baseId)
     local is_active = (game_state.activePlayer == pi)
@@ -576,7 +579,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     end
 
     -- Base card (with activated ability icon if applicable)
-    local base_x, base_y = board.base_rect(px, py, pw, ph, pi)
+    local base_x, base_y = board.base_rect(px, py, pw, ph, panel)
 
     -- Build per-ability used/can_activate tables for the base
     local base_used_abs = {}
@@ -610,7 +613,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     -- Resource nodes: title + placeholder only, centered in panel
     local res_left_title = (player.faction == "Human") and "Wood" or "Food"
     local res_left_resource = (player.faction == "Human") and "wood" or "food"
-    local rl_x, rl_y, rl_w, rl_h = board.resource_left_rect(px, py, pw, ph, pi)
+    local rl_x, rl_y, rl_w, rl_h = board.resource_left_rect(px, py, pw, ph, panel)
 
     -- Drop zone glow on resource nodes when dragging
     if drag and drag.player_index == pi then
@@ -623,11 +626,11 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local n_left = player.workersOn[res_left_resource]
     if drag and drag.player_index == pi and drag.from == "left" and n_left > 0 then n_left = n_left - 1 end
     for i = 1, n_left do
-      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", i, n_left, pi)
+      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", i, n_left, panel)
       draw_worker_circle(wcx, wcy, is_active, is_active)
     end
 
-    local rr_x, rr_y, rr_w, rr_h = board.resource_right_rect(px, py, pw, ph, pi)
+    local rr_x, rr_y, rr_w, rr_h = board.resource_right_rect(px, py, pw, ph, panel)
 
     -- Drop zone glow on right resource when dragging
     if drag and drag.player_index == pi then
@@ -640,7 +643,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local n_stone = player.workersOn.stone
     if drag and drag.player_index == pi and drag.from == "right" and n_stone > 0 then n_stone = n_stone - 1 end
     for i = 1, n_stone do
-      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", i, n_stone, pi)
+      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", i, n_stone, panel)
       draw_worker_circle(wcx, wcy, is_active, is_active)
     end
 
@@ -690,9 +693,9 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       draw_button(ebx, eby, ebw, ebh, "End Turn", et_hovered, et_pressed, 0.2, 0.22, 0.28)
     end
 
-    -- Resource bar (player only — below panel in the bottom margin)
-    if pi == 0 then
-      local rbx, rby, rbw, rbh = board.resource_bar_rect(pi)
+    -- Resource bar (local player only — below panel in the bottom margin)
+    if panel == 0 then
+      local rbx, rby, rbw, rbh = board.resource_bar_rect(panel)
       -- Background
       love.graphics.setColor(0.06, 0.07, 0.10, 0.92)
       love.graphics.rectangle("fill", rbx, rby, rbw, rbh, 5, 5)
@@ -721,17 +724,17 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
   end
 
   -- =========================================================
-  -- Hand cards (player 0 only, drawn on top of the board)
+  -- Hand cards (local player, drawn on top of the board)
   -- =========================================================
   hand_state = hand_state or {}
-  local player0 = game_state.players[1]
-  local hand = player0.hand
+  local local_p = game_state.players[(local_player_index or 0) + 1]
+  local hand = local_p.hand
   if #hand > 0 then
     local hover_idx = hand_state.hover_index
     local selected_idx = hand_state.selected_index
     local y_offsets = hand_state.y_offsets
     local rects = board.hand_card_rects(#hand, y_offsets)
-    local accent0 = get_faction_color(player0.faction)
+    local accent0 = get_faction_color(local_p.faction)
 
     -- Draw non-hovered cards first (left to right)
     for i = 1, #hand do
@@ -824,22 +827,24 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
 end
 
 -- Hit test: return "activate_base" | "blueprint" | "worker_*" | "resource_*" | "unassigned_pool" | "pass" | "end_turn" | "hand_card" | nil
-function board.hit_test(mx, my, game_state, hand_y_offsets)
-  -- Check hand cards first (drawn on top of everything; player 0 only)
-  local player0 = game_state.players[1]
-  if #player0.hand > 0 then
-    local rects = board.hand_card_rects(#player0.hand, hand_y_offsets)
+function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
+  local_player_index = local_player_index or 0
+  -- Check hand cards first (drawn on top of everything; local player only)
+  local local_p = game_state.players[local_player_index + 1]
+  if #local_p.hand > 0 then
+    local rects = board.hand_card_rects(#local_p.hand, hand_y_offsets)
     -- Check in reverse order (rightmost / topmost card first)
     for i = #rects, 1, -1 do
       local r = rects[i]
       if util.point_in_rect(mx, my, r.x, r.y, r.w, r.h) then
-        return "hand_card", 0, i
+        return "hand_card", local_player_index, i
       end
     end
   end
 
-  for pi = 0, 1 do
-    local px, py, pw, ph = board.panel_rect(pi)
+  for panel = 0, 1 do
+    local pi = (local_player_index == 0) and panel or (1 - panel)
+    local px, py, pw, ph = board.panel_rect(panel)
     local player = game_state.players[pi + 1]
     local res_left = (player.faction == "Human") and "wood" or "food"
 
@@ -854,7 +859,7 @@ function board.hit_test(mx, my, game_state, hand_y_offsets)
     end
 
     -- Activate base ability (new: per-ability rects)
-    local base_x, base_y = board.base_rect(px, py, pw, ph, pi)
+    local base_x, base_y = board.base_rect(px, py, pw, ph, panel)
     local base_def = cards.get_card_def(player.baseId)
 
     if base_def.abilities and pi == game_state.activePlayer then
@@ -905,23 +910,23 @@ function board.hit_test(mx, my, game_state, hand_y_offsets)
     end
 
     for i = 1, player.workersOn[res_left] do
-      local cx, cy = board.worker_circle_center(px, py, pw, ph, "left", i, player.workersOn[res_left], pi)
+      local cx, cy = board.worker_circle_center(px, py, pw, ph, "left", i, player.workersOn[res_left], panel)
       if (mx - cx)^2 + (my - cy)^2 <= WORKER_R^2 then
         return "worker_left", pi, i
       end
     end
     for i = 1, player.workersOn.stone do
-      local cx, cy = board.worker_circle_center(px, py, pw, ph, "right", i, player.workersOn.stone, pi)
+      local cx, cy = board.worker_circle_center(px, py, pw, ph, "right", i, player.workersOn.stone, panel)
       if (mx - cx)^2 + (my - cy)^2 <= WORKER_R^2 then
         return "worker_right", pi, i
       end
     end
 
-    local rl_x, rl_y, rl_w, rl_h = board.resource_left_rect(px, py, pw, ph, pi)
+    local rl_x, rl_y, rl_w, rl_h = board.resource_left_rect(px, py, pw, ph, panel)
     if util.point_in_rect(mx, my, rl_x, rl_y, rl_w, rl_h) then
       return "resource_left", pi
     end
-    local rr_x, rr_y, rr_w, rr_h = board.resource_right_rect(px, py, pw, ph, pi)
+    local rr_x, rr_y, rr_w, rr_h = board.resource_right_rect(px, py, pw, ph, panel)
     if util.point_in_rect(mx, my, rr_x, rr_y, rr_w, rr_h) then
       return "resource_right", pi
     end

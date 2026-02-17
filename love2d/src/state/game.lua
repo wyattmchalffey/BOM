@@ -81,6 +81,7 @@ function GameState.new(opts)
       end
     end
     if connected.ok then
+      self.local_player_index = connected.meta and connected.meta.player_index or 0
       local remote_state = self.authoritative_adapter:get_state()
       if remote_state then
         self.game_state = remote_state
@@ -92,6 +93,8 @@ function GameState.new(opts)
       self.authoritative_adapter = nil
     end
   end
+
+  self.local_player_index = self.local_player_index or 0
 
   if not self.authoritative_adapter then
     self:dispatch_command({ type = "START_TURN", player_index = 0 }) -- Player 1's turn starts immediately
@@ -106,13 +109,21 @@ function GameState.new(opts)
       self.display_resources[pi][key] = self.game_state.players[pi].resources[key] or 0
     end
   end
-  -- Init hand y_offsets for player 0's starting hand
-  for i = 1, #self.game_state.players[1].hand do
+  -- Init hand y_offsets for local player's starting hand
+  for i = 1, #self.game_state.players[self.local_player_index + 1].hand do
     self.hand_y_offsets[i] = 0
   end
   return self
 end
 
+
+function GameState:panel_to_player(panel)
+  return self.local_player_index == 0 and panel or (1 - panel)
+end
+
+function GameState:player_to_panel(pi)
+  return self.local_player_index == 0 and pi or (1 - pi)
+end
 
 local function should_trigger_reconnect(reason)
   return reason == "not_connected"
@@ -245,7 +256,7 @@ function GameState:update(dt)
   end
 
   -- Hand card hover animation: smoothly lerp y_offsets toward target
-  local hand = self.game_state.players[1].hand
+  local hand = self.game_state.players[self.local_player_index + 1].hand
   local hover_rise = board.HAND_HOVER_RISE
   local anim_speed = 14  -- fast, snappy response
   -- Ensure y_offsets array matches hand size
@@ -358,7 +369,7 @@ function GameState:draw()
     selected_index = self.hand_selected_index,
     y_offsets = self.hand_y_offsets,
   }
-  board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state)
+  board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
 
   -- Ambient particles (drawn on top of panels but below UI overlays)
   local active_player = self.game_state.players[self.game_state.activePlayer + 1]
@@ -559,7 +570,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
           if built then
             sound.play("build")
             shake.trigger(3, 0.12)
-            local px, py, pw, ph = board.panel_rect(self.show_blueprint_for_player)
+            local px, py, pw, ph = board.panel_rect(self:player_to_panel(self.show_blueprint_for_player))
             local cost_str = ""
             for _, c in ipairs(def.costs or {}) do
               local rdef = res_registry[c.type]
@@ -596,7 +607,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets)
+  local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
   local idx = extra  -- backwards compat: numeric index for hand_card, structure, etc.
   if not kind then
     -- Clicked on empty space: deselect hand card
@@ -621,24 +632,47 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  -- End turn: allow either player to click (for testing)
+  -- End turn: in multiplayer, only the local player can end their own turn
   if kind == "end_turn" then
+    if self.authoritative_adapter and pi ~= self.local_player_index then return end
+    if pi ~= self.game_state.activePlayer then return end
     sound.play("whoosh")
-    self:dispatch_command({ type = "END_TURN" })
-    -- Feature 3: Capture resources before start_turn for production popups
-    local new_active = self.game_state.activePlayer
-    local p = self.game_state.players[new_active + 1]
+    -- Feature 3: Capture resources before/after start_turn for production popups
     local before = {}
-    for _, key in ipairs(config.resource_types) do
-      before[key] = p.resources[key] or 0
-    end
-    self:dispatch_command({ type = "START_TURN" })
     local after = {}
-    for _, key in ipairs(config.resource_types) do
-      after[key] = p.resources[key] or 0
+    local new_active
+    local p
+    if self.authoritative_adapter then
+      -- In multiplayer, the host executes START_TURN automatically after END_TURN.
+      -- Capture the next player's resources before dispatch.
+      local next_pi = 1 - self.game_state.activePlayer
+      p = self.game_state.players[next_pi + 1]
+      for _, key in ipairs(config.resource_types) do
+        before[key] = p.resources[key] or 0
+      end
+      self:dispatch_command({ type = "END_TURN" })
+      -- State now includes START_TURN effects from the host
+      new_active = self.game_state.activePlayer
+      p = self.game_state.players[new_active + 1]
+      for _, key in ipairs(config.resource_types) do
+        after[key] = p.resources[key] or 0
+      end
+    else
+      -- Local mode: send END_TURN and START_TURN separately
+      self:dispatch_command({ type = "END_TURN" })
+      new_active = self.game_state.activePlayer
+      p = self.game_state.players[new_active + 1]
+      for _, key in ipairs(config.resource_types) do
+        before[key] = p.resources[key] or 0
+      end
+      self:dispatch_command({ type = "START_TURN" })
+      for _, key in ipairs(config.resource_types) do
+        after[key] = p.resources[key] or 0
+      end
     end
     -- Spawn production popups near the resource bar
-    local rbx, rby, rbw, rbh = board.resource_bar_rect(new_active)
+    local new_panel = self:player_to_panel(new_active)
+    local rbx, rby, rbw, rbh = board.resource_bar_rect(new_panel)
     local badge_offset = 0
     for _, key in ipairs(config.resource_types) do
       local gained = after[key] - before[key]
@@ -658,7 +692,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     self.hand_selected_index = nil
     -- Show turn banner
     self.turn_banner_timer = 1.2
-    self.turn_banner_text = (self.game_state.activePlayer == 0) and "Your Turn" or "Opponent's Turn"
+    self.turn_banner_text = (self.game_state.activePlayer == self.local_player_index) and "Your Turn" or "Opponent's Turn"
     return
   end
 
@@ -698,11 +732,12 @@ function GameState:mousepressed(x, y, button, istouch, presses)
 
         -- Visual feedback
         sound.play("coin")
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi)
+        local pi_panel = self:player_to_panel(pi)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
         -- Show cost deduction popups
         for _, c in ipairs(ab.cost) do
           if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
-            local rb_x, rb_y = board.resource_bar_rect(pi)
+            local rb_x, rb_y = board.resource_bar_rect(pi_panel)
             popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
           end
         end
@@ -722,9 +757,10 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     local after_workers = self.game_state.players[pi + 1].totalWorkers
     if after_workers > before_workers then
       sound.play("coin")
-      local px, py, pw, ph = board.panel_rect(pi)
+      local ab_panel = self:player_to_panel(pi)
+      local px, py, pw, ph = board.panel_rect(ab_panel)
       popup.create("+1 Worker", px + pw / 2, py + ph - 80, { 0.3, 0.9, 0.4 })
-      local rb_x, rb_y = board.resource_bar_rect(pi)
+      local rb_x, rb_y = board.resource_bar_rect(ab_panel)
       popup.create("-3F", rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
     end
     return
@@ -737,7 +773,8 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  -- Only active player can move workers
+  -- Only the local player can move workers, and only on their turn
+  if self.authoritative_adapter and pi ~= self.local_player_index then return end
   if pi ~= self.game_state.activePlayer then return end
 
   if kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" then
@@ -750,18 +787,19 @@ end
 
 -- Helper: get the origin screen position for a worker based on where it was dragged from
 function GameState:_get_worker_origin(pi, from)
-  local px, py, pw, ph = board.panel_rect(pi)
+  local panel = self:player_to_panel(pi)
+  local px, py, pw, ph = board.panel_rect(panel)
   local player = self.game_state.players[pi + 1]
   if from == "unassigned" then
     local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
     return uax + uaw / 2, uay + uah / 2
   elseif from == "left" then
     local count = player.workersOn[(player.faction == "Human") and "wood" or "food"]
-    local cx, cy = board.worker_circle_center(px, py, pw, ph, "left", math.max(1, count), math.max(1, count), pi)
+    local cx, cy = board.worker_circle_center(px, py, pw, ph, "left", math.max(1, count), math.max(1, count), panel)
     return cx, cy
   elseif from == "right" then
     local count = player.workersOn.stone
-    local cx, cy = board.worker_circle_center(px, py, pw, ph, "right", math.max(1, count), math.max(1, count), pi)
+    local cx, cy = board.worker_circle_center(px, py, pw, ph, "right", math.max(1, count), math.max(1, count), panel)
     return cx, cy
   end
   return px + pw / 2, py + ph / 2
@@ -792,7 +830,7 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   if deck_viewer.is_open() then return end
 
   if not self.drag then return end
-  local kind, pi, _ = board.hit_test(x, y, self.game_state, self.hand_y_offsets)
+  local kind, pi, _ = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
 
   -- Feature 2: Invalid drop zone -> snap back
   if not kind or pi ~= self.drag.player_index then
@@ -843,7 +881,7 @@ end
 
 function GameState:mousemoved(x, y, dx, dy, istouch)
   -- Update hover state for UI highlights
-  local kind, pi, idx = board.hit_test(x, y, self.game_state, self.hand_y_offsets)
+  local kind, pi, idx = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
   if kind then
     self.hover = { kind = kind, pi = pi, idx = idx }
   else
