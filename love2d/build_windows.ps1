@@ -1,6 +1,6 @@
 param(
     [string]$GameName = "BattlesOfMasadoria",
-    [string]$OutputDir = ".\build\windows"
+    [string]$OutputDir = "$PSScriptRoot\build\windows"
 )
 
 $lovePaths = @(
@@ -56,7 +56,7 @@ if (Test-Path $sslDll) {
     Copy-Item $sslDll $outRoot -Force
     Write-Host "Copied ssl.dll (64-bit LuaSec)"
 } else {
-    Write-Warning "ssl.dll not found at $sslDll — run build_ssl64.ps1 first for wss:// support"
+    Write-Warning "ssl.dll not found at $sslDll - run build_ssl64.ps1 first for wss:// support"
 }
 
 $openSSLBin = "C:\Program Files\OpenSSL-Win64\bin"

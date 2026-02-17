@@ -5,6 +5,12 @@ local util = require("src.ui.util")
 local runtime_multiplayer = require("src.net.runtime_multiplayer")
 local hosted_game = require("src.net.hosted_game")
 local websocket_provider = require("src.net.websocket_provider")
+local threaded_relay = require("src.net.threaded_relay")
+local headless_host_service = require("src.net.headless_host_service")
+local authoritative_client_game = require("src.net.authoritative_client_game")
+local client_session = require("src.net.client_session")
+local websocket_transport = require("src.net.websocket_transport")
+local json = require("src.net.json_codec")
 local textures = require("src.fx.textures")
 
 local MenuState = {}
@@ -64,6 +70,10 @@ function MenuState.new(callbacks)
 
     -- Connection state
     connect_error = nil,
+
+    -- Threaded relay for Play Online
+    _relay = nil,
+    _relay_service = nil,
   }, MenuState)
   return self
 end
@@ -385,6 +395,9 @@ end
 function MenuState:update(dt)
   self.cursor_blink = self.cursor_blink + dt
 
+  -- Poll threaded relay connection
+  self:poll_relay()
+
   -- Update cursor
   local want_hand = self.hover_button ~= nil
   local desired = want_hand and "hand" or "arrow"
@@ -405,6 +418,12 @@ function MenuState:go_back()
   self.host_status_msg = nil
   self.screen = "main"
   self.hover_button = nil
+  -- Clean up any in-progress relay connection
+  if self._relay then
+    self._relay:cleanup()
+    self._relay = nil
+    self._relay_service = nil
+  end
 end
 
 -- Get effective player name (default if empty)
@@ -420,34 +439,72 @@ local function validate_ws_url(url)
 end
 
 function MenuState:do_play_online()
-  local name = self:get_player_name()
-  local url = "wss://bom-hbfv.onrender.com/host"
-
-  -- Resolve websocket provider
-  local resolved = websocket_provider.resolve()
-  if not resolved.ok then
-    self.connect_error = "Websocket unavailable: " .. tostring(resolved.reason)
-    return
-  end
-
   self.screen = "connecting"
   self.connect_error = nil
 
-  local ok_call, built = pcall(runtime_multiplayer.build, {
-    mode = "websocket",
-    url = url,
-    player_name = name,
-    websocket_provider = resolved.provider,
-  })
+  -- Start threaded connection (non-blocking)
+  self._relay = threaded_relay.start("wss://bom-hbfv.onrender.com")
 
-  if not ok_call then
-    self.connect_error = "Connection failed: " .. tostring(built)
-    return
-  end
-  if built.ok then
-    self.start_game({ authoritative_adapter = built.adapter })
-  else
-    self.connect_error = "Connection failed: " .. tostring(built.reason)
+  -- Create headless host service (local game logic authority)
+  self._relay_service = headless_host_service.new({})
+  self._relay:attach_service(self._relay_service)
+end
+
+-- Called from update() when relay is active
+function MenuState:poll_relay()
+  if not self._relay then return end
+
+  self._relay:poll()
+
+  if self._relay.state == "connected" then
+    -- Build in-process adapter for the host player
+    local HeadlessFrameClient = {}
+    HeadlessFrameClient.__index = HeadlessFrameClient
+    function HeadlessFrameClient.new(service)
+      return setmetatable({ service = service, _last = nil }, HeadlessFrameClient)
+    end
+    function HeadlessFrameClient:send(frame)
+      self._last = frame
+    end
+    function HeadlessFrameClient:receive(_timeout_ms)
+      return self.service:handle_frame(self._last)
+    end
+
+    local transport = websocket_transport.new({
+      client = HeadlessFrameClient.new(self._relay_service),
+      encode = json.encode,
+      decode = json.decode,
+    })
+
+    local session = client_session.new({
+      transport = transport,
+      player_name = self:get_player_name(),
+    })
+
+    local adapter = authoritative_client_game.new({ session = session })
+
+    local relay = self._relay
+    local function step_fn()
+      relay:poll()
+    end
+    local function cleanup_fn()
+      relay:cleanup()
+    end
+
+    self._relay = nil
+    self._relay_service = nil
+
+    self.start_game({
+      authoritative_adapter = adapter,
+      server_step = step_fn,
+      server_cleanup = cleanup_fn,
+      room_code = relay.room_code,
+    })
+  elseif self._relay.state == "error" then
+    self.connect_error = self._relay.error_msg
+    self._relay = nil
+    self._relay_service = nil
+    self.screen = "main"
   end
 end
 
