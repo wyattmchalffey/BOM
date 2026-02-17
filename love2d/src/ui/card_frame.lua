@@ -31,7 +31,7 @@ local function draw_cost_cluster(cost_list, x, y, icon_size, alpha)
   local start_x = x
   local font = util.get_font(10)
   for _, c in ipairs(cost_list) do
-    res_icons.draw(c.type, x, y, icon_size, alpha)
+    res_icons.draw_or_fallback(c.type, x, y, icon_size, alpha)
     x = x + icon_size + 1
     love.graphics.setColor(0.85, 0.87, 0.95, alpha)
     love.graphics.setFont(font)
@@ -57,10 +57,35 @@ end
 --   [cost icons] : [effect description]
 -- Returns the height consumed.
 ---------------------------------------------------------
+---------------------------------------------------------
+-- Draw a once-per-turn or repeatable indicator icon
+-- Returns width consumed.
+---------------------------------------------------------
+-- Draw a once-per-turn indicator (only shown for once_per_turn abilities).
+-- Returns width consumed (0 if not once-per-turn).
+local function draw_frequency_icon(ab, x, y, size, alpha)
+  if not ab.once_per_turn then return 0 end
+  local cx = x + size / 2
+  local cy = y + size / 2
+  local r = size / 2
+  -- Circle with "1" inside, muted gold
+  love.graphics.setColor(0.85, 0.75, 0.4, alpha * 0.6)
+  love.graphics.circle("fill", cx, cy, r)
+  love.graphics.setColor(0.85, 0.75, 0.4, alpha * 0.9)
+  love.graphics.circle("line", cx, cy, r)
+  love.graphics.setColor(1, 1, 1, alpha)
+  local font = util.get_font(8)
+  love.graphics.setFont(font)
+  local tw = font:getWidth("1")
+  love.graphics.print("1", cx - tw / 2, cy - font:getHeight() / 2)
+  return size + 3
+end
+
 local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
   opts = opts or {}
   local can_activate = opts.can_activate ~= false
   local is_used = opts.is_used or false
+  local is_hov = opts.is_hovered or false
   local alpha = (can_activate and not is_used) and 1.0 or 0.45
   local line_h = 20
   local icon_s = 12
@@ -68,17 +93,27 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
 
   -- Background bar for the ability
   local bar_alpha = (can_activate and not is_used) and 0.2 or 0.08
+  if is_hov and can_activate and not is_used then bar_alpha = 0.32 end
   love.graphics.setColor(0.2, 0.25, 0.4, bar_alpha)
   love.graphics.rectangle("fill", ab_x, ab_y, max_w, line_h, 3, 3)
   -- Left accent mark
   love.graphics.setColor(0.35, 0.6, 1.0, (can_activate and not is_used) and 0.7 or 0.2)
   love.graphics.rectangle("fill", ab_x, ab_y, 2, line_h, 1, 1)
+  -- Hover border glow
+  if is_hov and can_activate and not is_used then
+    love.graphics.setColor(0.4, 0.6, 1.0, 0.4)
+    love.graphics.rectangle("line", ab_x, ab_y, max_w, line_h, 3, 3)
+  end
 
-  local cx = ab_x + 5
-  local cy = ab_y + (line_h - icon_s) / 2
+  local cx = ab_x + 4
+  local cy_icon = ab_y + (line_h - icon_s) / 2
+
+  -- Frequency icon (once-per-turn or repeatable)
+  local freq_w = draw_frequency_icon(ab, cx, cy_icon, icon_s, alpha)
+  cx = cx + freq_w
 
   -- Draw cost icons
-  local cost_w = draw_cost_cluster(ab.cost, cx, cy, icon_s, alpha)
+  local cost_w = draw_cost_cluster(ab.cost, cx, cy_icon, icon_s, alpha)
   cx = cx + cost_w
 
   -- Colon separator
@@ -133,6 +168,73 @@ local function ability_effect_text(ab)
     return "Deal " .. (args.amount or 0) .. " dmg"
   end
   return e or "?"
+end
+
+---------------------------------------------------------
+-- Compact ability button for structure tiles on the board.
+-- Fits in ~82x18px with same visual language as ability lines.
+-- opts: can_activate, is_used, is_hovered, effect_text
+-- Returns height consumed.
+---------------------------------------------------------
+function card_frame.draw_ability_button(ab, bx, by, bw, opts)
+  opts = opts or {}
+  local can_activate = opts.can_activate ~= false
+  local is_used = opts.is_used or false
+  local is_hov = opts.is_hovered or false
+  local alpha = (can_activate and not is_used) and 1.0 or 0.4
+  local btn_h = 18
+  local icon_s = 10
+  local font = util.get_font(8)
+
+  -- Button background
+  local bg_alpha = (can_activate and not is_used) and 0.25 or 0.1
+  if is_hov and can_activate and not is_used then bg_alpha = 0.4 end
+  love.graphics.setColor(0.15, 0.2, 0.35, bg_alpha)
+  love.graphics.rectangle("fill", bx, by, bw, btn_h, 3, 3)
+
+  -- Left accent
+  love.graphics.setColor(0.35, 0.6, 1.0, (can_activate and not is_used) and 0.6 or 0.15)
+  love.graphics.rectangle("fill", bx, by, 2, btn_h, 1, 1)
+
+  -- Hover glow border
+  if is_hov and can_activate and not is_used then
+    love.graphics.setColor(0.4, 0.6, 1.0, 0.5)
+    love.graphics.rectangle("line", bx, by, bw, btn_h, 3, 3)
+  else
+    love.graphics.setColor(0.25, 0.28, 0.4, alpha * 0.5)
+    love.graphics.rectangle("line", bx, by, bw, btn_h, 3, 3)
+  end
+
+  local cx = bx + 4
+  local cy = by + (btn_h - icon_s) / 2
+
+  -- Frequency icon (compact)
+  local freq_w = draw_frequency_icon(ab, cx, cy, icon_s, alpha)
+  cx = cx + freq_w
+
+  -- Cost icons
+  local cost_w = draw_cost_cluster(ab.cost, cx, cy, icon_s, alpha)
+  cx = cx + cost_w
+
+  -- Effect text (truncated to fit)
+  local effect_text = opts.effect_text or ability_effect_text(ab)
+  love.graphics.setColor(0.8, 0.82, 0.9, alpha)
+  love.graphics.setFont(font)
+  local remaining_w = bw - (cx - bx) - 4
+  if remaining_w > 10 then
+    love.graphics.printf(effect_text, cx + 2, by + 4, math.max(remaining_w, 10), "left")
+  end
+
+  -- "Used" overlay
+  if is_used then
+    love.graphics.setColor(0, 0, 0, 0.35)
+    love.graphics.rectangle("fill", bx, by, bw, btn_h, 3, 3)
+    love.graphics.setColor(0.6, 0.3, 0.3, 0.8)
+    love.graphics.setFont(util.get_font(7))
+    love.graphics.printf("USED", bx, by + 4, bw, "center")
+  end
+
+  return btn_h
 end
 
 ---------------------------------------------------------
@@ -320,9 +422,6 @@ function card_frame.draw(x, y, params)
         local is_used = used_abilities[ai] or false
         local can_act = can_activate_abilities[ai] or false
         local effect_text = ability_effect_text(ab)
-        if ab.once_per_turn then
-          effect_text = effect_text .. " (1/turn)"
-        end
         local consumed = draw_ability_line(ab, cx, ab_y, art_w, {
           can_activate = can_act,
           is_used = is_used,
@@ -337,9 +436,6 @@ function card_frame.draw(x, y, params)
     local is_used = ability_used_this_turn and activated_ability.once_per_turn
     local can_act = ability_can_activate and not is_used
     local effect_text = ability_effect_text(activated_ability)
-    if activated_ability.once_per_turn then
-      effect_text = effect_text .. " (1/turn)"
-    end
     local consumed = draw_ability_line(activated_ability, cx, ab_y, art_w, {
       can_activate = can_act,
       is_used = is_used,

@@ -34,7 +34,8 @@ local PASS_BTN_H = 32
 local END_TURN_BTN_W = 100
 local END_TURN_BTN_H = 32
 local STRUCT_TILE_W = 90
-local STRUCT_TILE_H = 70
+local STRUCT_TILE_H_BASE = 50  -- just name + kind
+local STRUCT_TILE_AB_H = 20    -- per activated ability button
 local STRUCT_TILE_GAP = 8
 local RESOURCE_BAR_H = 26
 
@@ -46,6 +47,23 @@ local HAND_VISIBLE_FRAC = 0.55   -- fraction of card height visible at rest
 local HAND_HOVER_RISE = 100      -- pixels the hovered card rises above resting position
 local HAND_GAP = 6               -- gap between cards when not overlapping
 local HAND_MAX_TOTAL_W = 900     -- max total width; cards overlap when exceeding this
+
+-- Count activated abilities on a card def
+local function count_activated_abilities(card_def)
+  if not card_def or not card_def.abilities then return 0 end
+  local n = 0
+  for _, ab in ipairs(card_def.abilities) do
+    if ab.type == "activated" then n = n + 1 end
+  end
+  return n
+end
+
+-- Compute dynamic tile height based on activated ability count
+local function struct_tile_height(activated_count)
+  if activated_count <= 0 then return STRUCT_TILE_H_BASE end
+  if activated_count == 1 then return STRUCT_TILE_H_BASE + STRUCT_TILE_AB_H end
+  return STRUCT_TILE_H_BASE + activated_count * STRUCT_TILE_AB_H
+end
 
 -- Faction accent colors (read from centralized data)
 local function get_faction_color(faction)
@@ -123,16 +141,18 @@ function board.structures_area_rect(panel_x, panel_y, panel_w, panel_h)
   local left_edge = panel_x + 20 + DECK_CARD_W + 16  -- right of blueprint deck
   local right_edge = panel_x + panel_w - 20 - DECK_CARD_W - 16  -- left of unit deck
   local area_w = right_edge - left_edge
-  local area_h = STRUCT_TILE_H
-  local area_y = panel_y + 8 + (DECK_CARD_H - STRUCT_TILE_H) / 2  -- vertically centered with deck slots
+  local area_h = STRUCT_TILE_H_BASE + 2 * STRUCT_TILE_AB_H  -- max reasonable height
+  local area_y = panel_y + 8 + (DECK_CARD_H - area_h) / 2  -- vertically centered with deck slots
   return left_edge, area_y, area_w, area_h
 end
 
--- Get rect for a specific structure tile by index (0-based)
-function board.structure_tile_rect(panel_x, panel_y, panel_w, panel_h, tile_index)
+-- Get rect for a specific structure tile by index (0-based), with optional card_def for dynamic height
+function board.structure_tile_rect(panel_x, panel_y, panel_w, panel_h, tile_index, card_def)
   local ax, ay, aw, ah = board.structures_area_rect(panel_x, panel_y, panel_w, panel_h)
   local tx = ax + tile_index * (STRUCT_TILE_W + STRUCT_TILE_GAP)
-  return tx, ay, STRUCT_TILE_W, STRUCT_TILE_H
+  local n_act = count_activated_abilities(card_def)
+  local th = struct_tile_height(n_act)
+  return tx, ay, STRUCT_TILE_W, th
 end
 
 -- Resource bar: below the player's panel in the bottom margin area
@@ -500,7 +520,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       for si, entry in ipairs(player.board) do
         local ok, sdef = pcall(cards.get_card_def, entry.card_id)
         if ok and sdef then
-          local tx, ty, tw, th = board.structure_tile_rect(px, py, pw, ph, si - 1)
+          local tx, ty, tw, th = board.structure_tile_rect(px, py, pw, ph, si - 1, sdef)
           if tx + tw <= sax + saw + 2 then
             local scale = (entry.scale == nil) and 1 or entry.scale
             local tile_cx, tile_cy = tx + tw / 2, ty + th / 2
@@ -552,24 +572,40 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
             love.graphics.setColor(0.6, 0.62, 0.7, is_active and 0.8 or 0.5)
             love.graphics.setFont(util.get_font(9))
             love.graphics.print("Structure", tx + 8, ty + 22)
-            -- Small ability hint
-            local ab_hint = nil
+
+            -- Ability buttons for activated abilities; text-only hints for others
+            local ab_btn_y = ty + 36
+            local has_non_activated_hint = nil
             if sdef.abilities then
-              for _, ab in ipairs(sdef.abilities) do
-                if ab.type == "activated" then ab_hint = "ACT"; break
-                elseif ab.type == "static" and ab.effect == "produce" then ab_hint = "PROD"; break
-                elseif ab.type == "triggered" then ab_hint = "TRIG"; break
+              for ai, ab in ipairs(sdef.abilities) do
+                if ab.type == "activated" then
+                  local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
+                  local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
+                  local can_act = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and is_active
+                  -- Check if this specific ability button is hovered
+                  local ab_hovered = hover and hover.kind == "activate_ability" and hover.pi == pi
+                    and type(hover.idx) == "table" and hover.idx.source == "board"
+                    and hover.idx.board_index == si and hover.idx.ability_index == ai
+                  card_frame.draw_ability_button(ab, tx + 4, ab_btn_y, tw - 8, {
+                    can_activate = can_act,
+                    is_used = used and ab.once_per_turn,
+                    is_hovered = ab_hovered,
+                  })
+                  ab_btn_y = ab_btn_y + STRUCT_TILE_AB_H
+                elseif ab.type == "static" and ab.effect == "produce" then
+                  has_non_activated_hint = has_non_activated_hint or "PROD"
+                elseif ab.type == "triggered" then
+                  has_non_activated_hint = has_non_activated_hint or "TRIG"
                 end
               end
             end
-            if ab_hint then
-              local badge_w = 32
-              love.graphics.setColor(accent[1], accent[2], accent[3], is_active and 0.3 or 0.15)
-              love.graphics.rectangle("fill", tx + tw - badge_w - 4, ty + th - 18, badge_w, 14, 3, 3)
-              love.graphics.setColor(accent[1], accent[2], accent[3], is_active and 0.9 or 0.5)
-              love.graphics.setFont(util.get_font(8))
-              love.graphics.printf(ab_hint, tx + tw - badge_w - 4, ty + th - 16, badge_w, "center")
+            -- Small text-only hint for non-activated abilities (PROD/TRIG)
+            if has_non_activated_hint and count_activated_abilities(sdef) == 0 then
+              love.graphics.setColor(accent[1], accent[2], accent[3], is_active and 0.6 or 0.3)
+              love.graphics.setFont(util.get_font(7))
+              love.graphics.printf(has_non_activated_hint, tx + 4, ty + 38, tw - 8, "center")
             end
+
             if scale ~= 1 then
               love.graphics.pop()
             end
@@ -876,10 +912,35 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
       end
     end
 
-    -- Built structures
+    -- Built structures: check per-ability buttons first, then generic structure
     for si, entry in ipairs(player.board) do
-      local tx, ty, tw, th = board.structure_tile_rect(px, py, pw, ph, si - 1)
+      local s_ok, sdef = pcall(cards.get_card_def, entry.card_id)
+      local th_actual = STRUCT_TILE_H_BASE
+      if s_ok and sdef then
+        th_actual = struct_tile_height(count_activated_abilities(sdef))
+      end
+      local tx, ty, tw, th = board.structure_tile_rect(px, py, pw, ph, si - 1, s_ok and sdef or nil)
       if util.point_in_rect(mx, my, tx, ty, tw, th) then
+        -- Check per-ability button rects
+        if s_ok and sdef and sdef.abilities then
+          local ab_btn_y = ty + 36
+          for ai, ab in ipairs(sdef.abilities) do
+            if ab.type == "activated" then
+              local btn_x, btn_w, btn_h = tx + 4, tw - 8, 18
+              if util.point_in_rect(mx, my, btn_x, ab_btn_y, btn_w, btn_h) then
+                local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
+                local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
+                local can_act = (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost) and pi == game_state.activePlayer
+                if can_act then
+                  return "activate_ability", pi, { source = "board", board_index = si, ability_index = ai }
+                else
+                  return "ability_hover", pi, { source = "board", board_index = si, ability_index = ai }
+                end
+              end
+              ab_btn_y = ab_btn_y + STRUCT_TILE_AB_H
+            end
+          end
+        end
         return "structure", pi, si
       end
     end

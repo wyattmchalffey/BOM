@@ -46,6 +46,42 @@ function res_icons.draw(res_type, x, y, size, alpha)
   return true
 end
 
+--- Draw a resource icon with fallback to colored circle + letter abbreviation.
+--- Uses PNG when available, otherwise draws a colored circle with res_registry letter.
+--- @param res_type string resource key (e.g. "food", "metal", "bones")
+--- @param x number top-left x
+--- @param y number top-left y
+--- @param size number width and height to draw at
+--- @param alpha number optional alpha (default 1)
+function res_icons.draw_or_fallback(res_type, x, y, size, alpha)
+  alpha = alpha or 1
+  -- Try PNG first
+  if res_icons.draw(res_type, x, y, size, alpha) then
+    return true
+  end
+  -- Fallback: colored circle with letter
+  local res_registry = require("src.data.resources")
+  local rdef = res_registry[res_type]
+  if not rdef then return false end
+  local cx = x + size / 2
+  local cy = y + size / 2
+  local r = size / 2
+  -- Filled circle with resource color
+  love.graphics.setColor(rdef.color[1], rdef.color[2], rdef.color[3], alpha * 0.7)
+  love.graphics.circle("fill", cx, cy, r)
+  -- Darker border
+  love.graphics.setColor(rdef.color[1] * 0.6, rdef.color[2] * 0.6, rdef.color[3] * 0.6, alpha * 0.9)
+  love.graphics.circle("line", cx, cy, r)
+  -- White letter centered
+  love.graphics.setColor(1, 1, 1, alpha)
+  local font = love.graphics.newFont(math.max(7, math.floor(size * 0.55)))
+  love.graphics.setFont(font)
+  local tw = font:getWidth(rdef.letter)
+  local th = font:getHeight()
+  love.graphics.print(rdef.letter, cx - tw / 2, cy - th / 2)
+  return true
+end
+
 --- Get the loaded image for a resource type (or nil).
 function res_icons.get(res_type)
   ensure_loaded()

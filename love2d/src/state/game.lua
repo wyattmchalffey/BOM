@@ -298,7 +298,7 @@ function GameState:update(dt)
   if self.hover and not self.drag then
     local k = self.hover.kind
     if k == "blueprint" or k == "end_turn" or k == "pass" or k == "activate_base"
-       or k == "activate_ability"
+       or k == "activate_ability" or k == "ability_hover"
        or k == "worker_unassigned" or k == "worker_left" or k == "worker_right"
        or k == "structure" or k == "hand_card" or k == "unit_deck" then
       want_hand = true
@@ -315,9 +315,16 @@ function GameState:update(dt)
     self._current_cursor = desired
   end
 
-  -- Feature 5: Tooltip hover delay (structures + unit deck)
-  if self.hover and (self.hover.kind == "structure" or self.hover.kind == "unit_deck") and not deck_viewer.is_open() then
-    local target_key = self.hover.kind .. ":" .. self.hover.pi .. ":" .. (self.hover.idx or 0)
+  -- Feature 5: Tooltip hover delay (structures + unit deck + ability buttons)
+  if self.hover and (self.hover.kind == "structure" or self.hover.kind == "unit_deck"
+      or self.hover.kind == "ability_hover" or self.hover.kind == "activate_ability") and not deck_viewer.is_open() then
+    local target_key
+    if (self.hover.kind == "ability_hover" or self.hover.kind == "activate_ability") and type(self.hover.idx) == "table" then
+      local info = self.hover.idx
+      target_key = "ability:" .. self.hover.pi .. ":" .. (info.source or "") .. ":" .. (info.board_index or 0) .. ":" .. (info.ability_index or 0)
+    else
+      target_key = self.hover.kind .. ":" .. self.hover.pi .. ":" .. (self.hover.idx or 0)
+    end
     if self.tooltip_target == target_key then
       self.tooltip_timer = self.tooltip_timer + dt
     else
@@ -486,6 +493,69 @@ function GameState:draw()
             can_activate_abilities = can_act_abs,
           })
           love.graphics.pop()
+        end
+      end
+    end
+
+    -- Ability button tooltip (compact: effect description + cost + once-per-turn note)
+    if self.hover and (self.hover.kind == "ability_hover" or self.hover.kind == "activate_ability")
+       and type(self.hover.idx) == "table" and self.tooltip_timer >= 0.3 then
+      local pi = self.hover.pi
+      local info = self.hover.idx
+      local player = self.game_state.players[pi + 1]
+      if player and info.source == "board" then
+        local entry = player.board[info.board_index]
+        if entry then
+          local ok_d, def = pcall(cards.get_card_def, entry.card_id)
+          if ok_d and def and def.abilities then
+            local ab = def.abilities[info.ability_index]
+            if ab then
+              local mx, my = love.mouse.getPosition()
+              local gw, gh = love.graphics.getDimensions()
+              local effect_text = card_frame.ability_effect_text(ab)
+              local cost_parts = {}
+              for _, c in ipairs(ab.cost or {}) do
+                local rdef = res_registry[c.type]
+                local letter = rdef and rdef.letter or "?"
+                cost_parts[#cost_parts + 1] = c.amount .. letter
+              end
+              local cost_str = #cost_parts > 0 and ("Cost: " .. table.concat(cost_parts, " + ")) or "Free"
+              local lines = { effect_text, cost_str }
+              if ab.once_per_turn then
+                lines[#lines + 1] = "Once per turn"
+              end
+              local font = util.get_font(10)
+              local max_line_w = 0
+              for _, line in ipairs(lines) do
+                max_line_w = math.max(max_line_w, font:getWidth(line))
+              end
+              local pad_x, pad_y = 10, 6
+              local tw = max_line_w + pad_x * 2
+              local line_h = font:getHeight() + 2
+              local th = #lines * line_h + pad_y * 2
+              local tx = mx + 16
+              local ty = my - th - 4
+              if tx + tw > gw - 10 then tx = mx - tw - 16 end
+              if ty < 10 then ty = 10 end
+
+              local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
+              -- Dark rounded-rect background
+              love.graphics.setColor(0.06, 0.07, 0.1, 0.92 * fade_in)
+              love.graphics.rectangle("fill", tx, ty, tw, th, 5, 5)
+              love.graphics.setColor(0.3, 0.35, 0.5, 0.5 * fade_in)
+              love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
+              -- Lines
+              love.graphics.setFont(font)
+              for li, line in ipairs(lines) do
+                if li == 1 then
+                  love.graphics.setColor(0.9, 0.92, 1.0, fade_in)
+                else
+                  love.graphics.setColor(0.65, 0.67, 0.75, fade_in)
+                end
+                love.graphics.print(line, tx + pad_x, ty + pad_y + (li - 1) * line_h)
+              end
+            end
+          end
         end
       end
     end

@@ -23,7 +23,8 @@
       "Bash(git -C /c/Users/Wyatt/Desktop/BOM log --oneline --all --graph -20)",
       "Bash(find:*)",
       "Bash(git -C /c/Users/Wyatt/Desktop/BOM log --oneline -1 --format=\"%H %an %ad %s\" --date=short)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(lua -e:*)"
     ]
   }
 }
