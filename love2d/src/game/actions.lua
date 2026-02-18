@@ -144,7 +144,6 @@ function actions.assign_worker_to_structure(g, player_index, board_index)
   if not entry then return g end
   local ok, card_def = pcall(cards.get_card_def, entry.card_id)
   if not ok or not card_def then return g end
-  -- Find max_workers from produce ability
   local max_w = 0
   if card_def.abilities then
     for _, ab in ipairs(card_def.abilities) do
@@ -154,12 +153,28 @@ function actions.assign_worker_to_structure(g, player_index, board_index)
     end
   end
   if max_w <= 0 then return g end
-  entry.workers = entry.workers or 0
-  local current_total = entry.workers + actions.count_special_on_structure(p, board_index)
-  if current_total >= max_w then return g end
   local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
   if p.totalWorkers - assigned <= 0 then return g end
-  entry.workers = entry.workers + 1
+  -- Try the requested entry first; if full, find another copy of the same card
+  local target = entry
+  local target_idx = board_index
+  target.workers = target.workers or 0
+  if target.workers + actions.count_special_on_structure(p, target_idx) >= max_w then
+    local found = false
+    for si, other in ipairs(p.board) do
+      if other.card_id == entry.card_id and si ~= board_index then
+        other.workers = other.workers or 0
+        if other.workers + actions.count_special_on_structure(p, si) < max_w then
+          target = other
+          target_idx = si
+          found = true
+          break
+        end
+      end
+    end
+    if not found then return g end
+  end
+  target.workers = target.workers + 1
   return g
 end
 
