@@ -157,6 +157,59 @@ function commands.execute(g, command)
     return ok(nil, { { type = "structure_worker_unassigned", player_index = pi, board_index = board_index } })
   end
 
+  if command.type == "PLAY_FROM_HAND" then
+    local pi = command.player_index
+    local hand_index = command.hand_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    local p = g.players[pi + 1]
+    if not hand_index or hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
+    local card_id = p.hand[hand_index]
+    local card_ok, card_def = pcall(cards.get_card_def, card_id)
+    if not card_ok or not card_def then return fail("invalid_card") end
+    -- Check card has sacrifice ability
+    local sac_ab = nil
+    if card_def.abilities then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "static" and ab.effect == "play_cost_sacrifice" then sac_ab = ab; break end
+      end
+    end
+    if not sac_ab then return fail("card_not_playable") end
+    local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
+    if actions.count_unassigned_workers(p) < sacrifice_count then return fail("not_enough_workers") end
+    local played = actions.play_from_hand(g, pi, hand_index)
+    if not played then return fail("play_failed") end
+    return ok(
+      { card_id = card_id },
+      { { type = "card_played_from_hand", player_index = pi, card_id = card_id } }
+    )
+  end
+
+  if command.type == "ASSIGN_SPECIAL_WORKER" then
+    local pi = command.player_index
+    local sw_index = command.sw_index
+    local target = command.target
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    local p = g.players[pi + 1]
+    if not sw_index or not p.specialWorkers[sw_index] then return fail("invalid_sw_index") end
+    if p.specialWorkers[sw_index].assigned_to ~= nil then return fail("sw_already_assigned") end
+    local assigned = actions.assign_special_worker(g, pi, sw_index, target)
+    if not assigned then return fail("assign_failed") end
+    return ok(nil, { { type = "special_worker_assigned", player_index = pi, sw_index = sw_index, target = target } })
+  end
+
+  if command.type == "UNASSIGN_SPECIAL_WORKER" then
+    local pi = command.player_index
+    local sw_index = command.sw_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    local p = g.players[pi + 1]
+    if not sw_index or not p.specialWorkers[sw_index] then return fail("invalid_sw_index") end
+    if p.specialWorkers[sw_index].assigned_to == nil then return fail("sw_not_assigned") end
+    local unassigned = actions.unassign_special_worker(g, pi, sw_index)
+    if not unassigned then return fail("unassign_failed") end
+    return ok(nil, { { type = "special_worker_unassigned", player_index = pi, sw_index = sw_index } })
+  end
+
   return fail("unknown_command")
 end
 

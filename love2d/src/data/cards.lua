@@ -176,6 +176,27 @@ return {
   ---------------------------------------------------------
 
   {
+    id = "HUMAN_WORKER_LOVING_FAMILY",
+    name = "Loving Family",
+    faction = "Human",
+    kind = "Worker",
+    population = 6,
+    tier = 0,
+    attack = 1,
+    health = 4,
+    deckable = true,
+    text = "Sacrifice 2 Human Workers to play from Hand. Produces 2x Resources.",
+    costs = {},
+    upkeep = {},
+    subtypes = {},
+    abilities = {
+      { type = "static", effect = "play_cost_sacrifice",
+        effect_args = { sacrifice_count = 2 } },
+      { type = "static", effect = "double_production" },
+    },
+  },
+
+  {
     id = "HUMAN_WORKER_PEASANT",
     name = "Peasant",
     faction = "Human",

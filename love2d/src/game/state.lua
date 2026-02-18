@@ -33,7 +33,7 @@ end
 function state.build_deck(faction)
   local deck = {}
   for _, def in ipairs(cards.CARD_DEFS) do
-    if def.faction == faction and DECK_KINDS[def.kind] then
+    if def.faction == faction and (DECK_KINDS[def.kind] or def.deckable) then
       local copies = def.population or 1
       for _ = 1, copies do
         deck[#deck + 1] = def.id
@@ -92,6 +92,7 @@ function state.create_player_state(index, opts)
     board = {},
     graveyard = {},
     resourceNodes = {},
+    specialWorkers = {},
   }
   -- Draw starting hand of 5 cards
   state.draw_cards(p, 5)

@@ -332,7 +332,8 @@ function GameState:update(dt)
     if k == "blueprint" or k == "end_turn" or k == "pass" or k == "activate_base"
        or k == "activate_ability" or k == "ability_hover"
        or k == "worker_unassigned" or k == "worker_left" or k == "worker_right"
-       or k == "structure" or k == "structure_worker" or k == "hand_card" or k == "unit_deck" then
+       or k == "structure" or k == "structure_worker" or k == "hand_card" or k == "unit_deck"
+       or k == "special_worker_unassigned" or k == "special_worker_resource" or k == "special_worker_structure" then
       want_hand = true
     end
   end
@@ -347,9 +348,13 @@ function GameState:update(dt)
     self._current_cursor = desired
   end
 
-  -- Feature 5: Tooltip hover delay (structures + unit deck + ability buttons)
+  -- Feature 5: Tooltip hover delay (structures + unit deck + ability buttons + workers)
   if self.hover and (self.hover.kind == "structure" or self.hover.kind == "unit_deck"
-      or self.hover.kind == "ability_hover" or self.hover.kind == "activate_ability") and not deck_viewer.is_open() then
+      or self.hover.kind == "ability_hover" or self.hover.kind == "activate_ability"
+      or self.hover.kind == "special_worker_unassigned" or self.hover.kind == "special_worker_resource"
+      or self.hover.kind == "special_worker_structure"
+      or self.hover.kind == "worker_unassigned" or self.hover.kind == "worker_left"
+      or self.hover.kind == "worker_right" or self.hover.kind == "structure_worker") and not deck_viewer.is_open() then
     local target_key
     if (self.hover.kind == "ability_hover" or self.hover.kind == "activate_ability") and type(self.hover.idx) == "table" then
       local info = self.hover.idx
@@ -479,14 +484,24 @@ function GameState:draw()
     -- Soft shadow (offset) for a lifted look
     love.graphics.setColor(0, 0, 0, 0.45)
     love.graphics.circle("fill", dx + 3, dy + 5, drag_r + 3)
-    -- Main fill (slightly brighter when dragging)
-    love.graphics.setColor(0.95, 0.95, 1.0, 1.0)
-    love.graphics.circle("fill", dx, dy, drag_r)
-    -- Outline
-    love.graphics.setColor(0.5, 0.55, 1.0, 1.0)
-    love.graphics.setLineWidth(2)
-    love.graphics.circle("line", dx, dy, drag_r)
-    love.graphics.setLineWidth(1)
+    if self.drag.from == "special" then
+      -- Gold special worker
+      love.graphics.setColor(1.0, 0.85, 0.3, 1.0)
+      love.graphics.circle("fill", dx, dy, drag_r)
+      love.graphics.setColor(0.85, 0.65, 0.1, 1.0)
+      love.graphics.setLineWidth(2)
+      love.graphics.circle("line", dx, dy, drag_r)
+      love.graphics.setLineWidth(1)
+    else
+      -- Main fill (slightly brighter when dragging)
+      love.graphics.setColor(0.95, 0.95, 1.0, 1.0)
+      love.graphics.circle("fill", dx, dy, drag_r)
+      -- Outline
+      love.graphics.setColor(0.5, 0.55, 1.0, 1.0)
+      love.graphics.setLineWidth(2)
+      love.graphics.circle("line", dx, dy, drag_r)
+      love.graphics.setLineWidth(1)
+    end
   end
 
   if deck_viewer.is_open() then
@@ -556,6 +571,105 @@ function GameState:draw()
             abilities_list = def.abilities,
             used_abilities = used_abs,
             can_activate_abilities = can_act_abs,
+            show_ability_text = true,
+          })
+          love.graphics.pop()
+        end
+      end
+    end
+
+    -- Regular worker tooltip (show tier 0 worker card for this faction)
+    if self.hover and (self.hover.kind == "worker_unassigned" or self.hover.kind == "worker_left"
+       or self.hover.kind == "worker_right" or self.hover.kind == "structure_worker") and self.tooltip_timer >= 0.3 then
+      local pi = self.hover.pi
+      local player = self.game_state.players[pi + 1]
+      if player then
+        -- Find the tier 0 worker card for this faction
+        local worker_defs = cards.filter({ kind = "Worker", faction = player.faction })
+        local def = nil
+        for _, wd in ipairs(worker_defs) do
+          if wd.tier == 0 and not wd.deckable then
+            def = wd
+            break
+          end
+        end
+        if def then
+          local mx, my = love.mouse.getPosition()
+          local gw, gh = love.graphics.getDimensions()
+          local tw, th = 200, 280
+          local tx = mx + 16
+          local ty = my - th / 2
+          if tx + tw > gw - 10 then tx = mx - tw - 16 end
+          if ty < 10 then ty = 10 end
+          if ty + th > gh - 10 then ty = gh - th - 10 end
+
+          local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
+          love.graphics.setColor(0, 0, 0, 0.6 * fade_in)
+          love.graphics.rectangle("fill", tx - 4, ty - 4, tw + 8, th + 8, 8, 8)
+          love.graphics.push()
+          love.graphics.setColor(1, 1, 1, fade_in)
+          card_frame.draw(tx, ty, {
+            w = tw,
+            h = th,
+            title = def.name,
+            faction = def.faction,
+            kind = def.kind,
+            typeLine = (def.subtypes and #def.subtypes > 0)
+              and (def.faction .. " — " .. table.concat(def.subtypes, ", "))
+              or (def.faction .. " — " .. def.kind),
+            text = def.text,
+            costs = def.costs,
+            attack = def.attack,
+            health = def.health,
+            tier = def.tier,
+            abilities_list = def.abilities,
+            show_ability_text = true,
+          })
+          love.graphics.pop()
+        end
+      end
+    end
+
+    -- Special worker tooltip (show card preview on hover)
+    if self.hover and (self.hover.kind == "special_worker_unassigned"
+       or self.hover.kind == "special_worker_resource"
+       or self.hover.kind == "special_worker_structure") and self.tooltip_timer >= 0.3 then
+      local pi = self.hover.pi
+      local sw_index = self.hover.idx
+      local player = self.game_state.players[pi + 1]
+      local sw = player and player.specialWorkers and player.specialWorkers[sw_index]
+      if sw then
+        local ok, def = pcall(cards.get_card_def, sw.card_id)
+        if ok and def then
+          local mx, my = love.mouse.getPosition()
+          local gw, gh = love.graphics.getDimensions()
+          local tw, th = 200, 280
+          local tx = mx + 16
+          local ty = my - th / 2
+          if tx + tw > gw - 10 then tx = mx - tw - 16 end
+          if ty < 10 then ty = 10 end
+          if ty + th > gh - 10 then ty = gh - th - 10 end
+
+          local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
+          love.graphics.setColor(0, 0, 0, 0.6 * fade_in)
+          love.graphics.rectangle("fill", tx - 4, ty - 4, tw + 8, th + 8, 8, 8)
+          love.graphics.push()
+          love.graphics.setColor(1, 1, 1, fade_in)
+          card_frame.draw(tx, ty, {
+            w = tw,
+            h = th,
+            title = def.name,
+            faction = def.faction,
+            kind = def.kind,
+            typeLine = (def.subtypes and #def.subtypes > 0)
+              and (def.faction .. " — " .. table.concat(def.subtypes, ", "))
+              or (def.faction .. " — " .. def.kind),
+            text = def.text,
+            costs = def.costs,
+            attack = def.attack,
+            health = def.health,
+            tier = def.tier,
+            abilities_list = def.abilities,
             show_ability_text = true,
           })
           love.graphics.pop()
@@ -798,10 +912,50 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  -- Hand card click: toggle selection
+  -- Hand card click: toggle selection or play from hand
   if kind == "hand_card" then
     if self.hand_selected_index == idx then
-      -- Deselect
+      -- Clicking selected card: check if it can be played from hand (sacrifice ability)
+      local local_p = self.game_state.players[pi + 1]
+      local card_id = local_p.hand[idx]
+      if card_id and pi == self.game_state.activePlayer then
+        local card_ok, card_def = pcall(cards.get_card_def, card_id)
+        if card_ok and card_def then
+          local sac_ab = nil
+          if card_def.abilities then
+            for _, ab in ipairs(card_def.abilities) do
+              if ab.type == "static" and ab.effect == "play_cost_sacrifice" then sac_ab = ab; break end
+            end
+          end
+          if sac_ab then
+            local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
+            local actions_mod = require("src.game.actions")
+            local unassigned = actions_mod.count_unassigned_workers(local_p)
+            if unassigned >= sacrifice_count then
+              local result = self:dispatch_command({
+                type = "PLAY_FROM_HAND",
+                player_index = pi,
+                hand_index = idx,
+              })
+              if result.ok then
+                sound.play("coin")
+                shake.trigger(4, 0.15)
+                local pi_panel = self:player_to_panel(pi)
+                local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+                popup.create("-" .. sacrifice_count .. " Workers", px_b + pw_b * 0.5, py_b + ph_b - 80, { 1.0, 0.5, 0.25 })
+                popup.create("Loving Family played!", px_b + pw_b * 0.5, py_b + ph_b - 110, { 0.9, 0.8, 0.2 })
+                self.hand_selected_index = nil
+                -- Update hand y_offsets
+                while #self.hand_y_offsets > #local_p.hand do
+                  table.remove(self.hand_y_offsets)
+                end
+                return
+              end
+            end
+          end
+        end
+      end
+      -- Deselect if not playable
       self.hand_selected_index = nil
       sound.play("click")
     else
@@ -968,6 +1122,13 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     local mx, my = love.mouse.getPosition()
     self.drag = { player_index = pi, from = from, display_x = mx, display_y = my, board_index = idx }
   end
+
+  -- Special worker drag
+  if kind == "special_worker_unassigned" or kind == "special_worker_resource" or kind == "special_worker_structure" then
+    sound.play("pop")
+    local mx, my = love.mouse.getPosition()
+    self.drag = { player_index = pi, from = "special", display_x = mx, display_y = my, sw_index = idx }
+  end
 end
 
 -- Helper: get the origin screen position for a worker based on where it was dragged from
@@ -990,6 +1151,10 @@ function GameState:_get_worker_origin(pi, from)
     -- Snap back to the structure tile center
     local sax, say, _, _ = board.structures_area_rect(px, py, pw, ph)
     return sax + 45, say + 30
+  elseif from == "special" then
+    -- Snap back to unassigned pool center
+    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
+    return uax + uaw / 2, uay + uah / 2
   end
   return px + pw / 2, py + ph / 2
 end
@@ -1031,6 +1196,47 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   local from = self.drag.from
   local res_left = (self.game_state.players[pi + 1].faction == "Human") and "wood" or "food"
   local did_drop = false
+
+  -- Special worker drop handling
+  if from == "special" then
+    local sw_index = self.drag.sw_index
+    local player = self.game_state.players[pi + 1]
+    local sw = player.specialWorkers[sw_index]
+    if sw then
+      local was_assigned = sw.assigned_to ~= nil
+      if kind == "unassigned_pool" or kind == "worker_unassigned" or kind == "special_worker_unassigned" then
+        -- Drop to unassigned pool
+        if was_assigned then
+          did_drop = self:dispatch_command({ type = "UNASSIGN_SPECIAL_WORKER", player_index = pi, sw_index = sw_index }).ok
+        end
+      elseif kind == "resource_left" then
+        if was_assigned then
+          self:dispatch_command({ type = "UNASSIGN_SPECIAL_WORKER", player_index = pi, sw_index = sw_index })
+        end
+        did_drop = self:dispatch_command({ type = "ASSIGN_SPECIAL_WORKER", player_index = pi, sw_index = sw_index, target = res_left }).ok
+      elseif kind == "resource_right" then
+        if was_assigned then
+          self:dispatch_command({ type = "UNASSIGN_SPECIAL_WORKER", player_index = pi, sw_index = sw_index })
+        end
+        did_drop = self:dispatch_command({ type = "ASSIGN_SPECIAL_WORKER", player_index = pi, sw_index = sw_index, target = "stone" }).ok
+      elseif kind == "structure" or kind == "structure_worker" then
+        local drop_si = drop_extra
+        if drop_si then
+          if was_assigned then
+            self:dispatch_command({ type = "UNASSIGN_SPECIAL_WORKER", player_index = pi, sw_index = sw_index })
+          end
+          did_drop = self:dispatch_command({ type = "ASSIGN_SPECIAL_WORKER", player_index = pi, sw_index = sw_index, target = { type = "structure", board_index = drop_si } }).ok
+        end
+      end
+    end
+    if did_drop then
+      sound.play("pop")
+    else
+      self:_spawn_snap_back()
+    end
+    self.drag = nil
+    return
+  end
 
   -- Drop target (unassigned pool or clicking an unassigned worker = same zone)
   if kind == "unassigned_pool" or kind == "worker_unassigned" then

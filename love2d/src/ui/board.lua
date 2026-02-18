@@ -12,6 +12,8 @@ local res_registry = require("src.data.resources")
 local textures = require("src.fx.textures")
 local res_icons = require("src.ui.res_icons")
 
+local actions = require("src.game.actions")
+
 local board = {}
 
 local MARGIN = 20
@@ -370,6 +372,53 @@ local function draw_worker_circle(cx, cy, is_active_panel, is_draggable, is_hove
   love.graphics.circle("line", cx, cy, r)
 end
 
+-- Draw special worker token with gold/amber ring and warm sphere shading
+local function draw_special_worker_circle(cx, cy, is_active_panel, is_draggable, is_hovered_worker)
+  local t = love.timer.getTime()
+  local r = WORKER_R
+  if is_draggable then
+    r = WORKER_R + 0.8 * math.sin(t * 3)
+  end
+  local alpha = is_active_panel and 1.0 or 0.7
+  -- Drop shadow
+  love.graphics.setColor(0, 0, 0, 0.4 * alpha)
+  love.graphics.circle("fill", cx + 2, cy + 3, r + 1)
+  -- Hover glow (gold)
+  if is_hovered_worker and is_active_panel then
+    love.graphics.setColor(0.9, 0.7, 0.2, 0.25 + 0.1 * math.sin(t * 4))
+    love.graphics.circle("fill", cx, cy, r + 4)
+  end
+  -- Radial gradient: warm gold tones
+  local layers = 4
+  for i = layers, 1, -1 do
+    local frac = i / layers
+    local lr = r * frac
+    local offx = -r * 0.15 * (1 - frac)
+    local offy = -r * 0.2 * (1 - frac)
+    local brightness
+    if is_active_panel then
+      brightness = 0.55 + 0.45 * (1 - frac)
+    else
+      brightness = 0.4 + 0.3 * (1 - frac)
+    end
+    -- Gold/amber tones instead of blue/gray
+    love.graphics.setColor(brightness * 1.1, brightness * 0.85, brightness * 0.3, alpha)
+    love.graphics.circle("fill", cx + offx, cy + offy, lr)
+  end
+  -- Specular highlight
+  love.graphics.setColor(1, 1, 0.8, 0.4 * alpha)
+  love.graphics.circle("fill", cx - r * 0.25, cy - r * 0.25, r * 0.3)
+  -- Gold rim outline
+  if is_active_panel then
+    love.graphics.setColor(0.85, 0.65, 0.1, 0.9)
+  else
+    love.graphics.setColor(0.6, 0.5, 0.2, 0.6)
+  end
+  love.graphics.setLineWidth(2)
+  love.graphics.circle("line", cx, cy, r)
+  love.graphics.setLineWidth(1)
+end
+
 -- Helper: draw a beveled button (gradient fill, top/bottom edge highlights, hover glow, press offset)
 local function draw_button(bx, by, bw, bh, label, is_hov, is_press, accent_r, accent_g, accent_b)
   local t = love.timer.getTime()
@@ -680,8 +729,8 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
             -- Worker slot circles for structures that accept workers
             local max_w = get_max_workers(sdef)
             if max_w > 0 then
-              -- Build per-slot filled state from each entry's worker count
-              local slot_filled = {}
+              -- Build per-slot filled state from each entry's worker count (regular + special)
+              local slot_filled = {}   -- false = empty, "regular" = regular worker, "special" = special worker
               local total_slots = 0
               for _, esi in ipairs(group.entries) do
                 local ew = player.board[esi].workers or 0
@@ -689,9 +738,16 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
                 if drag and drag.player_index == pi and drag.from == "structure" and drag.board_index == esi then
                   ew = math.max(0, ew - 1)
                 end
+                local sw_count = actions.count_special_on_structure(player, esi)
                 for w = 1, max_w do
                   total_slots = total_slots + 1
-                  slot_filled[total_slots] = (w <= ew)
+                  if w <= ew then
+                    slot_filled[total_slots] = "regular"
+                  elseif w <= ew + sw_count then
+                    slot_filled[total_slots] = "special"
+                  else
+                    slot_filled[total_slots] = false
+                  end
                 end
               end
               -- Draw worker circles at bottom-right of tile
@@ -701,7 +757,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
               local wcx_start = tx + tw - row_w - 4
               local wcy = ty + th - wr - 4
               -- Drop zone glow when dragging a worker over this structure
-              if drag and drag.player_index == pi and (drag.from == "unassigned" or drag.from == "left" or drag.from == "right") and tile_hovered then
+              if drag and drag.player_index == pi and (drag.from == "unassigned" or drag.from == "left" or drag.from == "right" or drag.from == "special") and tile_hovered then
                 local pulse = 0.4 + 0.3 * math.sin(t * 4)
                 love.graphics.setColor(0.3, 0.6, 1.0, pulse)
                 love.graphics.setLineWidth(2)
@@ -710,8 +766,8 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
               end
               for slot = 1, total_slots do
                 local scx = wcx_start + (slot - 1) * spacing + wr
-                if slot_filled[slot] then
-                  -- Filled worker circle
+                if slot_filled[slot] == "regular" then
+                  -- Filled regular worker circle
                   love.graphics.setColor(0, 0, 0, 0.3)
                   love.graphics.circle("fill", scx + 1, wcy + 2, wr + 1)
                   love.graphics.setColor(0.75, 0.75, 0.9, is_active and 1.0 or 0.6)
@@ -720,6 +776,18 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
                   love.graphics.circle("fill", scx - wr * 0.2, wcy - wr * 0.2, wr * 0.3)
                   love.graphics.setColor(0.45, 0.5, 0.9, 0.7)
                   love.graphics.circle("line", scx, wcy, wr)
+                elseif slot_filled[slot] == "special" then
+                  -- Filled special worker circle (gold)
+                  love.graphics.setColor(0, 0, 0, 0.3)
+                  love.graphics.circle("fill", scx + 1, wcy + 2, wr + 1)
+                  love.graphics.setColor(0.9, 0.75, 0.25, is_active and 1.0 or 0.6)
+                  love.graphics.circle("fill", scx, wcy, wr)
+                  love.graphics.setColor(1, 1, 0.8, 0.35)
+                  love.graphics.circle("fill", scx - wr * 0.2, wcy - wr * 0.2, wr * 0.3)
+                  love.graphics.setColor(0.85, 0.65, 0.1, 0.9)
+                  love.graphics.setLineWidth(1.5)
+                  love.graphics.circle("line", scx, wcy, wr)
+                  love.graphics.setLineWidth(1)
                 else
                   -- Empty slot circle
                   love.graphics.setColor(0.25, 0.27, 0.35, is_active and 0.6 or 0.3)
@@ -775,7 +843,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
 
     -- Drop zone glow on resource nodes when dragging
     if drag and drag.player_index == pi then
-      if drag.from ~= "left" then
+      if drag.from ~= "left" or drag.from == "special" then
         draw_drop_zone_glow(rl_x, rl_y, rl_w, rl_h, t)
       end
     end
@@ -783,9 +851,15 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     card_frame.draw_resource_node(rl_x, rl_y, res_left_title, player.faction)
     local n_left = player.workersOn[res_left_resource]
     if drag and drag.player_index == pi and drag.from == "left" and n_left > 0 then n_left = n_left - 1 end
+    local n_special_left = actions.count_special_on_resource(player, res_left_resource)
+    local total_left_draw = n_left + n_special_left
     for i = 1, n_left do
-      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", i, n_left, panel)
+      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", i, total_left_draw, panel)
       draw_worker_circle(wcx, wcy, is_active, is_active)
+    end
+    for i = 1, n_special_left do
+      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", n_left + i, total_left_draw, panel)
+      draw_special_worker_circle(wcx, wcy, is_active, is_active)
     end
 
     local rr_x, rr_y, rr_w, rr_h = board.resource_right_rect(px, py, pw, ph, panel)
@@ -800,9 +874,15 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     card_frame.draw_resource_node(rr_x, rr_y, "Stone", player.faction)
     local n_stone = player.workersOn.stone
     if drag and drag.player_index == pi and drag.from == "right" and n_stone > 0 then n_stone = n_stone - 1 end
+    local n_special_stone = actions.count_special_on_resource(player, "stone")
+    local total_stone_draw = n_stone + n_special_stone
     for i = 1, n_stone do
-      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", i, n_stone, panel)
+      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", i, total_stone_draw, panel)
       draw_worker_circle(wcx, wcy, is_active, is_active)
+    end
+    for i = 1, n_special_stone do
+      local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", n_stone + i, total_stone_draw, panel)
+      draw_special_worker_circle(wcx, wcy, is_active, is_active)
     end
 
     -- Unassigned workers pool (centered); hide one if we're dragging from this pool
@@ -826,13 +906,29 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     if drag and drag.player_index == pi and drag.from == "unassigned" and unassigned > 0 then
       draw_count = unassigned - 1
     end
-    local total_w = draw_count * (WORKER_R * 2 + 4) - 4
+    -- Count unassigned special workers
+    local special_unassigned_count = 0
+    for _, sw in ipairs(player.specialWorkers) do
+      if sw.assigned_to == nil then special_unassigned_count = special_unassigned_count + 1 end
+    end
+    local total_draw_pool = draw_count + special_unassigned_count
+    local total_w = total_draw_pool * (WORKER_R * 2 + 4) - 4
     if total_w < 0 then total_w = 0 end
     local start_x = uax + uaw / 2 - total_w / 2 + WORKER_R
     for i = 1, draw_count do
       local wcx = start_x + (i - 1) * (WORKER_R * 2 + 4)
       local wcy = uay + uah / 2
       draw_worker_circle(wcx, wcy, is_active, is_active)
+    end
+    -- Draw unassigned special workers (gold) to the right of regular workers
+    local sw_draw_idx = 0
+    for swi, sw in ipairs(player.specialWorkers) do
+      if sw.assigned_to == nil then
+        sw_draw_idx = sw_draw_idx + 1
+        local wcx = start_x + (draw_count + sw_draw_idx - 1) * (WORKER_R * 2 + 4)
+        local wcy = uay + uah / 2
+        draw_special_worker_circle(wcx, wcy, is_active, is_active)
+      end
     end
     -- Worker count label (top-right corner of pool)
     local wcount_str = player.totalWorkers .. "/" .. max_workers
@@ -1120,23 +1216,36 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
               local row_w = total_slots * spacing - 3
               local wcx_start = tx + tw - row_w - 4
               local wcy = ty + th - wr - 4
-              -- Build per-slot: which board entry it belongs to, and whether it's filled
+              -- Build per-slot: which board entry it belongs to, filled type, and special worker index
               local slot_info = {}
               for _, esi in ipairs(group.entries) do
                 local ew = player.board[esi].workers or 0
+                local sw_count = actions.count_special_on_structure(player, esi)
+                -- Collect special worker indices assigned to this entry
+                local sw_indices = {}
+                for swi, sw in ipairs(player.specialWorkers) do
+                  if sw.assigned_to == esi then sw_indices[#sw_indices + 1] = swi end
+                end
                 for w = 1, max_w do
-                  slot_info[#slot_info + 1] = { board_index = esi, filled = (w <= ew) }
+                  if w <= ew then
+                    slot_info[#slot_info + 1] = { board_index = esi, filled = "regular" }
+                  elseif w <= ew + sw_count then
+                    slot_info[#slot_info + 1] = { board_index = esi, filled = "special", sw_index = sw_indices[w - ew] }
+                  else
+                    slot_info[#slot_info + 1] = { board_index = esi, filled = false }
+                  end
                 end
               end
               for slot = 1, total_slots do
                 local scx = wcx_start + (slot - 1) * spacing + wr
                 if (mx - scx)^2 + (my - wcy)^2 <= (wr + 2)^2 then
-                  local info = slot_info[slot]
-                  if info.filled then
-                    return "structure_worker", pi, info.board_index
+                  local sinfo = slot_info[slot]
+                  if sinfo.filled == "regular" then
+                    return "structure_worker", pi, sinfo.board_index
+                  elseif sinfo.filled == "special" then
+                    return "special_worker_structure", pi, sinfo.sw_index
                   else
-                    -- Empty slot: return the board_index for this entry as drop target
-                    return "structure", pi, info.board_index
+                    return "structure", pi, sinfo.board_index
                   end
                 end
               end
@@ -1160,7 +1269,13 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
     local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
     if util.point_in_rect(mx, my, uax, uay, uaw, uah) then
       local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player)
-      local total_w = unassigned * (WORKER_R * 2 + 4) - 4
+      -- Count unassigned special workers
+      local special_unassigned = {}
+      for swi, sw in ipairs(player.specialWorkers) do
+        if sw.assigned_to == nil then special_unassigned[#special_unassigned + 1] = swi end
+      end
+      local total_pool = unassigned + #special_unassigned
+      local total_w = total_pool * (WORKER_R * 2 + 4) - 4
       local start_x = uax + uaw / 2 - total_w / 2 + WORKER_R
       for i = 1, unassigned do
         local cx = start_x + (i - 1) * (WORKER_R * 2 + 4)
@@ -1169,19 +1284,55 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
           return "worker_unassigned", pi, nil
         end
       end
+      -- Hit test special workers in pool
+      for si, swi in ipairs(special_unassigned) do
+        local cx = start_x + (unassigned + si - 1) * (WORKER_R * 2 + 4)
+        local cy = uay + uah / 2
+        if (mx - cx)^2 + (my - cy)^2 <= WORKER_R^2 then
+          return "special_worker_unassigned", pi, swi
+        end
+      end
       return "unassigned_pool", pi
     end
 
-    for i = 1, player.workersOn[res_left] do
-      local cx, cy = board.worker_circle_center(px, py, pw, ph, "left", i, player.workersOn[res_left], panel)
+    local n_left_reg = player.workersOn[res_left]
+    local n_left_special = actions.count_special_on_resource(player, res_left)
+    local total_left = n_left_reg + n_left_special
+    for i = 1, n_left_reg do
+      local cx, cy = board.worker_circle_center(px, py, pw, ph, "left", i, total_left, panel)
       if (mx - cx)^2 + (my - cy)^2 <= WORKER_R^2 then
         return "worker_left", pi, i
       end
     end
-    for i = 1, player.workersOn.stone do
-      local cx, cy = board.worker_circle_center(px, py, pw, ph, "right", i, player.workersOn.stone, panel)
+    -- Special workers on left resource
+    local sw_left_idx = 0
+    for swi, sw in ipairs(player.specialWorkers) do
+      if sw.assigned_to == res_left then
+        sw_left_idx = sw_left_idx + 1
+        local cx, cy = board.worker_circle_center(px, py, pw, ph, "left", n_left_reg + sw_left_idx, total_left, panel)
+        if (mx - cx)^2 + (my - cy)^2 <= WORKER_R^2 then
+          return "special_worker_resource", pi, swi
+        end
+      end
+    end
+    local n_stone_reg = player.workersOn.stone
+    local n_stone_special = actions.count_special_on_resource(player, "stone")
+    local total_stone = n_stone_reg + n_stone_special
+    for i = 1, n_stone_reg do
+      local cx, cy = board.worker_circle_center(px, py, pw, ph, "right", i, total_stone, panel)
       if (mx - cx)^2 + (my - cy)^2 <= WORKER_R^2 then
         return "worker_right", pi, i
+      end
+    end
+    -- Special workers on right resource (stone)
+    local sw_right_idx = 0
+    for swi, sw in ipairs(player.specialWorkers) do
+      if sw.assigned_to == "stone" then
+        sw_right_idx = sw_right_idx + 1
+        local cx, cy = board.worker_circle_center(px, py, pw, ph, "right", n_stone_reg + sw_right_idx, total_stone, panel)
+        if (mx - cx)^2 + (my - cy)^2 <= WORKER_R^2 then
+          return "special_worker_resource", pi, swi
+        end
       end
     end
 

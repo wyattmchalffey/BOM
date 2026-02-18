@@ -17,6 +17,15 @@ local function has_static_effect(card_def, effect_name)
   return false
 end
 
+-- Get the play_cost_sacrifice ability from a card def (returns ability or nil)
+local function get_sacrifice_ability(card_def)
+  if not card_def or not card_def.abilities then return nil end
+  for _, ab in ipairs(card_def.abilities) do
+    if ab.type == "static" and ab.effect == "play_cost_sacrifice" then return ab end
+  end
+  return nil
+end
+
 -- Draw cards from deck to hand
 function actions.draw_card(g, player_index, count)
   local p = g.players[player_index + 1]
@@ -52,6 +61,34 @@ function actions.start_turn(g)
             local amount = ab.effect_args.amount or 0
             if res and amount > 0 and p.resources[res] ~= nil then
               p.resources[res] = p.resources[res] + amount
+            end
+          end
+        end
+      end
+    end
+  end
+  -- Produce resources from special workers (2x rate)
+  for _, sw in ipairs(p.specialWorkers) do
+    if sw.assigned_to ~= nil then
+      if type(sw.assigned_to) == "string" then
+        -- On a resource node: 2x production_per_worker
+        local res = sw.assigned_to
+        if p.resources[res] ~= nil then
+          p.resources[res] = p.resources[res] + config.production_per_worker * 2
+        end
+      elseif type(sw.assigned_to) == "number" then
+        -- On a structure: find per_worker rate, apply 2x
+        local entry = p.board[sw.assigned_to]
+        if entry then
+          local ok_sw, sw_def = pcall(cards.get_card_def, entry.card_id)
+          if ok_sw and sw_def and sw_def.abilities then
+            for _, ab in ipairs(sw_def.abilities) do
+              if ab.type == "static" and ab.effect == "produce" and ab.effect_args and ab.effect_args.per_worker then
+                local res = ab.effect_args.resource
+                if res and p.resources[res] ~= nil then
+                  p.resources[res] = p.resources[res] + ab.effect_args.per_worker * 2
+                end
+              end
             end
           end
         end
@@ -118,7 +155,8 @@ function actions.assign_worker_to_structure(g, player_index, board_index)
   end
   if max_w <= 0 then return g end
   entry.workers = entry.workers or 0
-  if entry.workers >= max_w then return g end
+  local current_total = entry.workers + actions.count_special_on_structure(p, board_index)
+  if current_total >= max_w then return g end
   local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
   if p.totalWorkers - assigned <= 0 then return g end
   entry.workers = entry.workers + 1
@@ -214,6 +252,107 @@ function actions.activate_base_ability(g, player_index)
   local p = g.players[player_index + 1]
   local base_def = cards.get_card_def(p.baseId)
   return actions.activate_ability(g, player_index, base_def, "base")
+end
+
+-- Count unassigned regular workers for a player
+function actions.count_unassigned_workers(p)
+  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
+  return p.totalWorkers - assigned
+end
+
+-- Count special workers assigned to a given structure board_index
+function actions.count_special_on_structure(p, board_index)
+  local count = 0
+  for _, sw in ipairs(p.specialWorkers) do
+    if sw.assigned_to == board_index then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+-- Count special workers assigned to a resource node (string key)
+function actions.count_special_on_resource(p, resource)
+  local count = 0
+  for _, sw in ipairs(p.specialWorkers) do
+    if sw.assigned_to == resource then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+-- Play a card from hand that has play_cost_sacrifice ability
+function actions.play_from_hand(g, player_index, hand_index)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
+  local p = g.players[player_index + 1]
+  if hand_index < 1 or hand_index > #p.hand then return false end
+
+  local card_id = p.hand[hand_index]
+  local card_def = cards.get_card_def(card_id)
+  local sac_ab = get_sacrifice_ability(card_def)
+  if not sac_ab then return false end
+
+  local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
+  if actions.count_unassigned_workers(p) < sacrifice_count then return false end
+
+  -- Sacrifice regular workers
+  p.totalWorkers = p.totalWorkers - sacrifice_count
+
+  -- Remove card from hand
+  table.remove(p.hand, hand_index)
+
+  -- Add as special worker
+  p.specialWorkers[#p.specialWorkers + 1] = { card_id = card_id, assigned_to = nil }
+
+  return true
+end
+
+-- Assign a special worker to a target
+-- target: "food"/"wood"/"stone" for resource nodes, or { type="structure", board_index=N }
+function actions.assign_special_worker(g, player_index, sw_index, target)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
+  local p = g.players[player_index + 1]
+  local sw = p.specialWorkers[sw_index]
+  if not sw or sw.assigned_to ~= nil then return false end
+
+  if type(target) == "string" then
+    -- Resource node assignment
+    if target ~= "food" and target ~= "wood" and target ~= "stone" then return false end
+    sw.assigned_to = target
+    return true
+  elseif type(target) == "table" and target.type == "structure" then
+    local bi = target.board_index
+    local entry = p.board[bi]
+    if not entry then return false end
+    local card_def = cards.get_card_def(entry.card_id)
+    -- Find max_workers from produce ability
+    local max_w = 0
+    if card_def and card_def.abilities then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "static" and ab.effect == "produce" and ab.effect_args and ab.effect_args.per_worker then
+          max_w = ab.effect_args.max_workers or 99
+        end
+      end
+    end
+    if max_w <= 0 then return false end
+    -- Check capacity: regular + special workers
+    local current = (entry.workers or 0) + actions.count_special_on_structure(p, bi)
+    if current >= max_w then return false end
+    sw.assigned_to = bi
+    return true
+  end
+  return false
+end
+
+-- Unassign a special worker (set assigned_to = nil)
+function actions.unassign_special_worker(g, player_index, sw_index)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
+  local p = g.players[player_index + 1]
+  local sw = p.specialWorkers[sw_index]
+  if not sw or sw.assigned_to == nil then return false end
+  sw.assigned_to = nil
+  return true
 end
 
 return actions

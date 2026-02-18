@@ -22,6 +22,12 @@ local function collect_player_parts(p)
   for _, entry in ipairs(p.board or {}) do
     parts[#parts + 1] = tostring(entry.workers or 0)
   end
+  -- Include special workers for desync detection
+  parts[#parts + 1] = tostring(#(p.specialWorkers or {}))
+  for _, sw in ipairs(p.specialWorkers or {}) do
+    parts[#parts + 1] = tostring(sw.card_id or "")
+    parts[#parts + 1] = tostring(sw.assigned_to or "nil")
+  end
   return parts
 end
 
