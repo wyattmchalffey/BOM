@@ -54,6 +54,7 @@ function GameState.new(opts)
     -- Hand UI state
     hand_hover_index = nil,      -- which hand card the mouse is over (1-based)
     hand_selected_index = nil,   -- which hand card is "selected" (clicked)
+    pending_play_unit = nil,      -- { source, ability_index, effect_args, eligible_indices }
     hand_y_offsets = {},          -- per-card animated y offset (negative = raised)
     command_log = replay.new_log({
       command_schema_version = commands.SCHEMA_VERSION,
@@ -452,6 +453,7 @@ function GameState:draw()
     hover_index = self.hand_hover_index,
     selected_index = self.hand_selected_index,
     y_offsets = self.hand_y_offsets,
+    eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or nil,
   }
   board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
 
@@ -517,7 +519,12 @@ function GameState:draw()
       local pi = self.hover.pi
       local si = self.hover.idx
       local player = self.game_state.players[pi + 1]
-      local entry = player and player.board[si]
+      local entry
+      if si == 0 then
+        entry = { card_id = player.baseId }
+      else
+        entry = player and player.board[si]
+      end
       if entry then
         local ok, def = pcall(cards.get_card_def, entry.card_id)
         if ok and def then
@@ -874,10 +881,17 @@ function GameState:mousepressed(x, y, button, istouch, presses)
             if cost_str ~= "" then
               popup.create(cost_str, px + pw * 0.5, py + 8, { 1.0, 0.5, 0.25 })
             end
-            local sax, say = board.structures_area_rect(px, py, pw, ph)
-            local tile_count = #self.game_state.players[self.show_blueprint_for_player + 1].board
-            popup.create("Built!", sax + (tile_count - 1) * 98 + 45, say + 20, { 0.4, 0.9, 1.0 })
-            local entry = self.game_state.players[self.show_blueprint_for_player + 1].board[tile_count]
+            local pi_panel_bp = self:player_to_panel(self.show_blueprint_for_player)
+            local sax, say = board.structures_area_rect(px, py, pw, ph, pi_panel_bp)
+            local struct_count = 0
+            for _, e in ipairs(self.game_state.players[self.show_blueprint_for_player + 1].board) do
+              local e_ok, e_def = pcall(cards.get_card_def, e.card_id)
+              if e_ok and e_def and e_def.kind == "Structure" then struct_count = struct_count + 1 end
+            end
+            local tile_step = board.BFIELD_TILE_W + board.BFIELD_GAP
+            popup.create("Built!", sax + (struct_count - 1) * tile_step + board.BFIELD_TILE_W / 2, say + 20, { 0.4, 0.9, 1.0 })
+            local board_entries = self.game_state.players[self.show_blueprint_for_player + 1].board
+            local entry = board_entries[#board_entries]
             entry.scale = 0
             tween.to(entry, 0.25, { scale = 1 }):ease("backout")
             deck_viewer.close()
@@ -904,10 +918,64 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
   local idx = extra  -- backwards compat: numeric index for hand_card, structure, etc.
   if not kind then
-    -- Clicked on empty space: deselect hand card
+    -- Clicked on empty space: cancel pending selection or deselect hand card
+    if self.pending_play_unit then
+      self.pending_play_unit = nil
+      sound.play("click")
+      return
+    end
     if self.hand_selected_index then
       self.hand_selected_index = nil
       sound.play("click")
+    end
+    return
+  end
+
+  -- Hand card click during pending play_unit selection
+  if kind == "hand_card" and self.pending_play_unit then
+    local pending = self.pending_play_unit
+    local is_eligible = false
+    for _, ei in ipairs(pending.eligible_indices) do
+      if ei == idx then is_eligible = true; break end
+    end
+    if is_eligible then
+      local p = self.game_state.players[self.local_player_index + 1]
+      local before_res = {}
+      for k, v in pairs(p.resources) do before_res[k] = v end
+      local result = self:dispatch_command({
+        type = "PLAY_UNIT_FROM_HAND",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        hand_index = idx,
+      })
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        for _, c in ipairs(pending.cost or {}) do
+          if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+            local rb_x, rb_y = board.resource_bar_rect(pi_panel)
+            popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
+          end
+        end
+        local card_id = result.meta and result.meta.card_id
+        local unit_name = "Unit"
+        if card_id then
+          local ok_d, udef = pcall(cards.get_card_def, card_id)
+          if ok_d and udef then unit_name = udef.name end
+        end
+        popup.create(unit_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.4, 0.9, 1.0 })
+        self.hand_selected_index = nil
+        self.pending_play_unit = nil
+        while #self.hand_y_offsets > #p.hand do
+          table.remove(self.hand_y_offsets)
+        end
+      else
+        sound.play("error")
+      end
+    else
+      sound.play("error")
     end
     return
   end
@@ -1022,8 +1090,9 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         badge_offset = badge_offset + 54
       end
     end
-    -- Clear hand selection on turn change
+    -- Clear hand selection and pending state on turn change
     self.hand_selected_index = nil
+    self.pending_play_unit = nil
     -- Show turn banner
     self.turn_banner_timer = 1.2
     self.turn_banner_text = (self.game_state.activePlayer == self.local_player_index) and "Your Turn" or "Opponent's Turn"
@@ -1050,6 +1119,62 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     if card_def and card_def.abilities then
       local ab = card_def.abilities[info.ability_index]
       if ab and ab.type == "activated" then
+        -- Two-step flow for play_unit abilities
+        if ab.effect == "play_unit" then
+          local eligible = abilities.find_matching_hand_indices(p, ab.effect_args)
+          if #eligible == 0 then
+            sound.play("error")
+            return
+          elseif #eligible == 1 then
+            -- Only one match: auto-play immediately
+            local before_res = {}
+            for k, v in pairs(p.resources) do before_res[k] = v end
+            local result = self:dispatch_command({
+              type = "PLAY_UNIT_FROM_HAND",
+              player_index = pi,
+              source = { type = info.source, index = info.board_index },
+              ability_index = info.ability_index,
+              hand_index = eligible[1],
+            })
+            if result.ok then
+              sound.play("coin")
+              local pi_panel = self:player_to_panel(pi)
+              local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+              for _, c in ipairs(ab.cost) do
+                if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+                  local rb_x, rb_y = board.resource_bar_rect(pi_panel)
+                  popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
+                end
+              end
+              local card_id = result.meta and result.meta.card_id
+              local unit_name = "Unit"
+              if card_id then
+                local ok_d, udef = pcall(cards.get_card_def, card_id)
+                if ok_d and udef then unit_name = udef.name end
+              end
+              popup.create(unit_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.4, 0.9, 1.0 })
+              self.hand_selected_index = nil
+              self.pending_play_unit = nil
+              while #self.hand_y_offsets > #p.hand do
+                table.remove(self.hand_y_offsets)
+              end
+            end
+            return
+          else
+            -- Multiple matches: enter pending selection mode
+            self.pending_play_unit = {
+              source = { type = info.source, index = info.board_index },
+              ability_index = info.ability_index,
+              effect_args = ab.effect_args,
+              eligible_indices = eligible,
+              cost = ab.cost,
+            }
+            self.hand_selected_index = nil
+            sound.play("click")
+            return
+          end
+        end
+
         local before_workers = p.totalWorkers
         local before_res = {}
         for k, v in pairs(p.resources) do before_res[k] = v end
@@ -1336,8 +1461,13 @@ function GameState:keypressed(key, scancode, isrepeat)
     end
     return
   end
-  -- Escape to deselect hand card, or return to menu
+  -- Escape to cancel pending selection, deselect hand card, or return to menu
   if key == "escape" then
+    if self.pending_play_unit then
+      self.pending_play_unit = nil
+      sound.play("click")
+      return
+    end
     if self.hand_selected_index then
       self.hand_selected_index = nil
       return

@@ -138,6 +138,59 @@ function commands.execute(g, command)
     )
   end
 
+  if command.type == "PLAY_UNIT_FROM_HAND" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local hand_index = command.hand_index
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index or not hand_index then
+      return fail("invalid_play_unit_payload")
+    end
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+
+    local card_def
+    local source_key
+    if source.type == "base" then
+      card_def = cards.get_card_def(p.baseId)
+      source_key = "base:" .. ability_index
+    elseif source.type == "board" then
+      local entry = p.board[source.index]
+      if not entry then return fail("missing_board_entry") end
+      card_def = cards.get_card_def(entry.card_id)
+      source_key = "board:" .. source.index .. ":" .. ability_index
+    else
+      return fail("invalid_source_type")
+    end
+
+    if not card_def or not card_def.abilities then return fail("no_abilities") end
+    local ab = card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "play_unit" then
+      return fail("not_play_unit_ability")
+    end
+
+    if not can_activate(g, pi, card_def, source_key, ability_index) then
+      return fail("ability_not_activatable")
+    end
+
+    if hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
+    local matching = abilities.find_matching_hand_indices(p, ab.effect_args)
+    local is_eligible = false
+    for _, idx in ipairs(matching) do
+      if idx == hand_index then is_eligible = true; break end
+    end
+    if not is_eligible then return fail("hand_card_not_eligible") end
+
+    local card_id = p.hand[hand_index]
+    actions.play_unit_from_hand(g, pi, card_def, source_key, ability_index, hand_index)
+    return ok(
+      { source_type = source.type, ability_index = ability_index, card_id = card_id, hand_index = hand_index },
+      { { type = "unit_played_from_hand", player_index = pi, source_type = source.type, ability_index = ability_index, card_id = card_id } }
+    )
+  end
+
   if command.type == "ASSIGN_STRUCTURE_WORKER" then
     local pi = command.player_index
     local board_index = command.board_index

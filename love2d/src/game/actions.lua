@@ -204,6 +204,55 @@ function actions.activate_ability(g, player_index, card_def, source_key, ability
   return g
 end
 
+-- Play a specific unit card from hand via a play_unit ability (two-step selection flow).
+-- source_key: unique string like "board:3:2" for tracking once-per-turn
+function actions.play_unit_from_hand(g, player_index, card_def, source_key, ability_index, hand_index)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
+  local p = g.players[player_index + 1]
+
+  local ability
+  if ability_index and card_def.abilities then
+    ability = card_def.abilities[ability_index]
+  end
+  if not ability or ability.type ~= "activated" or ability.effect ~= "play_unit" then return g end
+
+  local key = tostring(player_index) .. ":" .. source_key
+  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
+  if not abilities.can_pay_cost(p.resources, ability.cost) then return g end
+
+  -- Validate hand_index
+  if not hand_index or hand_index < 1 or hand_index > #p.hand then return g end
+  local matching = abilities.find_matching_hand_indices(p, ability.effect_args)
+  local is_eligible = false
+  for _, idx in ipairs(matching) do
+    if idx == hand_index then is_eligible = true; break end
+  end
+  if not is_eligible then return g end
+
+  -- Pay cost
+  for _, c in ipairs(ability.cost) do
+    p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
+  end
+  g.activatedUsedThisTurn[key] = true
+
+  -- Remove card from hand and place on board
+  local card_id = p.hand[hand_index]
+  table.remove(p.hand, hand_index)
+  p.board[#p.board + 1] = { card_id = card_id }
+
+  -- Fire on_construct triggered abilities
+  local ok, unit_def = pcall(cards.get_card_def, card_id)
+  if ok and unit_def and unit_def.abilities then
+    for _, ab in ipairs(unit_def.abilities) do
+      if ab.type == "triggered" and ab.trigger == "on_construct" then
+        abilities.resolve(ab, p, g)
+      end
+    end
+  end
+
+  return g
+end
+
 -- Build a structure from the blueprint deck
 function actions.build_structure(g, player_index, card_id)
   if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end

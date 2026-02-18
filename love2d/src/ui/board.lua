@@ -36,11 +36,17 @@ local PASS_BTN_H = 32
 local END_TURN_BTN_W = 100
 local END_TURN_BTN_H = 32
 local STRUCT_TILE_W = 90
-local STRUCT_TILE_H_BASE = 50  -- just name + kind
-local STRUCT_TILE_AB_H = 26    -- per activated ability button
+local STRUCT_TILE_H_BASE = 50
+local STRUCT_TILE_AB_H = 26
 local STRUCT_TILE_GAP = 8
-local BASE_CARD_H = 170  -- shorter than normal cards
+local BASE_CARD_H = 170
 local RESOURCE_BAR_H = 26
+
+-- Battlefield layout: two-row system (structures in back, units in front)
+local BFIELD_TILE_W = 85
+local BFIELD_TILE_H = 95
+local BFIELD_GAP = 8
+local BFIELD_ROW_GAP = 8
 
 -- Hand card display constants
 local HAND_SCALE = 0.72
@@ -106,75 +112,79 @@ function board.panel_rect(panel_index)
   end
 end
 
--- Within a panel: base and resources. Opponent (panel_index==1) is mirrored: base at top (back of their board).
-function board.base_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
-  local x = panel_x + (panel_w - CARD_W) / 2
-  local y
-  if panel_index == 1 then
-    y = panel_y + 20  -- opponent: base at top (back of their board)
+-- Battlefield row rects.
+-- Panel 0 (you): front row (units) at top, back row (structures) below.
+-- Panel 1 (opponent): back row at top, front row (units) below.
+-- This places the two front rows facing each other across the center gap.
+function board.front_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
+  local left_edge = panel_x + 20 + DECK_CARD_W + 16
+  local right_edge = panel_x + panel_w - 20 - DECK_CARD_W - 16
+  local area_w = right_edge - left_edge
+  if panel_index == 0 then
+    return left_edge, panel_y + 4, area_w, BFIELD_TILE_H
   else
-    y = panel_y + panel_h - BASE_CARD_H - 20  -- you: base at bottom
+    return left_edge, panel_y + 4 + BFIELD_TILE_H + BFIELD_ROW_GAP, area_w, BFIELD_TILE_H
   end
-  return x, y, CARD_W, BASE_CARD_H
 end
 
--- Resource nodes: at each player's board edge (front line).
--- Player 0 (you): resources sit at the bottom edge of your panel.
--- Player 1 (opponent): resources sit at the top edge of their panel.
+function board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
+  local left_edge = panel_x + 20 + DECK_CARD_W + 16
+  local right_edge = panel_x + panel_w - 20 - DECK_CARD_W - 16
+  local area_w = right_edge - left_edge
+  if panel_index == 0 then
+    return left_edge, panel_y + 4 + BFIELD_TILE_H + BFIELD_ROW_GAP, area_w, BFIELD_TILE_H
+  else
+    return left_edge, panel_y + 4, area_w, BFIELD_TILE_H
+  end
+end
+
+-- Base: centered horizontally, at resource-node y level (close to the player)
+function board.base_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
+  local x = panel_x + panel_w / 2 - BFIELD_TILE_W / 2
+  local res_y = panel_y + panel_h - RESOURCE_NODE_H - 8
+  local y = res_y + (RESOURCE_NODE_H - BFIELD_TILE_H) / 2
+  return x, y, BFIELD_TILE_W, BFIELD_TILE_H
+end
+
+-- Resource nodes: always at the bottom edge of each panel.
 function board.resource_left_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   local center_x = panel_x + panel_w * 0.25
   local x = center_x - RESOURCE_NODE_W / 2
-  local y
-  if panel_index == 1 then
-    y = panel_y + 8  -- opponent: top edge
-  else
-    y = panel_y + panel_h - RESOURCE_NODE_H - 8  -- you: bottom edge
-  end
+  local y = panel_y + panel_h - RESOURCE_NODE_H - 8
   return x, y, RESOURCE_NODE_W, RESOURCE_NODE_H
 end
 
 function board.resource_right_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   local center_x = panel_x + panel_w * 0.75
   local x = center_x - RESOURCE_NODE_W / 2
-  local y
-  if panel_index == 1 then
-    y = panel_y + 8  -- opponent: top edge
-  else
-    y = panel_y + panel_h - RESOURCE_NODE_H - 8  -- you: bottom edge
-  end
+  local y = panel_y + panel_h - RESOURCE_NODE_H - 8
   return x, y, RESOURCE_NODE_W, RESOURCE_NODE_H
 end
 
-function board.blueprint_slot_rect(panel_x, panel_y, panel_w, panel_h)
-  -- Slight padding below the player resources line
-  return panel_x + 20, panel_y + 8, DECK_CARD_W, DECK_CARD_H
+function board.blueprint_slot_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
+  local _, back_y = board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index or 0)
+  return panel_x + 20, back_y, DECK_CARD_W, DECK_CARD_H
 end
 
 function board.worker_slot_rect(panel_x, panel_y, panel_w, panel_h)
   return panel_x + 20, panel_y + 8 + DECK_CARD_H + 8, 120, SLOT_H
 end
 
-function board.unit_slot_rect(panel_x, panel_y, panel_w, panel_h)
-  return panel_x + panel_w - 20 - DECK_CARD_W, panel_y + 8, DECK_CARD_W, DECK_CARD_H
+function board.unit_slot_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
+  local _, back_y = board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index or 0)
+  return panel_x + panel_w - 20 - DECK_CARD_W, back_y, DECK_CARD_W, DECK_CARD_H
 end
 
--- Built structures area: horizontal row between the two deck slots in the upper-middle area
-function board.structures_area_rect(panel_x, panel_y, panel_w, panel_h)
-  local left_edge = panel_x + 20 + DECK_CARD_W + 16  -- right of blueprint deck
-  local right_edge = panel_x + panel_w - 20 - DECK_CARD_W - 16  -- left of unit deck
-  local area_w = right_edge - left_edge
-  local area_h = STRUCT_TILE_H_BASE + 2 * STRUCT_TILE_AB_H  -- max reasonable height
-  local area_y = panel_y + 8 + (DECK_CARD_H - area_h) / 2  -- vertically centered with deck slots
-  return left_edge, area_y, area_w, area_h
+-- Backwards-compat wrapper: returns the back row rect
+function board.structures_area_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
+  return board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index or 0)
 end
 
--- Get rect for a specific structure tile by index (0-based), with optional card_def for dynamic height
-function board.structure_tile_rect(panel_x, panel_y, panel_w, panel_h, tile_index, card_def)
-  local ax, ay, aw, ah = board.structures_area_rect(panel_x, panel_y, panel_w, panel_h)
-  local tx = ax + tile_index * (STRUCT_TILE_W + STRUCT_TILE_GAP)
-  local n_act = count_activated_abilities(card_def)
-  local th = struct_tile_height(n_act)
-  return tx, ay, STRUCT_TILE_W, th
+-- Tile position within a row (0-based tile_index)
+function board.structure_tile_rect(panel_x, panel_y, panel_w, panel_h, tile_index, card_def, panel_index)
+  local ax, ay = board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index or 0)
+  local tx = ax + tile_index * (BFIELD_TILE_W + BFIELD_GAP)
+  return tx, ay, BFIELD_TILE_W, BFIELD_TILE_H
 end
 
 -- Resource bar: above buttons for local player, bottom of panel for opponent
@@ -487,6 +497,258 @@ local function draw_button(bx, by, bw, bh, label, is_hov, is_press, accent_r, ac
   love.graphics.print(label, bx + (bw - tw) / 2, dy + (bh - 13) / 2)
 end
 
+-- Group board entries by card_id, filtered by kind ("Structure" or nil for units/other)
+local function group_board_entries(player, kind_filter)
+  local groups = {}
+  local group_map = {}
+  for si, entry in ipairs(player.board) do
+    local ok, def = pcall(cards.get_card_def, entry.card_id)
+    if ok and def then
+      local dominated = (kind_filter == "Structure") and (def.kind == "Structure")
+      local is_unit = (kind_filter == "Unit") and (def.kind ~= "Structure")
+      if dominated or is_unit then
+        if group_map[entry.card_id] then
+          local g = groups[group_map[entry.card_id]]
+          g.count = g.count + 1
+          g.entries[#g.entries + 1] = si
+        else
+          group_map[entry.card_id] = #groups + 1
+          groups[#groups + 1] = { card_id = entry.card_id, count = 1, first_si = si, scale = entry.scale, entries = { si } }
+        end
+      end
+    end
+  end
+  return groups
+end
+
+-- Draw a single battlefield tile (used for base, structures, and units)
+local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state, is_active, accent, hover, drag, t, player, is_base)
+  local si = group.first_si
+  local scale = (group.scale == nil) and 1 or group.scale
+  local tile_cx, tile_cy = tx + tw / 2, ty + th / 2
+  local tile_hovered = hover and hover.kind == "structure" and hover.pi == pi and hover.idx == si
+
+  if scale ~= 1 then
+    love.graphics.push()
+    love.graphics.translate(tile_cx, tile_cy)
+    love.graphics.scale(scale)
+    love.graphics.translate(-tile_cx, -tile_cy)
+  end
+  if tile_hovered and scale == 1 then
+    love.graphics.setColor(accent[1], accent[2], accent[3], 0.15 + 0.05 * math.sin(t * 4))
+    love.graphics.rectangle("fill", tx - 2, ty - 2, tw + 4, th + 4, 6, 6)
+  end
+
+  if group.count > 1 then
+    local stack_layers = math.min(group.count - 1, 2)
+    for layer = stack_layers, 1, -1 do
+      local offset = layer * 3
+      love.graphics.setColor(0.1, 0.1, 0.14, 0.5)
+      love.graphics.rectangle("fill", tx + offset, ty - offset, tw, th, 5, 5)
+      love.graphics.setColor(0.22, 0.24, 0.3, 0.4)
+      love.graphics.rectangle("line", tx + offset, ty - offset, tw, th, 5, 5)
+    end
+  end
+
+  love.graphics.setColor(0, 0, 0, 0.25)
+  love.graphics.rectangle("fill", tx + 2, ty + 3, tw, th, 5, 5)
+  if is_active then
+    love.graphics.setColor(0.14, 0.15, 0.2, 1.0)
+  else
+    love.graphics.setColor(0.11, 0.12, 0.16, 0.85)
+  end
+  love.graphics.rectangle("fill", tx, ty, tw, th, 5, 5)
+  love.graphics.setScissor(tx, ty, tw, th)
+  textures.draw_tiled(textures.panel, tx, ty, tw, th, 0.05)
+  love.graphics.setScissor()
+  textures.draw_inner_shadow(tx, ty, tw, th, 3, 0.15)
+  for gsi = 0, 5 do
+    local ga = (is_active and 0.6 or 0.3) * (1 - gsi / 6)
+    love.graphics.setColor(accent[1], accent[2], accent[3], ga)
+    love.graphics.rectangle("fill", tx + gsi, ty + 3, 1, th - 6)
+  end
+
+  if is_base then
+    love.graphics.setColor(0.85, 0.70, 0.25, is_active and 1.0 or 0.6)
+    love.graphics.setLineWidth(2)
+    love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
+    love.graphics.setLineWidth(1)
+  else
+    love.graphics.setColor(0.22, 0.24, 0.3, is_active and 1.0 or 0.6)
+    love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
+  end
+
+  love.graphics.setColor(1, 1, 1, is_active and 1.0 or 0.6)
+  love.graphics.setFont(util.get_title_font(11))
+  love.graphics.printf(sdef.name, tx + 8, ty + 4, tw - 16, "left")
+
+  love.graphics.setColor(0.6, 0.62, 0.7, is_active and 0.8 or 0.5)
+  love.graphics.setFont(util.get_font(9))
+  if is_base then
+    love.graphics.print("Base", tx + 8, ty + 20)
+    local life = player.life or 30
+    local stat_h = 20
+    local stat_y = ty + th - stat_h - 4
+    local badge_w = tw - 8
+    local alpha = is_active and 1.0 or 0.6
+    love.graphics.setColor(0.2, 0.35, 0.2, 0.35 * alpha)
+    love.graphics.rectangle("fill", tx + 4, stat_y, badge_w, stat_h, 3, 3)
+    love.graphics.setColor(0.3, 0.55, 0.3, 0.5 * alpha)
+    love.graphics.rectangle("line", tx + 4, stat_y, badge_w, stat_h, 3, 3)
+    love.graphics.setColor(1, 1, 1, 0.05)
+    love.graphics.rectangle("fill", tx + 5, stat_y + 1, badge_w - 2, 1)
+    love.graphics.setColor(1, 1, 1, alpha)
+    love.graphics.setFont(util.get_font(10))
+    love.graphics.printf("HP " .. tostring(life), tx + 4, stat_y + stat_h / 2 - 6, badge_w, "center")
+  elseif sdef.kind == "Unit" and sdef.attack and sdef.health then
+    love.graphics.print(table.concat(sdef.subtypes or {}, "/"), tx + 8, ty + 20)
+    local stat_h = 20
+    local stat_y = ty + th - stat_h - 4
+    local half_w = (tw - 12) / 2
+    local alpha = is_active and 1.0 or 0.6
+    -- ATK badge (left)
+    love.graphics.setColor(0.5, 0.2, 0.2, 0.35 * alpha)
+    love.graphics.rectangle("fill", tx + 4, stat_y, half_w, stat_h, 3, 3)
+    love.graphics.setColor(0.7, 0.3, 0.3, 0.5 * alpha)
+    love.graphics.rectangle("line", tx + 4, stat_y, half_w, stat_h, 3, 3)
+    love.graphics.setColor(1, 1, 1, 0.05)
+    love.graphics.rectangle("fill", tx + 5, stat_y + 1, half_w - 2, 1)
+    love.graphics.setColor(1, 1, 1, alpha)
+    love.graphics.setFont(util.get_font(10))
+    love.graphics.printf("ATK " .. tostring(sdef.attack), tx + 4, stat_y + stat_h / 2 - 6, half_w, "center")
+    -- HP badge (right)
+    local right_x = tx + tw - 4 - half_w
+    love.graphics.setColor(0.2, 0.35, 0.2, 0.35 * alpha)
+    love.graphics.rectangle("fill", right_x, stat_y, half_w, stat_h, 3, 3)
+    love.graphics.setColor(0.3, 0.55, 0.3, 0.5 * alpha)
+    love.graphics.rectangle("line", right_x, stat_y, half_w, stat_h, 3, 3)
+    love.graphics.setColor(1, 1, 1, 0.05)
+    love.graphics.rectangle("fill", right_x + 1, stat_y + 1, half_w - 2, 1)
+    love.graphics.setColor(1, 1, 1, alpha)
+    love.graphics.setFont(util.get_font(10))
+    love.graphics.printf("HP " .. tostring(sdef.health), right_x, stat_y + stat_h / 2 - 6, half_w, "center")
+  else
+    love.graphics.print("Structure", tx + 8, ty + 20)
+  end
+
+  local ab_btn_y = is_base and (ty + 36) or (ty + 34)
+  local has_non_activated_hint = nil
+  if sdef.abilities then
+    for ai, ab in ipairs(sdef.abilities) do
+      if ab.type == "activated" then
+        local key
+        if is_base then
+          key = tostring(pi) .. ":base:" .. ai
+        else
+          key = tostring(pi) .. ":board:" .. si .. ":" .. ai
+        end
+        local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
+        local can_act = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and is_active
+        local ab_hovered = hover and hover.kind == "activate_ability" and hover.pi == pi
+          and type(hover.idx) == "table"
+          and ((is_base and hover.idx.source == "base") or (not is_base and hover.idx.source == "board" and hover.idx.board_index == si))
+          and hover.idx.ability_index == ai
+        card_frame.draw_ability_button(ab, tx + 4, ab_btn_y, tw - 8, {
+          can_activate = can_act,
+          is_used = used and ab.once_per_turn,
+          is_hovered = ab_hovered,
+        })
+        ab_btn_y = ab_btn_y + STRUCT_TILE_AB_H
+      elseif ab.type == "static" and ab.effect == "produce" then
+        has_non_activated_hint = has_non_activated_hint or "PROD"
+      elseif ab.type == "triggered" then
+        has_non_activated_hint = has_non_activated_hint or "TRIG"
+      end
+    end
+  end
+  if has_non_activated_hint and count_activated_abilities(sdef) == 0 then
+    love.graphics.setColor(accent[1], accent[2], accent[3], is_active and 0.6 or 0.3)
+    love.graphics.setFont(util.get_font(7))
+    love.graphics.printf(has_non_activated_hint, tx + 4, ty + 38, tw - 8, "center")
+  end
+
+  if group.count > 1 then
+    local badge_text = "x" .. group.count
+    local badge_w = 22
+    local badge_h = 14
+    local bbx = tx + tw - badge_w - 3
+    local bby = ty + 3
+    love.graphics.setColor(accent[1], accent[2], accent[3], 0.85)
+    love.graphics.rectangle("fill", bbx, bby, badge_w, badge_h, 3, 3)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.setFont(util.get_font(9))
+    love.graphics.printf(badge_text, bbx, bby + 1, badge_w, "center")
+  end
+
+  if not is_base then
+    local max_w = get_max_workers(sdef)
+    if max_w > 0 then
+      local slot_filled = {}
+      local total_slots = 0
+      for _, esi in ipairs(group.entries) do
+        local ew = player.board[esi].workers or 0
+        if drag and drag.player_index == pi and drag.from == "structure" and drag.board_index == esi then
+          ew = math.max(0, ew - 1)
+        end
+        local sw_count = actions.count_special_on_structure(player, esi)
+        for w = 1, max_w do
+          total_slots = total_slots + 1
+          if w <= ew then
+            slot_filled[total_slots] = "regular"
+          elseif w <= ew + sw_count then
+            slot_filled[total_slots] = "special"
+          else
+            slot_filled[total_slots] = false
+          end
+        end
+      end
+      local wr = 7
+      local spacing = wr * 2 + 3
+      local row_w = total_slots * spacing - 3
+      local wcx_start = tx + tw - row_w - 4
+      local wcy = ty + th - wr - 4
+      if drag and drag.player_index == pi and (drag.from == "unassigned" or drag.from == "left" or drag.from == "right" or drag.from == "special") and tile_hovered then
+        local pulse = 0.4 + 0.3 * math.sin(t * 4)
+        love.graphics.setColor(0.3, 0.6, 1.0, pulse)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", tx - 3, ty - 3, tw + 6, th + 6, 6, 6)
+        love.graphics.setLineWidth(1)
+      end
+      for slot = 1, total_slots do
+        local scx = wcx_start + (slot - 1) * spacing + wr
+        if slot_filled[slot] == "regular" then
+          love.graphics.setColor(0, 0, 0, 0.3)
+          love.graphics.circle("fill", scx + 1, wcy + 2, wr + 1)
+          love.graphics.setColor(0.75, 0.75, 0.9, is_active and 1.0 or 0.6)
+          love.graphics.circle("fill", scx, wcy, wr)
+          love.graphics.setColor(1, 1, 1, 0.3)
+          love.graphics.circle("fill", scx - wr * 0.2, wcy - wr * 0.2, wr * 0.3)
+          love.graphics.setColor(0.45, 0.5, 0.9, 0.7)
+          love.graphics.circle("line", scx, wcy, wr)
+        elseif slot_filled[slot] == "special" then
+          love.graphics.setColor(0, 0, 0, 0.3)
+          love.graphics.circle("fill", scx + 1, wcy + 2, wr + 1)
+          love.graphics.setColor(0.9, 0.75, 0.25, is_active and 1.0 or 0.6)
+          love.graphics.circle("fill", scx, wcy, wr)
+          love.graphics.setColor(1, 1, 0.8, 0.35)
+          love.graphics.circle("fill", scx - wr * 0.2, wcy - wr * 0.2, wr * 0.3)
+          love.graphics.setColor(0.85, 0.65, 0.1, 0.9)
+          love.graphics.setLineWidth(1.5)
+          love.graphics.circle("line", scx, wcy, wr)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0.25, 0.27, 0.35, is_active and 0.6 or 0.3)
+          love.graphics.circle("line", scx, wcy, wr)
+        end
+      end
+    end
+  end
+
+  if scale ~= 1 then
+    love.graphics.pop()
+  end
+end
+
 function board.draw(game_state, drag, hover, mouse_down, display_resources, hand_state, local_player_index)
   -- Lazy-init textures on first draw (must happen during love.draw, not love.load)
   textures.init()
@@ -583,258 +845,58 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
         love.graphics.printf(label, rx + 4, ry + rh/2 - 18, rw - 8, "center")
       end
     end
-    local bx, by, bw, bh = board.blueprint_slot_rect(px, py, pw, ph)
+    local bx, by, bw, bh = board.blueprint_slot_rect(px, py, pw, ph, panel)
     draw_deck_card(bx, by, bw, bh, "Blueprint\nDeck", deck_assets.get_blueprint_back())
-    local ux, uy, uw, uh = board.unit_slot_rect(px, py, pw, ph)
+    local ux, uy, uw, uh = board.unit_slot_rect(px, py, pw, ph, panel)
     draw_deck_card(ux, uy, uw, uh, "Unit\nDeck", deck_assets.get_unit_back())
 
-    -- Built structures: compact tiles with polish (inner shadow, texture, hover glow)
-    -- Group board entries by card_id for stacking
-    if #player.board > 0 then
-      local sax, say, saw, sah = board.structures_area_rect(px, py, pw, ph)
-      local groups = {}       -- { {card_id, count, first_si, scale, entries} }
-      local group_map = {}    -- card_id -> index in groups
-      for si, entry in ipairs(player.board) do
-        if group_map[entry.card_id] then
-          local g = groups[group_map[entry.card_id]]
-          g.count = g.count + 1
-          g.entries[#g.entries + 1] = si
-        else
-          group_map[entry.card_id] = #groups + 1
-          groups[#groups + 1] = { card_id = entry.card_id, count = 1, first_si = si, scale = entry.scale, entries = { si } }
-        end
-      end
+    -- ── Battlefield: two-row layout ──
+    -- Back row: base tile + structures.  Front row: units.
+    local back_ax, back_ay, back_aw = board.back_row_rect(px, py, pw, ph, panel)
+    local front_ax, front_ay, front_aw = board.front_row_rect(px, py, pw, ph, panel)
 
-      for gi, group in ipairs(groups) do
-        local ok, sdef = pcall(cards.get_card_def, group.card_id)
-        if ok and sdef then
-          local tx, ty, tw, th = board.structure_tile_rect(px, py, pw, ph, gi - 1, sdef)
-          if tx + tw <= sax + saw + 2 then
-            local si = group.first_si
-            local scale = (group.scale == nil) and 1 or group.scale
-            local tile_cx, tile_cy = tx + tw / 2, ty + th / 2
+    -- Subtle row zone indicators (drawn behind tiles)
+    love.graphics.setColor(accent[1], accent[2], accent[3], 0.04)
+    love.graphics.rectangle("fill", back_ax, back_ay, back_aw, BFIELD_TILE_H, 4, 4)
+    love.graphics.rectangle("fill", front_ax, front_ay, front_aw, BFIELD_TILE_H, 4, 4)
+    love.graphics.setColor(0.2, 0.22, 0.28, 0.2)
+    love.graphics.rectangle("line", back_ax, back_ay, back_aw, BFIELD_TILE_H, 4, 4)
+    love.graphics.rectangle("line", front_ax, front_ay, front_aw, BFIELD_TILE_H, 4, 4)
 
-            -- Check hover for glow
-            local tile_hovered = hover and hover.kind == "structure" and hover.pi == pi and hover.idx == si
+    -- Row labels
+    love.graphics.setFont(util.get_font(8))
+    love.graphics.setColor(0.4, 0.42, 0.5, is_active and 0.5 or 0.25)
+    love.graphics.print("STRUCTURES", back_ax + 2, back_ay - 11)
+    love.graphics.print("UNITS", front_ax + 2, front_ay - 11)
 
-            if scale ~= 1 then
-              love.graphics.push()
-              love.graphics.translate(tile_cx, tile_cy)
-              love.graphics.scale(scale)
-              love.graphics.translate(-tile_cx, -tile_cy)
-            end
-            -- Hover: slight scale-up effect via glow
-            if tile_hovered and scale == 1 then
-              love.graphics.setColor(accent[1], accent[2], accent[3], 0.15 + 0.05 * math.sin(t * 4))
-              love.graphics.rectangle("fill", tx - 2, ty - 2, tw + 4, th + 4, 6, 6)
-            end
+    -- Draw base tile (centered, near resources)
+    local base_bx, base_by = board.base_rect(px, py, pw, ph, panel)
+    local base_group = { card_id = player.baseId, count = 1, first_si = 0, scale = 1, entries = {} }
+    draw_battlefield_tile(base_bx, base_by, BFIELD_TILE_W, BFIELD_TILE_H, base_group, base_def, pi, game_state, is_active, accent, hover, drag, t, player, true)
 
-            -- Stack depth layers (behind the tile) for grouped duplicates
-            if group.count > 1 then
-              local stack_layers = math.min(group.count - 1, 2)  -- max 2 layers
-              for layer = stack_layers, 1, -1 do
-                local offset = layer * 3
-                love.graphics.setColor(0.1, 0.1, 0.14, 0.5)
-                love.graphics.rectangle("fill", tx + offset, ty - offset, tw, th, 5, 5)
-                love.graphics.setColor(0.22, 0.24, 0.3, 0.4)
-                love.graphics.rectangle("line", tx + offset, ty - offset, tw, th, 5, 5)
-              end
-            end
-
-            -- Tile shadow
-            love.graphics.setColor(0, 0, 0, 0.25)
-            love.graphics.rectangle("fill", tx + 2, ty + 3, tw, th, 5, 5)
-            -- Tile background
-            if is_active then
-              love.graphics.setColor(0.14, 0.15, 0.2, 1.0)
-            else
-              love.graphics.setColor(0.11, 0.12, 0.16, 0.85)
-            end
-            love.graphics.rectangle("fill", tx, ty, tw, th, 5, 5)
-            -- Texture overlay on tile
-            love.graphics.setScissor(tx, ty, tw, th)
-            textures.draw_tiled(textures.panel, tx, ty, tw, th, 0.05)
-            love.graphics.setScissor()
-            -- Inner shadow
-            textures.draw_inner_shadow(tx, ty, tw, th, 3, 0.15)
-            -- Faction-colored left gradient strip
-            for gsi = 0, 5 do
-              local ga = (is_active and 0.6 or 0.3) * (1 - gsi / 6)
-              love.graphics.setColor(accent[1], accent[2], accent[3], ga)
-              love.graphics.rectangle("fill", tx + gsi, ty + 3, 1, th - 6)
-            end
-            -- Border
-            love.graphics.setColor(0.22, 0.24, 0.3, is_active and 1.0 or 0.6)
-            love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
-            -- Structure name (title font)
-            love.graphics.setColor(1, 1, 1, is_active and 1.0 or 0.6)
-            love.graphics.setFont(util.get_title_font(11))
-            love.graphics.printf(sdef.name, tx + 8, ty + 5, tw - 12, "left")
-            -- Kind label + stats
-            love.graphics.setColor(0.6, 0.62, 0.7, is_active and 0.8 or 0.5)
-            love.graphics.setFont(util.get_font(9))
-            if sdef.kind == "Unit" and sdef.attack and sdef.health then
-              love.graphics.print("Unit  " .. sdef.attack .. "/" .. sdef.health, tx + 8, ty + 22)
-            else
-              love.graphics.print("Structure", tx + 8, ty + 22)
-            end
-
-            -- Ability buttons for activated abilities; text-only hints for others
-            local ab_btn_y = ty + 36
-            local has_non_activated_hint = nil
-            if sdef.abilities then
-              for ai, ab in ipairs(sdef.abilities) do
-                if ab.type == "activated" then
-                  local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
-                  local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
-                  local can_act = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and is_active
-                  -- Check if this specific ability button is hovered
-                  local ab_hovered = hover and hover.kind == "activate_ability" and hover.pi == pi
-                    and type(hover.idx) == "table" and hover.idx.source == "board"
-                    and hover.idx.board_index == si and hover.idx.ability_index == ai
-                  card_frame.draw_ability_button(ab, tx + 4, ab_btn_y, tw - 8, {
-                    can_activate = can_act,
-                    is_used = used and ab.once_per_turn,
-                    is_hovered = ab_hovered,
-                  })
-                  ab_btn_y = ab_btn_y + STRUCT_TILE_AB_H
-                elseif ab.type == "static" and ab.effect == "produce" then
-                  has_non_activated_hint = has_non_activated_hint or "PROD"
-                elseif ab.type == "triggered" then
-                  has_non_activated_hint = has_non_activated_hint or "TRIG"
-                end
-              end
-            end
-            -- Small text-only hint for non-activated abilities (PROD/TRIG)
-            if has_non_activated_hint and count_activated_abilities(sdef) == 0 then
-              love.graphics.setColor(accent[1], accent[2], accent[3], is_active and 0.6 or 0.3)
-              love.graphics.setFont(util.get_font(7))
-              love.graphics.printf(has_non_activated_hint, tx + 4, ty + 38, tw - 8, "center")
-            end
-
-            -- Count badge for stacked duplicates
-            if group.count > 1 then
-              local badge_text = "x" .. group.count
-              local badge_w = 22
-              local badge_h = 14
-              local bbx = tx + tw - badge_w - 3
-              local bby = ty + 3
-              love.graphics.setColor(accent[1], accent[2], accent[3], 0.85)
-              love.graphics.rectangle("fill", bbx, bby, badge_w, badge_h, 3, 3)
-              love.graphics.setColor(1, 1, 1, 1)
-              love.graphics.setFont(util.get_font(9))
-              love.graphics.printf(badge_text, bbx, bby + 1, badge_w, "center")
-            end
-
-            -- Worker slot circles for structures that accept workers
-            local max_w = get_max_workers(sdef)
-            if max_w > 0 then
-              -- Build per-slot filled state from each entry's worker count (regular + special)
-              local slot_filled = {}   -- false = empty, "regular" = regular worker, "special" = special worker
-              local total_slots = 0
-              for _, esi in ipairs(group.entries) do
-                local ew = player.board[esi].workers or 0
-                -- Adjust if dragging from this specific entry
-                if drag and drag.player_index == pi and drag.from == "structure" and drag.board_index == esi then
-                  ew = math.max(0, ew - 1)
-                end
-                local sw_count = actions.count_special_on_structure(player, esi)
-                for w = 1, max_w do
-                  total_slots = total_slots + 1
-                  if w <= ew then
-                    slot_filled[total_slots] = "regular"
-                  elseif w <= ew + sw_count then
-                    slot_filled[total_slots] = "special"
-                  else
-                    slot_filled[total_slots] = false
-                  end
-                end
-              end
-              -- Draw worker circles at bottom-right of tile
-              local wr = 7  -- small worker circle radius
-              local spacing = wr * 2 + 3
-              local row_w = total_slots * spacing - 3
-              local wcx_start = tx + tw - row_w - 4
-              local wcy = ty + th - wr - 4
-              -- Drop zone glow when dragging a worker over this structure
-              if drag and drag.player_index == pi and (drag.from == "unassigned" or drag.from == "left" or drag.from == "right" or drag.from == "special") and tile_hovered then
-                local pulse = 0.4 + 0.3 * math.sin(t * 4)
-                love.graphics.setColor(0.3, 0.6, 1.0, pulse)
-                love.graphics.setLineWidth(2)
-                love.graphics.rectangle("line", tx - 3, ty - 3, tw + 6, th + 6, 6, 6)
-                love.graphics.setLineWidth(1)
-              end
-              for slot = 1, total_slots do
-                local scx = wcx_start + (slot - 1) * spacing + wr
-                if slot_filled[slot] == "regular" then
-                  -- Filled regular worker circle
-                  love.graphics.setColor(0, 0, 0, 0.3)
-                  love.graphics.circle("fill", scx + 1, wcy + 2, wr + 1)
-                  love.graphics.setColor(0.75, 0.75, 0.9, is_active and 1.0 or 0.6)
-                  love.graphics.circle("fill", scx, wcy, wr)
-                  love.graphics.setColor(1, 1, 1, 0.3)
-                  love.graphics.circle("fill", scx - wr * 0.2, wcy - wr * 0.2, wr * 0.3)
-                  love.graphics.setColor(0.45, 0.5, 0.9, 0.7)
-                  love.graphics.circle("line", scx, wcy, wr)
-                elseif slot_filled[slot] == "special" then
-                  -- Filled special worker circle (gold)
-                  love.graphics.setColor(0, 0, 0, 0.3)
-                  love.graphics.circle("fill", scx + 1, wcy + 2, wr + 1)
-                  love.graphics.setColor(0.9, 0.75, 0.25, is_active and 1.0 or 0.6)
-                  love.graphics.circle("fill", scx, wcy, wr)
-                  love.graphics.setColor(1, 1, 0.8, 0.35)
-                  love.graphics.circle("fill", scx - wr * 0.2, wcy - wr * 0.2, wr * 0.3)
-                  love.graphics.setColor(0.85, 0.65, 0.1, 0.9)
-                  love.graphics.setLineWidth(1.5)
-                  love.graphics.circle("line", scx, wcy, wr)
-                  love.graphics.setLineWidth(1)
-                else
-                  -- Empty slot circle
-                  love.graphics.setColor(0.25, 0.27, 0.35, is_active and 0.6 or 0.3)
-                  love.graphics.circle("line", scx, wcy, wr)
-                end
-              end
-            end
-
-            if scale ~= 1 then
-              love.graphics.pop()
-            end
-          end
+    -- Draw structures in back row
+    local struct_groups = group_board_entries(player, "Structure")
+    for gi, group in ipairs(struct_groups) do
+      local ok, sdef = pcall(cards.get_card_def, group.card_id)
+      if ok and sdef then
+        local tile_x = back_ax + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if tile_x + BFIELD_TILE_W <= back_ax + back_aw + 2 then
+          draw_battlefield_tile(tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, group, sdef, pi, game_state, is_active, accent, hover, drag, t, player, false)
         end
       end
     end
 
-    -- Base card (with activated ability icon if applicable)
-    local base_x, base_y = board.base_rect(px, py, pw, ph, panel)
-
-    -- Build per-ability used/can_activate tables for the base
-    local base_used_abs = {}
-    local base_can_act_abs = {}
-    if base_def.abilities then
-      for ai, ab in ipairs(base_def.abilities) do
-        if ab.type == "activated" then
-          local key = tostring(pi) .. ":base:" .. ai
-          local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
-          base_used_abs[ai] = used or false
-          base_can_act_abs[ai] = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and pi == game_state.activePlayer
+    -- Draw units in front row
+    local unit_groups = group_board_entries(player, "Unit")
+    for gi, group in ipairs(unit_groups) do
+      local ok, udef = pcall(cards.get_card_def, group.card_id)
+      if ok and udef then
+        local tile_x = front_ax + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if tile_x + BFIELD_TILE_W <= front_ax + front_aw + 2 then
+          draw_battlefield_tile(tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, group, udef, pi, game_state, is_active, accent, hover, drag, t, player, false)
         end
       end
     end
-    card_frame.draw(base_x, base_y, {
-      title = base_def.name,
-      faction = player.faction,
-      kind = "Base",
-      typeLine = player.faction .. " — Base",
-      text = base_def.text,
-      costs = base_def.costs,
-      health = player.life,
-      tier = base_def.tier,
-      is_base = true,
-      h = BASE_CARD_H,
-      abilities_list = base_def.abilities,
-      used_abilities = base_used_abs,
-      can_activate_abilities = base_can_act_abs,
-    })
 
     -- Resource nodes: title + placeholder only, centered in panel
     local res_left_title = (player.faction == "Human") and "Wood" or "Food"
@@ -1012,6 +1074,13 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local hover_idx = hand_state.hover_index
     local selected_idx = hand_state.selected_index
     local y_offsets = hand_state.y_offsets
+    local eligible_set = nil  -- nil means no pending selection; table = set of eligible indices
+    if hand_state.eligible_hand_indices then
+      eligible_set = {}
+      for _, ei in ipairs(hand_state.eligible_hand_indices) do
+        eligible_set[ei] = true
+      end
+    end
     local rects = board.hand_card_rects(#hand, y_offsets)
     local accent0 = get_faction_color(local_p.faction)
 
@@ -1044,8 +1113,21 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
             show_ability_text = true,
           })
           love.graphics.pop()
-          -- Selected glow
-          if i == selected_idx then
+          -- Pending selection: dim non-eligible, glow eligible
+          if eligible_set then
+            if eligible_set[i] then
+              local pulse = 0.45 + 0.25 * math.sin(t * 4)
+              love.graphics.setColor(0.3, 0.9, 0.4, pulse)
+              love.graphics.setLineWidth(2)
+              love.graphics.rectangle("line", r.x - 2, r.y - 2, r.w + 4, r.h + 4, 6, 6)
+              love.graphics.setLineWidth(1)
+            else
+              love.graphics.setColor(0, 0, 0, 0.55)
+              love.graphics.rectangle("fill", r.x, r.y, r.w, r.h, 5, 5)
+            end
+          end
+          -- Selected glow (normal mode only)
+          if i == selected_idx and not eligible_set then
             love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.5 + 0.15 * math.sin(t * 5))
             love.graphics.setLineWidth(2)
             love.graphics.rectangle("line", r.x - 2, r.y - 2, r.w + 4, r.h + 4, 6, 6)
@@ -1060,6 +1142,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       local r = rects[hover_idx]
       local ok, def = pcall(cards.get_card_def, hand[hover_idx])
       if ok and def then
+        local is_eligible_hover = (eligible_set == nil) or eligible_set[hover_idx]
         -- Enlarged card dimensions
         local hover_w = math.floor(CARD_W * HAND_HOVER_SCALE)
         local hover_h = math.floor(CARD_H * HAND_HOVER_SCALE)
@@ -1070,7 +1153,12 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
         love.graphics.setColor(0, 0, 0, 0.55)
         love.graphics.rectangle("fill", hx + 4, hy + 6, hover_w, hover_h, 5, 5)
         -- Subtle glow behind
-        love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.2)
+        if eligible_set and is_eligible_hover then
+          local pulse = 0.25 + 0.15 * math.sin(t * 4)
+          love.graphics.setColor(0.3, 0.9, 0.4, pulse)
+        else
+          love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.2)
+        end
         love.graphics.rectangle("fill", hx - 4, hy - 4, hover_w + 8, hover_h + 8, 8, 8)
         -- Draw card at hover scale
         love.graphics.push()
@@ -1092,19 +1180,46 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
           show_ability_text = true,
         })
         love.graphics.pop()
+        -- Dim overlay for non-eligible hovered card
+        if eligible_set and not eligible_set[hover_idx] then
+          love.graphics.setColor(0, 0, 0, 0.55)
+          love.graphics.rectangle("fill", hx, hy, hover_w, hover_h, 5, 5)
+        end
         -- Bright hover border
-        love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.8)
+        if eligible_set and is_eligible_hover then
+          local pulse = 0.7 + 0.2 * math.sin(t * 4)
+          love.graphics.setColor(0.3, 0.9, 0.4, pulse)
+        else
+          love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.8)
+        end
         love.graphics.setLineWidth(2)
         love.graphics.rectangle("line", hx - 1, hy - 1, hover_w + 2, hover_h + 2, 6, 6)
         love.graphics.setLineWidth(1)
-        -- Selected indicator
-        if hover_idx == selected_idx then
+        -- Selected indicator (normal mode only)
+        if hover_idx == selected_idx and not eligible_set then
           love.graphics.setColor(1, 1, 1, 0.4 + 0.15 * math.sin(t * 5))
           love.graphics.setLineWidth(2)
           love.graphics.rectangle("line", hx - 3, hy - 3, hover_w + 6, hover_h + 6, 7, 7)
           love.graphics.setLineWidth(1)
         end
       end
+    end
+
+    -- "Select a unit" prompt during pending selection
+    if eligible_set then
+      local prompt_font = util.get_font(14)
+      local prompt_text = "Select a unit to play"
+      local prompt_w = prompt_font:getWidth(prompt_text) + 24
+      local prompt_h = prompt_font:getHeight() + 12
+      local prompt_x = (gw - prompt_w) / 2
+      local prompt_y = gh - HAND_CARD_H * HAND_VISIBLE_FRAC - HAND_HOVER_RISE - prompt_h - 8
+      love.graphics.setColor(0.06, 0.08, 0.12, 0.88)
+      love.graphics.rectangle("fill", prompt_x, prompt_y, prompt_w, prompt_h, 6, 6)
+      love.graphics.setColor(0.3, 0.9, 0.4, 0.6 + 0.2 * math.sin(t * 3))
+      love.graphics.rectangle("line", prompt_x, prompt_y, prompt_w, prompt_h, 6, 6)
+      love.graphics.setFont(prompt_font)
+      love.graphics.setColor(0.85, 0.95, 0.85, 1.0)
+      love.graphics.printf(prompt_text, prompt_x, prompt_y + 6, prompt_w, "center")
     end
 
     -- (Deck count shown via tooltip on hover -- see hit_test "unit_deck")
@@ -1145,54 +1260,46 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
       end
     end
 
-    -- Activate base ability (new: per-ability rects)
-    local base_x, base_y = board.base_rect(px, py, pw, ph, panel)
+    -- ── Hit test: base tile (centered, near resources) ──
     local base_def = cards.get_card_def(player.baseId)
-
-    if base_def.abilities then
-      local ab_rects = card_frame.get_ability_rects(base_x, base_y, CARD_W, BASE_CARD_H, base_def.abilities)
-      for _, ar in ipairs(ab_rects) do
-        local ai = ar.ability_index
-        local ab = base_def.abilities[ai]
-        if util.point_in_rect(mx, my, ar.x, ar.y, ar.w, ar.h) then
-          local key = tostring(pi) .. ":base:" .. ai
-          local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
-          local can_act = pi == game_state.activePlayer and (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
-          if can_act then
-            return "activate_ability", pi, { source = "base", ability_index = ai }
-          else
-            return "ability_hover", pi, { source = "base", ability_index = ai }
+    local base_tx, base_ty = board.base_rect(px, py, pw, ph, panel)
+    if util.point_in_rect(mx, my, base_tx, base_ty, BFIELD_TILE_W, BFIELD_TILE_H) then
+      if base_def.abilities then
+        local ab_btn_y = base_ty + 36
+        for ai, ab in ipairs(base_def.abilities) do
+          if ab.type == "activated" then
+            if util.point_in_rect(mx, my, base_tx + 4, ab_btn_y, BFIELD_TILE_W - 8, 24) then
+              local key = tostring(pi) .. ":base:" .. ai
+              local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
+              local can_act = pi == game_state.activePlayer and (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
+              if can_act then
+                return "activate_ability", pi, { source = "base", ability_index = ai }
+              else
+                return "ability_hover", pi, { source = "base", ability_index = ai }
+              end
+            end
+            ab_btn_y = ab_btn_y + STRUCT_TILE_AB_H
           end
         end
       end
+      return "structure", pi, 0
     end
 
-    -- Built structures: group by card_id (same as draw), check per-ability buttons first
-    do
-      local hit_groups = {}
-      local hit_group_map = {}
-      for si, entry in ipairs(player.board) do
-        if hit_group_map[entry.card_id] then
-          local hg = hit_groups[hit_group_map[entry.card_id]]
-          hg.count = hg.count + 1
-          hg.entries[#hg.entries + 1] = si
-        else
-          hit_group_map[entry.card_id] = #hit_groups + 1
-          hit_groups[#hit_groups + 1] = { card_id = entry.card_id, count = 1, first_si = si, entries = { si } }
-        end
-      end
-      for gi, group in ipairs(hit_groups) do
+    -- ── Hit test helper for a row of grouped tiles ──
+    local function hit_test_row(row_ax, row_ay, row_aw, groups, source_type)
+      for gi, group in ipairs(groups) do
         local s_ok, sdef = pcall(cards.get_card_def, group.card_id)
-        local tx, ty, tw, th = board.structure_tile_rect(px, py, pw, ph, gi - 1, s_ok and sdef or nil)
-        if util.point_in_rect(mx, my, tx, ty, tw, th) then
+        local offset = gi - 1
+        local tx = row_ax + offset * (BFIELD_TILE_W + BFIELD_GAP)
+        local tw, th = BFIELD_TILE_W, BFIELD_TILE_H
+        if tx + tw > row_ax + row_aw + 2 then break end
+        if util.point_in_rect(mx, my, tx, row_ay, tw, th) then
           local si = group.first_si
-          -- Check per-ability button rects
           if s_ok and sdef and sdef.abilities then
-            local ab_btn_y = ty + 36
+            local ab_btn_y = row_ay + 34
             for ai, ab in ipairs(sdef.abilities) do
               if ab.type == "activated" then
-                local btn_x, btn_w, btn_h = tx + 4, tw - 8, 24
-                if util.point_in_rect(mx, my, btn_x, ab_btn_y, btn_w, btn_h) then
+                if util.point_in_rect(mx, my, tx + 4, ab_btn_y, tw - 8, 24) then
                   local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
                   local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
                   local can_act = (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost) and pi == game_state.activePlayer
@@ -1206,22 +1313,19 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
               end
             end
           end
-          -- Check worker circle hits on structures that accept workers
           if s_ok and sdef then
             local max_w = get_max_workers(sdef)
             if max_w > 0 then
               local total_slots = max_w * group.count
               local wr = 7
               local spacing = wr * 2 + 3
-              local row_w = total_slots * spacing - 3
-              local wcx_start = tx + tw - row_w - 4
-              local wcy = ty + th - wr - 4
-              -- Build per-slot: which board entry it belongs to, filled type, and special worker index
+              local row_w_px = total_slots * spacing - 3
+              local wcx_start = tx + tw - row_w_px - 4
+              local wcy = row_ay + th - wr - 4
               local slot_info = {}
               for _, esi in ipairs(group.entries) do
                 local ew = player.board[esi].workers or 0
                 local sw_count = actions.count_special_on_structure(player, esi)
-                -- Collect special worker indices assigned to this entry
                 local sw_indices = {}
                 for swi, sw in ipairs(player.specialWorkers) do
                   if sw.assigned_to == esi then sw_indices[#sw_indices + 1] = swi end
@@ -1254,14 +1358,31 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
           return "structure", pi, si
         end
       end
+      return nil
     end
 
-    local bx, by, bw, bh = board.blueprint_slot_rect(px, py, pw, ph)
+    -- Hit test structures (back row, after base)
+    local back_ax, back_ay, back_aw = board.back_row_rect(px, py, pw, ph, panel)
+    local struct_groups = group_board_entries(player, "Structure")
+    do
+      local sk, sp, se = hit_test_row(back_ax, back_ay, back_aw, struct_groups, "back")
+      if sk then return sk, sp, se end
+    end
+
+    -- Hit test units (front row)
+    local front_ax, front_ay, front_aw = board.front_row_rect(px, py, pw, ph, panel)
+    local unit_groups = group_board_entries(player, "Unit")
+    do
+      local uk, up, ue = hit_test_row(front_ax, front_ay, front_aw, unit_groups, "front")
+      if uk then return uk, up, ue end
+    end
+
+    local bx, by, bw, bh = board.blueprint_slot_rect(px, py, pw, ph, panel)
     if util.point_in_rect(mx, my, bx, by, bw, bh) then
       return "blueprint", pi
     end
 
-    local udx, udy, udw, udh = board.unit_slot_rect(px, py, pw, ph)
+    local udx, udy, udw, udh = board.unit_slot_rect(px, py, pw, ph, panel)
     if util.point_in_rect(mx, my, udx, udy, udw, udh) then
       return "unit_deck", pi
     end
@@ -1353,5 +1474,8 @@ board.HAND_SCALE = HAND_SCALE
 board.HAND_CARD_W = HAND_CARD_W
 board.HAND_CARD_H = HAND_CARD_H
 board.HAND_HOVER_RISE = HAND_HOVER_RISE
+board.BFIELD_TILE_W = BFIELD_TILE_W
+board.BFIELD_TILE_H = BFIELD_TILE_H
+board.BFIELD_GAP = BFIELD_GAP
 
 return board

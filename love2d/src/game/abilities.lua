@@ -38,7 +38,17 @@ end
 
 effect_handlers.play_unit = function(ability, player, g)
   local args = ability.effect_args or {}
-  -- Search player's hand for a matching Unit card
+  -- If a specific hand index was provided (two-step selection flow), use it directly
+  local hand_index = args._hand_index
+  if hand_index then
+    local card_id = player.hand[hand_index]
+    if card_id then
+      table.remove(player.hand, hand_index)
+      player.board[#player.board + 1] = { card_id = card_id }
+    end
+    return
+  end
+  -- Fallback: auto-pick first matching Unit card from hand
   for i, card_id in ipairs(player.hand) do
     local ok, card_def = pcall(cards.get_card_def, card_id)
     if ok and card_def and card_def.kind == "Unit" then
@@ -64,7 +74,6 @@ effect_handlers.play_unit = function(ability, player, g)
       end
     end
   end
-  -- No matching card found in hand — do nothing (cost already paid)
 end
 
 effect_handlers.research = function(ability, player, g)
@@ -97,6 +106,34 @@ end
 
 effect_handlers.skip_draw = function(ability, player, g)
   -- Handled as a flag check during draw phase
+end
+
+-- Return indices of hand cards matching a play_unit ability's criteria.
+function abilities.find_matching_hand_indices(player, effect_args)
+  local args = effect_args or {}
+  local indices = {}
+  for i, card_id in ipairs(player.hand) do
+    local ok, card_def = pcall(cards.get_card_def, card_id)
+    if ok and card_def and card_def.kind == "Unit" then
+      local match = true
+      if args.faction and card_def.faction ~= args.faction then match = false end
+      if args.tier and (card_def.tier or 0) > args.tier then match = false end
+      if args.subtypes and card_def.subtypes then
+        local has_subtype = false
+        for _, req in ipairs(args.subtypes) do
+          for _, got in ipairs(card_def.subtypes) do
+            if req == got then has_subtype = true; break end
+          end
+          if has_subtype then break end
+        end
+        if not has_subtype then match = false end
+      elseif args.subtypes then
+        match = false
+      end
+      if match then indices[#indices + 1] = i end
+    end
+  end
+  return indices
 end
 
 -- Resolve an ability's effect using the dispatch table.
