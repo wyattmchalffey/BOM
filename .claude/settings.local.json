@@ -24,7 +24,11 @@
       "Bash(find:*)",
       "Bash(git -C /c/Users/Wyatt/Desktop/BOM log --oneline -1 --format=\"%H %an %ad %s\" --date=short)",
       "Bash(wc:*)",
-      "Bash(lua -e:*)"
+      "Bash(lua -e:*)",
+      "Bash(lua:*)",
+      "Bash(python3:*)",
+      "Bash(pip install:*)",
+      "Bash(python -c:*)"
     ]
   }
 }

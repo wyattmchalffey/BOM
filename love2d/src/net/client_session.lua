@@ -31,6 +31,8 @@ function client_session.new(opts)
     last_checksum = nil,
     connected = false,
     player_name = opts.player_name or "Player",
+    faction = opts.faction,
+    deck = opts.deck,
   }, client_session)
 end
 
@@ -41,6 +43,8 @@ function client_session:connect()
     rules_version = config.rules_version,
     content_version = config.content_version,
     player_name = self.player_name,
+    faction = self.faction,
+    deck = self.deck,
   })
 
   local response = self.transport:connect(handshake)

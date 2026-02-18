@@ -2,6 +2,8 @@
 -- Abilities are now structured data defined in data/cards.lua.
 -- This module provides the dispatch table for resolving effects.
 
+local cards = require("src.game.cards")
+
 local abilities = {}
 
 -- Return whether player can pay the ability cost.
@@ -35,7 +37,34 @@ effect_handlers.discard_random = function(ability, player, g)
 end
 
 effect_handlers.play_unit = function(ability, player, g)
-  -- TODO: implement when unit playing exists
+  local args = ability.effect_args or {}
+  -- Search player's hand for a matching Unit card
+  for i, card_id in ipairs(player.hand) do
+    local ok, card_def = pcall(cards.get_card_def, card_id)
+    if ok and card_def and card_def.kind == "Unit" then
+      local match = true
+      if args.faction and card_def.faction ~= args.faction then match = false end
+      if args.tier and (card_def.tier or 0) > args.tier then match = false end
+      if args.subtypes and card_def.subtypes then
+        local has_subtype = false
+        for _, req_sub in ipairs(args.subtypes) do
+          for _, card_sub in ipairs(card_def.subtypes) do
+            if req_sub == card_sub then has_subtype = true; break end
+          end
+          if has_subtype then break end
+        end
+        if not has_subtype then match = false end
+      elseif args.subtypes then
+        match = false
+      end
+      if match then
+        table.remove(player.hand, i)
+        player.board[#player.board + 1] = { card_id = card_id }
+        return
+      end
+    end
+  end
+  -- No matching card found in hand — do nothing (cost already paid)
 end
 
 effect_handlers.research = function(ability, player, g)

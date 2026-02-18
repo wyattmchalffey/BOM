@@ -332,7 +332,7 @@ function GameState:update(dt)
     if k == "blueprint" or k == "end_turn" or k == "pass" or k == "activate_base"
        or k == "activate_ability" or k == "ability_hover"
        or k == "worker_unassigned" or k == "worker_left" or k == "worker_right"
-       or k == "structure" or k == "hand_card" or k == "unit_deck" then
+       or k == "structure" or k == "structure_worker" or k == "hand_card" or k == "unit_deck" then
       want_hand = true
     end
   end
@@ -957,11 +957,16 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   if self.authoritative_adapter and pi ~= self.local_player_index then return end
   if pi ~= self.game_state.activePlayer then return end
 
-  if kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" then
+  if kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" then
     sound.play("pop")
-    local from = (kind == "worker_unassigned") and "unassigned" or (kind == "worker_left") and "left" or "right"
+    local from
+    if kind == "worker_unassigned" then from = "unassigned"
+    elseif kind == "worker_left" then from = "left"
+    elseif kind == "worker_right" then from = "right"
+    elseif kind == "structure_worker" then from = "structure"
+    end
     local mx, my = love.mouse.getPosition()
-    self.drag = { player_index = pi, from = from, display_x = mx, display_y = my }
+    self.drag = { player_index = pi, from = from, display_x = mx, display_y = my, board_index = idx }
   end
 end
 
@@ -981,6 +986,10 @@ function GameState:_get_worker_origin(pi, from)
     local count = player.workersOn.stone
     local cx, cy = board.worker_circle_center(px, py, pw, ph, "right", math.max(1, count), math.max(1, count), panel)
     return cx, cy
+  elseif from == "structure" then
+    -- Snap back to the structure tile center
+    local sax, say, _, _ = board.structures_area_rect(px, py, pw, ph)
+    return sax + 45, say + 30
   end
   return px + pw / 2, py + ph / 2
 end
@@ -1010,7 +1019,7 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   if deck_viewer.is_open() then return end
 
   if not self.drag then return end
-  local kind, pi, _ = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
+  local kind, pi, drop_extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
 
   -- Feature 2: Invalid drop zone -> snap back
   if not kind or pi ~= self.drag.player_index then
@@ -1029,12 +1038,19 @@ function GameState:mousereleased(x, y, button, istouch, presses)
       did_drop = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = res_left }).ok
     elseif from == "right" then
       did_drop = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
+    elseif from == "structure" then
+      did_drop = self:dispatch_command({ type = "UNASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = self.drag.board_index }).ok
     end
   elseif kind == "resource_left" then
     if from == "unassigned" then
       did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = res_left }).ok
     elseif from == "right" then
       local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = "stone" })
+      if unassign_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = res_left }).ok
+      end
+    elseif from == "structure" then
+      local unassign_res = self:dispatch_command({ type = "UNASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = self.drag.board_index })
       if unassign_res.ok then
         did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = res_left }).ok
       end
@@ -1046,6 +1062,35 @@ function GameState:mousereleased(x, y, button, istouch, presses)
       local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = res_left })
       if unassign_res.ok then
         did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
+      end
+    elseif from == "structure" then
+      local unassign_res = self:dispatch_command({ type = "UNASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = self.drag.board_index })
+      if unassign_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
+      end
+    end
+  elseif kind == "structure" or kind == "structure_worker" then
+    -- Dropping onto a structure tile
+    local drop_si = drop_extra
+    if from == "unassigned" and drop_si then
+      did_drop = self:dispatch_command({ type = "ASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = drop_si }).ok
+    elseif from == "left" and drop_si then
+      local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = res_left })
+      if unassign_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = drop_si }).ok
+      end
+    elseif from == "right" and drop_si then
+      local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = "stone" })
+      if unassign_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = drop_si }).ok
+      end
+    elseif from == "structure" and drop_si then
+      -- Moving worker between structures
+      if self.drag.board_index ~= drop_si then
+        local unassign_res = self:dispatch_command({ type = "UNASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = self.drag.board_index })
+        if unassign_res.ok then
+          did_drop = self:dispatch_command({ type = "ASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = drop_si }).ok
+        end
       end
     end
   end

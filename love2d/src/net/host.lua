@@ -35,11 +35,12 @@ end
 
 function host.new(opts)
   opts = opts or {}
-  local g = game_state.create_initial_game_state(opts.setup)
 
   local self = setmetatable({
     match_id = opts.match_id or "local-match",
-    state = g,
+    state = nil,
+    game_started = false,
+    lobby_players = {},
     rules_version = opts.rules_version or config.rules_version,
     content_version = opts.content_version or config.content_version,
     replay_log = replay.new_log({
@@ -53,10 +54,32 @@ function host.new(opts)
     next_player_index = 0,
     last_seq_by_player = {},
     _token_counter = 0,
+    _host_session_token = nil,
   }, host)
 
-  -- Mirror current local game startup behavior.
-  commands.execute(self.state, { type = "START_TURN", player_index = self.state.activePlayer })
+  -- Pre-register host player 0 if host_player info provided (deferred game mode)
+  if opts.host_player then
+    local player_index = 0
+    self.lobby_players[player_index] = {
+      name = opts.host_player.name or "Player",
+      faction = opts.host_player.faction,
+      deck = opts.host_player.deck,
+    }
+    local token = self:_next_session_token(player_index)
+    self.slots[player_index] = {
+      player_name = opts.host_player.name or "Player",
+      session_token = token,
+    }
+    self.session_tokens[token] = player_index
+    self.last_seq_by_player[player_index] = 0
+    self.next_player_index = 1
+    self._host_session_token = token
+  else
+    -- Immediate start mode (local game / backward compat)
+    self.state = game_state.create_initial_game_state(opts.setup)
+    self.game_started = true
+    commands.execute(self.state, { type = "START_TURN", player_index = self.state.activePlayer })
+  end
 
   return self
 end
@@ -87,15 +110,18 @@ function host:_resync_payload(extra, player_index)
 end
 
 function host:_build_session_meta(player_index)
-  return {
+  local meta = {
     match_id = self.match_id,
     player_index = player_index,
-    active_player = self.state.activePlayer,
-    turn_number = self.state.turnNumber,
-    checksum = checksum.game_state(self.state),
     session_token = self.slots[player_index].session_token,
     next_expected_seq = (self.last_seq_by_player[player_index] or 0) + 1,
   }
+  if self.state then
+    meta.active_player = self.state.activePlayer
+    meta.turn_number = self.state.turnNumber
+    meta.checksum = checksum.game_state(self.state)
+  end
+  return meta
 end
 
 function host:join(client_payload)
@@ -115,6 +141,13 @@ function host:join(client_payload)
   local player_index = self.next_player_index
   self.next_player_index = self.next_player_index + 1
 
+  -- Store lobby info (faction/deck) for deferred game creation
+  self.lobby_players[player_index] = {
+    name = client_payload.player_name or ("Player " .. tostring(player_index + 1)),
+    faction = client_payload.faction,
+    deck = client_payload.deck,
+  }
+
   local token = self:_next_session_token(player_index)
   self.slots[player_index] = {
     player_name = client_payload.player_name or ("Player " .. tostring(player_index + 1)),
@@ -123,7 +156,40 @@ function host:join(client_payload)
   self.session_tokens[token] = player_index
   self.last_seq_by_player[player_index] = 0
 
+  -- Auto-start game when lobby is full
+  if not self.game_started and self.next_player_index >= self.max_players then
+    self:_start_game()
+  end
+
   return ok(self:_build_session_meta(player_index))
+end
+
+function host:_start_game()
+  -- Randomize who goes first
+  local first_player = math.random(0, self.max_players - 1)
+
+  -- Build setup table from lobby_players
+  -- First player gets 3 workers, second player gets 4
+  local player_setups = {}
+  for i = 0, self.max_players - 1 do
+    local lp = self.lobby_players[i] or {}
+    player_setups[i + 1] = {
+      faction = lp.faction,
+      deck = lp.deck,
+      starting_workers = (i == first_player) and 2 or 3,
+    }
+  end
+
+  self.state = game_state.create_initial_game_state({
+    first_player = first_player,
+    players = player_setups,
+  })
+  self.game_started = true
+  commands.execute(self.state, { type = "START_TURN", player_index = self.state.activePlayer })
+end
+
+function host:is_game_started()
+  return self.game_started
 end
 
 function host:reconnect(reconnect_payload)
@@ -145,6 +211,9 @@ function host:reconnect(reconnect_payload)
 end
 
 function host:submit(player_index, envelope)
+  if not self.game_started then
+    return fail("game_not_started")
+  end
   if not self.slots[player_index] then
     return fail("player_not_joined")
   end
@@ -249,10 +318,14 @@ function host:reconnect_message(reconnect_payload)
 end
 
 function host:get_state_snapshot()
+  if not self.game_started then return nil end
   return deep_copy(self.state)
 end
 
 function host:get_state_snapshot_message()
+  if not self.game_started then
+    return protocol.error_message(self.match_id, "game_not_started")
+  end
   local payload = {
     active_player = self.state.activePlayer,
     turn_number = self.state.turnNumber,
@@ -264,6 +337,7 @@ function host:get_state_snapshot_message()
 end
 
 function host:generate_state_push()
+  if not self.game_started then return nil end
   local payload = {
     active_player = self.state.activePlayer,
     turn_number = self.state.turnNumber,

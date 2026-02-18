@@ -33,6 +33,14 @@ function adapter.new(opts)
 end
 
 function adapter:connect()
+  if self.connected then
+    return ok({
+      player_index = self.session and self.session.player_index,
+      match_id = self.session and self.session.match_id,
+      checksum = self.session and self.session.last_checksum,
+    })
+  end
+
   if not self.session then return fail("missing_session") end
 
   local connected = self.session:connect()

@@ -4,26 +4,24 @@
 local res_icons = {}
 
 local _loaded = false
-local _images = {}  -- { food = Image, wood = Image, stone = Image }
+local _images = {}
+
+-- Resource types that have PNG icons in assets/
+local _icon_files = {
+  "food", "wood", "stone", "metal", "gold",
+  "bones", "blood", "fire", "water",
+}
 
 -- Lazy-load (must happen after love.graphics is initialized)
 local function ensure_loaded()
   if _loaded then return end
   _loaded = true
-  local ok_food, img_food = pcall(love.graphics.newImage, "assets/food.png")
-  local ok_wood, img_wood = pcall(love.graphics.newImage, "assets/wood.png")
-  local ok_stone, img_stone = pcall(love.graphics.newImage, "assets/stone.png")
-  if ok_food then
-    img_food:setFilter("linear", "linear")
-    _images.food = img_food
-  end
-  if ok_wood then
-    img_wood:setFilter("linear", "linear")
-    _images.wood = img_wood
-  end
-  if ok_stone then
-    img_stone:setFilter("linear", "linear")
-    _images.stone = img_stone
+  for _, res_type in ipairs(_icon_files) do
+    local ok_img, img = pcall(love.graphics.newImage, "assets/" .. res_type .. ".png")
+    if ok_img then
+      img:setFilter("linear", "linear")
+      _images[res_type] = img
+    end
   end
 end
 

@@ -33,6 +33,31 @@ function actions.start_turn(g)
   p.resources.food  = p.resources.food  + p.workersOn.food  * config.production_per_worker
   p.resources.wood  = p.resources.wood  + p.workersOn.wood  * config.production_per_worker
   p.resources.stone = p.resources.stone + p.workersOn.stone * config.production_per_worker
+  -- Produce resources from board structures with static produce abilities
+  for _, entry in ipairs(p.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and card_def.abilities then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "static" and ab.effect == "produce" and ab.effect_args then
+          local res = ab.effect_args.resource
+          if ab.effect_args.per_worker then
+            -- Worker-based production
+            local w = entry.workers or 0
+            local amount = w * ab.effect_args.per_worker
+            if res and amount > 0 and p.resources[res] ~= nil then
+              p.resources[res] = p.resources[res] + amount
+            end
+          else
+            -- Passive production (existing behavior)
+            local amount = ab.effect_args.amount or 0
+            if res and amount > 0 and p.resources[res] ~= nil then
+              p.resources[res] = p.resources[res] + amount
+            end
+          end
+        end
+      end
+    end
+  end
   -- Draw a card (unless base has skip_draw, e.g. Orc Encampment)
   local base_def = cards.get_card_def(p.baseId)
   if not has_static_effect(base_def, "skip_draw") then
@@ -50,10 +75,18 @@ function actions.end_turn(g)
   return g
 end
 
+function actions.count_structure_workers(p)
+  local total = 0
+  for _, entry in ipairs(p.board) do
+    total = total + (entry.workers or 0)
+  end
+  return total
+end
+
 function actions.assign_worker_to_resource(g, player_index, resource)
   if player_index ~= g.activePlayer then return g end
   local p = g.players[player_index + 1]
-  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone
+  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
   local unassigned = p.totalWorkers - assigned
   if unassigned <= 0 then return g end
   p.workersOn[resource] = p.workersOn[resource] + 1
@@ -65,6 +98,40 @@ function actions.unassign_worker_from_resource(g, player_index, resource)
   local p = g.players[player_index + 1]
   if p.workersOn[resource] <= 0 then return g end
   p.workersOn[resource] = p.workersOn[resource] - 1
+  return g
+end
+
+function actions.assign_worker_to_structure(g, player_index, board_index)
+  local p = g.players[player_index + 1]
+  local entry = p.board[board_index]
+  if not entry then return g end
+  local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+  if not ok or not card_def then return g end
+  -- Find max_workers from produce ability
+  local max_w = 0
+  if card_def.abilities then
+    for _, ab in ipairs(card_def.abilities) do
+      if ab.type == "static" and ab.effect == "produce" and ab.effect_args and ab.effect_args.per_worker then
+        max_w = ab.effect_args.max_workers or 99
+      end
+    end
+  end
+  if max_w <= 0 then return g end
+  entry.workers = entry.workers or 0
+  if entry.workers >= max_w then return g end
+  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
+  if p.totalWorkers - assigned <= 0 then return g end
+  entry.workers = entry.workers + 1
+  return g
+end
+
+function actions.unassign_worker_from_structure(g, player_index, board_index)
+  local p = g.players[player_index + 1]
+  local entry = p.board[board_index]
+  if not entry then return g end
+  entry.workers = entry.workers or 0
+  if entry.workers <= 0 then return g end
+  entry.workers = entry.workers - 1
   return g
 end
 
@@ -128,7 +195,7 @@ function actions.build_structure(g, player_index, card_id)
   end
 
   -- Place on board
-  p.board[#p.board + 1] = { card_id = card_id }
+  p.board[#p.board + 1] = { card_id = card_id, workers = 0 }
 
   -- Fire on_construct triggered abilities
   if card_def.abilities then

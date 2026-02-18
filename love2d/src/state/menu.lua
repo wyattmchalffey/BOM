@@ -78,7 +78,7 @@ end
 local function main_buttons()
   return {
     { label = "Play Online",  color = BUTTON_COLORS[1] },
-    { label = "Deck Builder", color = BUTTON_COLORS[2] },
+    { label = "Deck Builder", color = { 0.15, 0.35, 0.65 } },
     { label = "Settings",     color = BUTTON_COLORS[2] },
     { label = "Quit",         color = { 0.55, 0.15, 0.15 } },
   }
@@ -500,10 +500,27 @@ function MenuState:draw_connecting()
   local gw = love.graphics.getWidth()
   local gh = love.graphics.getHeight()
 
+  draw_back_button(self.hover_button == -1)
+
   local font = util.get_title_font(24)
   love.graphics.setFont(font)
   love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
-  love.graphics.printf("Connecting...", 0, gh / 2 - 20, gw, "center")
+
+  if self._host_room_code then
+    -- Host is waiting for opponent
+    love.graphics.printf("Waiting for opponent...", 0, gh / 2 - 50, gw, "center")
+
+    local code_font = util.get_title_font(32)
+    love.graphics.setFont(code_font)
+    love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
+    love.graphics.printf(self._host_room_code, 0, gh / 2, gw, "center")
+
+    love.graphics.setFont(util.get_font(13))
+    love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
+    love.graphics.printf("Share this room code with your opponent", 0, gh / 2 + 45, gw, "center")
+  else
+    love.graphics.printf("Connecting...", 0, gh / 2 - 20, gw, "center")
+  end
 
   if self.connect_error then
     love.graphics.setFont(util.get_font(13))
@@ -592,6 +609,7 @@ function MenuState:go_back()
   self.connect_error = nil
   self.screen = "main"
   self.hover_button = nil
+  self._host_room_code = nil
   -- Clean up any in-progress relay connection
   if self._relay then
     self._relay:cleanup()
@@ -645,12 +663,18 @@ end
 function MenuState:do_play_online()
   self.screen = "connecting"
   self.connect_error = nil
+  self._host_room_code = nil
 
   -- Start threaded connection (non-blocking)
   self._relay = threaded_relay.start("wss://bom-hbfv.onrender.com", self:get_player_name())
 
-  -- Create headless host service (local game logic authority)
-  self._relay_service = headless_host_service.new({})
+  -- Create headless host service with host player pre-registered as player 0
+  self._relay_service = headless_host_service.new({
+    host_player = {
+      name = self:get_player_name(),
+      faction = settings.values.faction,
+    },
+  })
   self._relay:attach_service(self._relay_service)
 end
 
@@ -668,6 +692,7 @@ function MenuState:do_browse_join(room_code)
     mode = "threaded_websocket",
     url = url,
     player_name = name,
+    faction = settings.values.faction,
   })
 
   if not ok_call then
@@ -690,11 +715,21 @@ function MenuState:poll_relay()
   self._relay:poll()
 
   if self._relay.state == "connected" then
-    -- Build in-process adapter for the host player
+    -- Store room code for display
+    if not self._host_room_code then
+      self._host_room_code = self._relay.room_code
+    end
+
+    -- Wait for the game to start (joiner connected and game state created)
+    if not self._relay_service:is_game_started() then
+      return
+    end
+
+    -- Game started! Build in-process adapter for the host player using reconnect.
     local HeadlessFrameClient = {}
     HeadlessFrameClient.__index = HeadlessFrameClient
-    function HeadlessFrameClient.new(service)
-      return setmetatable({ service = service, _last = nil }, HeadlessFrameClient)
+    function HeadlessFrameClient.new(svc)
+      return setmetatable({ service = svc, _last = nil }, HeadlessFrameClient)
     end
     function HeadlessFrameClient:send(frame)
       self._last = frame
@@ -709,12 +744,28 @@ function MenuState:poll_relay()
       decode = json.decode,
     })
 
+    -- Use reconnect with the pre-registered host session token
     local session = client_session.new({
       transport = transport,
       player_name = self:get_player_name(),
     })
+    session.match_id = self._relay_service:get_match_id()
+    session.session_token = self._relay_service:get_host_session_token()
+    local reconnect_result = session:reconnect()
+    if not reconnect_result.ok then
+      self:enter_browse()
+      self.connect_error = "Host reconnect failed: " .. tostring(reconnect_result.reason)
+      return
+    end
 
     local adapter = authoritative_client_game.new({ session = session })
+    local snap = adapter:sync_snapshot()
+    if not snap.ok then
+      self:enter_browse()
+      self.connect_error = "Host snapshot failed: " .. tostring(snap.reason)
+      return
+    end
+    adapter.connected = true
 
     local relay = self._relay
     local function step_fn()
@@ -726,6 +777,7 @@ function MenuState:poll_relay()
 
     self._relay = nil
     self._relay_service = nil
+    self._host_room_code = nil
 
     self.start_game({
       authoritative_adapter = adapter,
@@ -737,6 +789,7 @@ function MenuState:poll_relay()
     local err = self._relay.error_msg
     self._relay = nil
     self._relay_service = nil
+    self._host_room_code = nil
     -- Go back to browse screen (re-start fetcher) so user sees the error
     self:enter_browse()
     self.connect_error = err
@@ -852,6 +905,13 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
       end
     end
 
+  elseif self.screen == "connecting" then
+    -- Back button
+    if point_in_rect(x, y, back_button_rect()) then
+      self:go_back()
+      return
+    end
+
   end
 end
 
@@ -954,6 +1014,12 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
           return
         end
       end
+    end
+
+  elseif self.screen == "connecting" then
+    if point_in_rect(x, y, back_button_rect()) then
+      self.hover_button = -1
+      return
     end
 
   end

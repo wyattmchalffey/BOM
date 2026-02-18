@@ -22,6 +22,8 @@ function protocol.handshake(client)
     rules_version = client.rules_version,
     content_version = client.content_version,
     player_name = client.player_name,
+    faction = client.faction,
+    deck = client.deck,
   }
 end
 

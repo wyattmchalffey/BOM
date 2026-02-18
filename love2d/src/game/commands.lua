@@ -74,7 +74,7 @@ function commands.execute(g, command)
     if pi ~= g.activePlayer then return fail("not_active_player") end
 
     local p = g.players[pi + 1]
-    local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone
+    local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
     if p.totalWorkers - assigned <= 0 then return fail("no_unassigned_workers") end
 
     actions.assign_worker_to_resource(g, pi, resource)
@@ -136,6 +136,25 @@ function commands.execute(g, command)
       { source_type = source.type, ability_index = ability_index },
       { { type = "ability_activated", player_index = pi, source_type = source.type, ability_index = ability_index } }
     )
+  end
+
+  if command.type == "ASSIGN_STRUCTURE_WORKER" then
+    local pi = command.player_index
+    local board_index = command.board_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    local p = g.players[pi + 1]
+    local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
+    if p.totalWorkers - assigned <= 0 then return fail("no_unassigned_workers") end
+    actions.assign_worker_to_structure(g, pi, board_index)
+    return ok(nil, { { type = "structure_worker_assigned", player_index = pi, board_index = board_index } })
+  end
+
+  if command.type == "UNASSIGN_STRUCTURE_WORKER" then
+    local pi = command.player_index
+    local board_index = command.board_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    actions.unassign_worker_from_structure(g, pi, board_index)
+    return ok(nil, { { type = "structure_worker_unassigned", player_index = pi, board_index = board_index } })
   end
 
   return fail("unknown_command")

@@ -19,6 +19,7 @@ function service.new(opts)
   local host = host_mod.new({
     match_id = opts.match_id,
     setup = opts.setup,
+    host_player = opts.host_player,
     rules_version = opts.rules_version,
     content_version = opts.content_version,
     max_players = opts.max_players,
@@ -29,6 +30,18 @@ function service.new(opts)
     gateway = host_gateway.new(host),
     _pending_pushes = {},
   }, service)
+end
+
+function service:is_game_started()
+  return self._host.game_started
+end
+
+function service:get_host_session_token()
+  return self._host._host_session_token
+end
+
+function service:get_match_id()
+  return self._host.match_id
 end
 
 function service:handle_frame(frame)
@@ -45,9 +58,11 @@ function service:handle_frame(frame)
   -- Queue a state push after successful submit
   if response and response.ok and request.op == "submit" then
     local push_msg = self._host:generate_state_push()
-    local ok_push_encode, push_frame = pcall(json.encode, push_msg)
-    if ok_push_encode then
-      self._pending_pushes[#self._pending_pushes + 1] = push_frame
+    if push_msg then
+      local ok_push_encode, push_frame = pcall(json.encode, push_msg)
+      if ok_push_encode then
+        self._pending_pushes[#self._pending_pushes + 1] = push_frame
+      end
     end
   end
 

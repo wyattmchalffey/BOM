@@ -5,7 +5,7 @@
 local checksum = {}
 
 local function collect_player_parts(p)
-  return {
+  local parts = {
     tostring(p.totalWorkers or 0),
     tostring(p.workersOn and p.workersOn.food or 0),
     tostring(p.workersOn and p.workersOn.wood or 0),
@@ -18,6 +18,11 @@ local function collect_player_parts(p)
     tostring(#(p.board or {})),
     tostring(#(p.graveyard or {})),
   }
+  -- Include structure worker counts for desync detection
+  for _, entry in ipairs(p.board or {}) do
+    parts[#parts + 1] = tostring(entry.workers or 0)
+  end
+  return parts
 end
 
 function checksum.game_state(g)

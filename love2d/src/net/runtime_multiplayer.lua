@@ -84,6 +84,8 @@ function runtime_multiplayer.build(opts)
     local adapter = threaded_client_adapter.start({
       url = opts.url,
       player_name = opts.player_name,
+      faction = opts.faction,
+      deck = opts.deck,
     })
     return ok(adapter)
   else
@@ -93,6 +95,8 @@ function runtime_multiplayer.build(opts)
   local session = client_session.new({
     transport = transport,
     player_name = opts.player_name,
+    faction = opts.faction,
+    deck = opts.deck,
   })
 
   return ok(authoritative_client_game.new({ session = session }))

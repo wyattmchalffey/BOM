@@ -44,11 +44,13 @@ local response_ch = love.thread.getChannel("tclient_response")
 local push_ch     = love.thread.getChannel("tclient_push")
 local quit_ch     = love.thread.getChannel("tclient_quit")
 
--- Read connection args: { url, player_name }
+-- Read connection args: { url, player_name, faction, deck }
 local args_json = args_ch:demand()
 local args = json.decode(args_json)
 local url = args.url
 local player_name = args.player_name or "Player"
+local faction = args.faction
+local deck = args.deck
 
 -- Create sync websocket client directly (not via provider abstraction)
 -- so we have access to the raw socket for non-blocking receives.
@@ -95,6 +97,8 @@ local transport = websocket_transport.new({
 local session = client_session.new({
     transport = transport,
     player_name = player_name,
+    faction = faction,
+    deck = deck,
 })
 
 -- Connect (blocking handshake)
@@ -282,7 +286,12 @@ function threaded_client_adapter.start(opts)
 
   -- Start thread
   self._thread = love.thread.newThread(THREAD_CODE)
-  self._args_ch:push(json.encode({ url = opts.url, player_name = opts.player_name or "Player" }))
+  self._args_ch:push(json.encode({
+    url = opts.url,
+    player_name = opts.player_name or "Player",
+    faction = opts.faction,
+    deck = opts.deck,
+  }))
   self._thread:start()
 
   return self
