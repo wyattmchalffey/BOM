@@ -95,6 +95,13 @@ local function has_static_effect(card_def, effect_name)
   return false
 end
 
+local function special_worker_multiplier(sw_card_id)
+  local ok, sw_def = pcall(cards.get_card_def, sw_card_id)
+  if not ok or not sw_def then return 1 end
+  if has_static_effect(sw_def, "double_production") then return 2 end
+  return 1
+end
+
 -- Get the play_cost_sacrifice ability from a card def (returns ability or nil)
 local function get_sacrifice_ability(card_def)
   if not card_def or not card_def.abilities then return nil end
@@ -145,17 +152,16 @@ function actions.start_turn(g)
       end
     end
   end
-  -- Produce resources from special workers (2x rate)
+  -- Produce resources from special workers (ability-driven multiplier)
   for _, sw in ipairs(p.specialWorkers) do
     if sw.assigned_to ~= nil then
+      local mult = special_worker_multiplier(sw.card_id)
       if type(sw.assigned_to) == "string" then
-        -- On a resource node: 2x production_per_worker
         local res = sw.assigned_to
         if p.resources[res] ~= nil then
-          p.resources[res] = p.resources[res] + config.production_per_worker * 2
+          p.resources[res] = p.resources[res] + config.production_per_worker * mult
         end
       elseif type(sw.assigned_to) == "number" then
-        -- On a structure: find per_worker rate, apply 2x
         local entry = p.board[sw.assigned_to]
         if entry then
           local ok_sw, sw_def = pcall(cards.get_card_def, entry.card_id)
@@ -164,7 +170,7 @@ function actions.start_turn(g)
               if ab.type == "static" and ab.effect == "produce" and ab.effect_args and ab.effect_args.per_worker then
                 local res = ab.effect_args.resource
                 if res and p.resources[res] ~= nil then
-                  p.resources[res] = p.resources[res] + ab.effect_args.per_worker * 2
+                  p.resources[res] = p.resources[res] + ab.effect_args.per_worker * mult
                 end
               end
             end
@@ -549,8 +555,36 @@ function actions.play_from_hand(g, player_index, hand_index, sacrifice_targets)
 
   if sacrifice_targets then
     if #sacrifice_targets ~= sacrifice_count then return false end
+
+    local snapshot = {
+      totalWorkers = p.totalWorkers,
+      workersOn = {
+        food = p.workersOn.food,
+        wood = p.workersOn.wood,
+        stone = p.workersOn.stone,
+      },
+      resources = {},
+      board_workers = {},
+    }
+    for k, v in pairs(p.resources) do
+      snapshot.resources[k] = v
+    end
+    for bi, entry in ipairs(p.board) do
+      snapshot.board_workers[bi] = entry.workers or 0
+    end
+
     for _, t in ipairs(sacrifice_targets) do
       if type(t) ~= "table" or not actions.sacrifice_worker_token(g, player_index, t.kind, t.extra) then
+        p.totalWorkers = snapshot.totalWorkers
+        p.workersOn.food = snapshot.workersOn.food
+        p.workersOn.wood = snapshot.workersOn.wood
+        p.workersOn.stone = snapshot.workersOn.stone
+        for k, v in pairs(snapshot.resources) do
+          p.resources[k] = v
+        end
+        for bi, workers in pairs(snapshot.board_workers) do
+          if p.board[bi] then p.board[bi].workers = workers end
+        end
         return false
       end
     end
