@@ -113,6 +113,70 @@ local function fire_on_play_triggers(player, game_state, played_card_id)
   end
 end
 
+local function destroy_board_entry(player, game_state, board_index)
+  local target = player.board[board_index]
+  if not target then return false end
+
+  if target.workers and target.workers > 0 then
+    target.workers = 0
+  end
+  for _, sw in ipairs(player.specialWorkers) do
+    if sw.assigned_to == board_index then
+      sw.assigned_to = nil
+    end
+  end
+
+  local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
+  if t_ok and t_def and t_def.abilities then
+    for _, ab in ipairs(t_def.abilities) do
+      if ab.type == "triggered" and ab.trigger == "on_destroyed" then
+        abilities.resolve(ab, player, game_state)
+      end
+    end
+  end
+  if t_ok and t_def then
+    fire_on_ally_death_triggers(player, game_state, t_def)
+  end
+
+  player.graveyard[#player.graveyard + 1] = target.card_id
+  table.remove(player.board, board_index)
+  for _, sw in ipairs(player.specialWorkers) do
+    if type(sw.assigned_to) == "number" and sw.assigned_to > board_index then
+      sw.assigned_to = sw.assigned_to - 1
+    end
+  end
+
+  return true
+end
+
+local function pay_unit_upkeep(player, game_state)
+  local upkeep_board_indices = {}
+  for bi, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and card_def.kind == "Unit" and card_def.upkeep and #card_def.upkeep > 0 then
+      upkeep_board_indices[#upkeep_board_indices + 1] = bi
+    end
+  end
+
+  -- Resolve from right to left so table.remove index shifts do not affect pending entries.
+  for i = #upkeep_board_indices, 1, -1 do
+    local bi = upkeep_board_indices[i]
+    local entry = player.board[bi]
+    if entry then
+      local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+      if ok and card_def and card_def.kind == "Unit" then
+        if abilities.can_pay_cost(player.resources, card_def.upkeep) then
+          for _, cost in ipairs(card_def.upkeep) do
+            player.resources[cost.type] = (player.resources[cost.type] or 0) - cost.amount
+          end
+        else
+          destroy_board_entry(player, game_state, bi)
+        end
+      end
+    end
+  end
+end
+
 -- Get the play_cost_sacrifice ability from a card def (returns ability or nil)
 local function get_sacrifice_ability(card_def)
   if not card_def or not card_def.abilities then return nil end
@@ -201,6 +265,9 @@ function actions.start_turn(g)
 end
 
 function actions.end_turn(g)
+  local ending_player = g.players[g.activePlayer + 1]
+  pay_unit_upkeep(ending_player, g)
+
   g.activePlayer = (g.activePlayer == 0) and 1 or 0
   g.turnNumber = g.turnNumber + 1
   g.priorityPlayer = g.activePlayer
@@ -442,38 +509,7 @@ end
 function actions.sacrifice_board_entry(g, player_index, target_board_index)
   if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
   local p = g.players[player_index + 1]
-  local target = p.board[target_board_index]
-  if not target then return false end
-
-  if target.workers and target.workers > 0 then
-    target.workers = 0
-  end
-  for _, sw in ipairs(p.specialWorkers) do
-    if sw.assigned_to == target_board_index then
-      sw.assigned_to = nil
-    end
-  end
-
-  local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
-  if t_ok and t_def and t_def.abilities then
-    for _, ab in ipairs(t_def.abilities) do
-      if ab.type == "triggered" and ab.trigger == "on_destroyed" then
-        abilities.resolve(ab, p, g)
-      end
-    end
-  end
-  if t_ok and t_def then
-    fire_on_ally_death_triggers(p, g, t_def)
-  end
-
-  table.remove(p.board, target_board_index)
-  for _, sw in ipairs(p.specialWorkers) do
-    if type(sw.assigned_to) == "number" and sw.assigned_to > target_board_index then
-      sw.assigned_to = sw.assigned_to - 1
-    end
-  end
-
-  return true
+  return destroy_board_entry(p, g, target_board_index)
 end
 
 -- Sacrifice a board entry to produce a resource
