@@ -113,7 +113,15 @@ effect_handlers.produce_multiple = function(ability, player, g)
 end
 
 effect_handlers.produce = function(ability, player, g)
-  -- Static production abilities are handled by the turn system, not activated
+  -- Static production abilities are handled by the turn system.
+  -- Triggered/activated produce should resolve immediately.
+  if ability.type == "static" then return end
+  local args = ability.effect_args or {}
+  local res = args.resource
+  local amount = args.amount or 0
+  if res and amount > 0 and player.resources[res] ~= nil then
+    player.resources[res] = player.resources[res] + amount
+  end
 end
 
 effect_handlers.skip_draw = function(ability, player, g)
