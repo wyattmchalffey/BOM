@@ -106,8 +106,14 @@ local function ability_effect_text(ab)
     return "Heal " .. (args.amount or 0)
   elseif e == "deal_damage" then
     return "Deal " .. (args.amount or 0) .. " dmg"
+  elseif e == "sacrifice_produce" then
+    local who = (args.condition == "non_undead") and "non-Undead ally" or "ally"
+    return "Sacrifice " .. who .. ": Create " .. (args.amount or 1) .. " " .. (args.resource or "resource")
+  elseif e == "sacrifice_upgrade" then
+    local sub = args.subtypes and table.concat(args.subtypes, "/") or "unit"
+    return "Sacrifice " .. sub .. ": Play +1 tier " .. sub
   end
-  return e or "?"
+  return ab.label or e or "?"
 end
 
 local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
