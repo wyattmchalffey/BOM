@@ -36,6 +36,56 @@ local function fire_on_ally_death_triggers(player, game_state, dead_card_def)
   end
 end
 
+local function get_faction_worker_def(faction)
+  local worker_defs = cards.filter({ kind = "Worker", faction = faction })
+  for _, wd in ipairs(worker_defs) do
+    if wd.tier == 0 and not wd.deckable then
+      return wd
+    end
+  end
+  return nil
+end
+
+local function consume_worker_target(p, worker_kind, worker_extra)
+  if p.totalWorkers <= 0 then return false end
+
+  if worker_kind == "worker_left" then
+    local res_left = (p.faction == "Human") and "wood" or "food"
+    if (p.workersOn[res_left] or 0) > 0 then
+      p.workersOn[res_left] = p.workersOn[res_left] - 1
+    else
+      return false
+    end
+  elseif worker_kind == "worker_right" then
+    if (p.workersOn.stone or 0) > 0 then
+      p.workersOn.stone = p.workersOn.stone - 1
+    else
+      return false
+    end
+  elseif worker_kind == "structure_worker" then
+    local bi = worker_extra
+    if bi and p.board[bi] then
+      local entry = p.board[bi]
+      entry.workers = entry.workers or 0
+      if entry.workers > 0 then
+        entry.workers = entry.workers - 1
+      else
+        return false
+      end
+    else
+      return false
+    end
+  elseif worker_kind == "worker_unassigned" or worker_kind == "unassigned_pool" then
+    local unassigned = actions.count_unassigned_workers(p)
+    if unassigned <= 0 then return false end
+  else
+    return false
+  end
+
+  p.totalWorkers = p.totalWorkers - 1
+  return true
+end
+
 -- Check if a card def has a specific static effect
 local function has_static_effect(card_def, effect_name)
   if not card_def or not card_def.abilities then return false end
@@ -355,42 +405,12 @@ function actions.sacrifice_worker(g, player_index, card_def, source_key, ability
   local key = tostring(player_index) .. ":" .. source_key
   if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
 
-  if p.totalWorkers <= 0 then return g end
+  if not consume_worker_target(p, worker_kind, worker_extra) then return g end
 
-  -- Unassign the worker from its current location first
-  if worker_kind == "worker_left" then
-    local res_left = (p.faction == "Human") and "wood" or "food"
-    if (p.workersOn[res_left] or 0) > 0 then
-      p.workersOn[res_left] = p.workersOn[res_left] - 1
-    else
-      return g
-    end
-  elseif worker_kind == "worker_right" then
-    if (p.workersOn.stone or 0) > 0 then
-      p.workersOn.stone = p.workersOn.stone - 1
-    else
-      return g
-    end
-  elseif worker_kind == "structure_worker" then
-    local bi = worker_extra
-    if bi and p.board[bi] then
-      local entry = p.board[bi]
-      entry.workers = entry.workers or 0
-      if entry.workers > 0 then
-        entry.workers = entry.workers - 1
-      else
-        return g
-      end
-    else
-      return g
-    end
-  else
-    -- Unassigned worker: verify there is one
-    local unassigned = actions.count_unassigned_workers(p)
-    if unassigned <= 0 then return g end
+  local worker_def = get_faction_worker_def(p.faction)
+  if worker_def then
+    fire_on_ally_death_triggers(p, g, worker_def)
   end
-
-  p.totalWorkers = p.totalWorkers - 1
 
   local args = ability.effect_args or {}
   local res = args.resource
@@ -503,8 +523,19 @@ function actions.count_special_on_resource(p, resource)
   return count
 end
 
+function actions.sacrifice_worker_token(g, player_index, worker_kind, worker_extra)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
+  local p = g.players[player_index + 1]
+  if not consume_worker_target(p, worker_kind, worker_extra) then return false end
+  local worker_def = get_faction_worker_def(p.faction)
+  if worker_def then
+    fire_on_ally_death_triggers(p, g, worker_def)
+  end
+  return true
+end
+
 -- Play a card from hand that has play_cost_sacrifice ability
-function actions.play_from_hand(g, player_index, hand_index)
+function actions.play_from_hand(g, player_index, hand_index, sacrifice_targets)
   if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
   local p = g.players[player_index + 1]
   if hand_index < 1 or hand_index > #p.hand then return false end
@@ -515,10 +546,24 @@ function actions.play_from_hand(g, player_index, hand_index)
   if not sac_ab then return false end
 
   local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
-  if actions.count_unassigned_workers(p) < sacrifice_count then return false end
 
-  -- Sacrifice regular workers
-  p.totalWorkers = p.totalWorkers - sacrifice_count
+  if sacrifice_targets then
+    if #sacrifice_targets ~= sacrifice_count then return false end
+    for _, t in ipairs(sacrifice_targets) do
+      if type(t) ~= "table" or not actions.sacrifice_worker_token(g, player_index, t.kind, t.extra) then
+        return false
+      end
+    end
+  else
+    if actions.count_unassigned_workers(p) < sacrifice_count then return false end
+    p.totalWorkers = p.totalWorkers - sacrifice_count
+    local worker_def = get_faction_worker_def(p.faction)
+    if worker_def then
+      for _ = 1, sacrifice_count do
+        fire_on_ally_death_triggers(p, g, worker_def)
+      end
+    end
+  end
 
   -- Remove card from hand
   table.remove(p.hand, hand_index)
