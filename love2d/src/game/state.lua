@@ -93,6 +93,7 @@ function state.create_player_state(index, opts)
     graveyard = {},
     resourceNodes = {},
     specialWorkers = {},
+    workerStatePool = {},
   }
   -- Draw starting hand of 5 cards
   state.draw_cards(p, 5)

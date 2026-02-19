@@ -67,6 +67,17 @@ local function count_structure_workers(player)
   return total
 end
 
+local function count_field_worker_cards(player)
+  local total = 0
+  for _, entry in ipairs(player.board) do
+    local ok, def = pcall(cards.get_card_def, entry.card_id)
+    if ok and def and def.kind == "Worker" then
+      total = total + 1
+    end
+  end
+  return total
+end
+
 -- Sum end-of-turn upkeep that would be charged from current board state.
 -- Returns a map: { [resource_key] = amount_due }
 local function pending_upkeep_by_resource(player)
@@ -634,7 +645,7 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.setColor(1, 1, 1, alpha)
     love.graphics.setFont(util.get_font(10))
     love.graphics.printf("HP " .. tostring(life), tx + 4, stat_y + stat_h / 2 - 6, badge_w, "center")
-  elseif sdef.kind == "Unit" and sdef.attack and sdef.health then
+  elseif (sdef.kind == "Unit" or sdef.kind == "Worker") and sdef.attack and sdef.health then
     local stat_h = 20
     local stat_y = ty + th - stat_h - 4
     local half_w = (tw - 12) / 2
@@ -954,7 +965,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       -- Highlight all worker locations (any workers can be sacrificed)
       local sac_pulse = 0.3 + 0.2 * math.sin(t * 4)
       local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
-      local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player)
+      local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player) - count_field_worker_cards(player)
       if unassigned > 0 then
         love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
         love.graphics.setLineWidth(2)
@@ -1047,7 +1058,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     textures.draw_inner_shadow(uax, uay, uaw, uah, 3, 0.15)
     love.graphics.setColor(0.2, 0.22, 0.28, 0.8)
     love.graphics.rectangle("line", uax, uay, uaw, uah, 5, 5)
-    local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player)
+    local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player) - count_field_worker_cards(player)
     local draw_count = unassigned
     if drag and drag.player_index == pi and drag.from == "unassigned" and unassigned > 0 then
       draw_count = unassigned - 1
@@ -1479,7 +1490,7 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
 
     local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
     if util.point_in_rect(mx, my, uax, uay, uaw, uah) then
-      local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player)
+      local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player) - count_field_worker_cards(player)
       -- Count unassigned special workers
       local special_unassigned = {}
       for swi, sw in ipairs(player.specialWorkers) do
