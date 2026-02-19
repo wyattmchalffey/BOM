@@ -67,6 +67,23 @@ local function count_structure_workers(player)
   return total
 end
 
+-- Sum end-of-turn upkeep that would be charged from current board state.
+-- Returns a map: { [resource_key] = amount_due }
+local function pending_upkeep_by_resource(player)
+  local due = {}
+  for _, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and card_def.kind == "Unit" and card_def.upkeep then
+      for _, cost in ipairs(card_def.upkeep) do
+        if cost.type and cost.amount and cost.amount > 0 then
+          due[cost.type] = (due[cost.type] or 0) + cost.amount
+        end
+      end
+    end
+  end
+  return due
+end
+
 -- Get max_workers from a card def's produce ability (0 if none)
 local function get_max_workers(card_def)
   if not card_def or not card_def.abilities then return 0 end
@@ -284,7 +301,7 @@ local function is_hovered(hover, kind, pi)
 end
 
 -- Helper: draw a colored resource badge with PNG icon
-local function draw_resource_badge(x, y, res_type, letter, count, r, g, b, display_val)
+local function draw_resource_badge(x, y, res_type, letter, count, r, g, b, display_val, pending_upkeep)
   local icon_size = 18
   local badge_w = 50
   local badge_h = 22
@@ -309,6 +326,16 @@ local function draw_resource_badge(x, y, res_type, letter, count, r, g, b, displ
   love.graphics.setFont(util.get_font(13))
   love.graphics.setColor(r, g, b, 1.0)
   love.graphics.print(tostring(math.floor(show + 0.5)), x + icon_size + 5, y + 3)
+
+  -- Static upcoming upkeep indicator (shown above current value).
+  if pending_upkeep and pending_upkeep > 0 then
+    local up_text = "-" .. tostring(pending_upkeep)
+    local up_font = util.get_font(9)
+    love.graphics.setFont(up_font)
+    love.graphics.setColor(0.95, 0.45, 0.45, 0.95)
+    local tw = up_font:getWidth(up_text)
+    love.graphics.print(up_text, x + badge_w - tw - 4, y - 8)
+  end
   return badge_w + 4
 end
 
@@ -1084,13 +1111,14 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
 
     -- Resource bar (both panels — dynamically sized, left-justified)
     do
+      local pending_upkeep = pending_upkeep_by_resource(player)
       local rbx, rby, _, rbh = board.resource_bar_rect(panel)
       -- First pass: measure how wide the content is
       local content_w = 8  -- left padding
       for _, key in ipairs(config.resource_types) do
         local count = player.resources[key] or 0
         local display_val = dr and dr[key]
-        if count > 0 or (display_val and display_val > 0.5) then
+        if count > 0 or (display_val and display_val > 0.5) or (pending_upkeep[key] or 0) > 0 then
           content_w = content_w + 54  -- badge_w (50) + gap (4)
         end
       end
@@ -1112,11 +1140,11 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
         for _, key in ipairs(config.resource_types) do
           local count = player.resources[key] or 0
           local display_val = dr and dr[key]
-          if count > 0 or (display_val and display_val > 0.5) then
+          if count > 0 or (display_val and display_val > 0.5) or (pending_upkeep[key] or 0) > 0 then
             local rdef = res_registry[key]
             if rdef then
               local rc, gc, bc = rdef.color[1], rdef.color[2], rdef.color[3]
-              badge_x = badge_x + draw_resource_badge(badge_x, badge_cy, key, rdef.letter, count, rc, gc, bc, display_val)
+              badge_x = badge_x + draw_resource_badge(badge_x, badge_cy, key, rdef.letter, count, rc, gc, bc, display_val, pending_upkeep[key])
             end
           end
         end
@@ -1166,6 +1194,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
               or (def.faction .. " — " .. def.kind),
             text = def.text,
             costs = def.costs,
+            upkeep = def.upkeep,
             attack = def.attack,
             health = def.health,
             tier = def.tier,
@@ -1233,6 +1262,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
             or (def.faction .. " — " .. def.kind),
           text = def.text,
           costs = def.costs,
+          upkeep = def.upkeep,
           attack = def.attack,
           health = def.health,
           tier = def.tier,

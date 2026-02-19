@@ -303,6 +303,7 @@ function viewer.draw()
         typeLine = (def.faction or "") .. " — " .. (def.kind or ""),
         text = def.text,
         costs = def.costs,
+        upkeep = def.upkeep,
         tier = def.tier,
         abilities_list = def.abilities,
         show_ability_text = true,
