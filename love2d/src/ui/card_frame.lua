@@ -116,9 +116,23 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
   local is_used = opts.is_used or false
   local is_hov = opts.is_hovered or false
   local alpha = (can_activate and not is_used) and 1.0 or 0.45
-  local line_h = 26
   local icon_s = 16
   local r = 4
+
+  local show_text = opts.show_ability_text
+  local font = show_text and util.get_font(10) or util.get_font(9)
+  local line_h = 26
+
+  local effect_text = show_text and ability_effect_text(ab) or nil
+  if show_text then
+    local left_w = 5 + (ab.once_per_turn and (icon_s + 3) or 0) + measure_cost_cluster(ab.cost, icon_s)
+    local sep_w = font:getWidth(":") + 4
+    local remaining_w = math.max(20, max_w - left_w - sep_w - 4)
+    local _, wrapped = font:getWrap(effect_text, remaining_w)
+    local lines = math.max(1, #wrapped)
+    local text_h = lines * font:getHeight()
+    line_h = math.max(26, text_h + 8)
+  end
 
   -- Background: subtle gradient-like two-layer fill
   local bar_alpha = (can_activate and not is_used) and 0.22 or 0.08
@@ -127,7 +141,7 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
   love.graphics.rectangle("fill", ab_x, ab_y, max_w, line_h, r, r)
   -- Lighter inner highlight at top
   love.graphics.setColor(0.3, 0.35, 0.55, bar_alpha * 0.5)
-  love.graphics.rectangle("fill", ab_x + 1, ab_y + 1, max_w - 2, line_h * 0.4, r, r)
+  love.graphics.rectangle("fill", ab_x + 1, ab_y + 1, max_w - 2, math.max(1, line_h * 0.4), r, r)
   -- Left accent mark
   local accent_a = (can_activate and not is_used) and 0.8 or 0.2
   love.graphics.setColor(0.35, 0.6, 1.0, accent_a)
@@ -140,9 +154,6 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
     love.graphics.setColor(0.25, 0.28, 0.4, alpha * 0.35)
     love.graphics.rectangle("line", ab_x, ab_y, max_w, line_h, r, r)
   end
-
-  local show_text = opts.show_ability_text
-  local font = util.get_font(9)
 
   if show_text then
     -- Left-aligned layout: icons then effect text
@@ -158,15 +169,14 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
     -- Colon separator
     love.graphics.setColor(0.7, 0.72, 0.82, alpha)
     love.graphics.setFont(font)
-    love.graphics.print(":", cx, ab_y + (line_h - 12) / 2)
+    love.graphics.print(":", cx, ab_y + (line_h - font:getHeight()) / 2)
     cx = cx + font:getWidth(":") + 4
 
     -- Effect text
-    local effect_text = ability_effect_text(ab)
     love.graphics.setColor(0.85, 0.87, 0.95, alpha)
     love.graphics.setFont(font)
     local remaining_w = max_w - (cx - ab_x) - 4
-    love.graphics.printf(effect_text, cx, ab_y + (line_h - 12) / 2, math.max(remaining_w, 20), "left")
+    love.graphics.printf(effect_text, cx, ab_y + (line_h - font:getHeight()) / 2, math.max(remaining_w, 20), "left")
   else
     -- Centered icons only (compact mode)
     local freq_w_est = draw_frequency_icon(ab, -1000, -1000, icon_s, 0)
@@ -186,7 +196,7 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
     love.graphics.rectangle("fill", ab_x, ab_y, max_w, line_h, r, r)
     love.graphics.setColor(0.6, 0.3, 0.3, 0.8)
     love.graphics.setFont(font)
-    love.graphics.printf("USED", ab_x, ab_y + (line_h - 12) / 2, max_w, "center")
+    love.graphics.printf("USED", ab_x, ab_y + (line_h - font:getHeight()) / 2, max_w, "center")
   end
 
   return line_h + 3
@@ -596,10 +606,9 @@ function card_frame.draw(x, y, params)
     ab_y = ab_y + consumed
   end
 
-  -- Show rules text: when show_ability_text is on (preview mode), show the full original
-  -- text since all info is readable. Otherwise, strip activated ability descriptions.
+  -- Show rules text under ability lines without duplicating activated ability effect text.
   local display_text = text
-  if has_activated_abilities and not show_ability_text then
+  if has_activated_abilities then
     display_text = non_activated_text(abilities_list) or non_activated_text(activated_ability and { activated_ability } or nil)
   end
   if display_text and display_text ~= "" then

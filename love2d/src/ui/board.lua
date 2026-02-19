@@ -635,7 +635,6 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.setFont(util.get_font(10))
     love.graphics.printf("HP " .. tostring(life), tx + 4, stat_y + stat_h / 2 - 6, badge_w, "center")
   elseif sdef.kind == "Unit" and sdef.attack and sdef.health then
-    love.graphics.print(table.concat(sdef.subtypes or {}, "/"), tx + 8, ty + 20)
     local stat_h = 20
     local stat_y = ty + th - stat_h - 4
     local half_w = (tw - 12) / 2
@@ -661,8 +660,6 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.setColor(1, 1, 1, alpha)
     love.graphics.setFont(util.get_font(10))
     love.graphics.printf("HP " .. tostring(sdef.health), right_x, stat_y + stat_h / 2 - 6, half_w, "center")
-  else
-    love.graphics.print("Structure", tx + 8, ty + 20)
   end
 
   local ab_btn_y = is_base and (ty + 36) or (ty + 34)
