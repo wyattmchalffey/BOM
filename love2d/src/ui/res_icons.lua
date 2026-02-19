@@ -10,6 +10,7 @@ local _images = {}
 local _icon_files = {
   "food", "wood", "stone", "metal", "gold",
   "bones", "blood", "fire", "water",
+  "crystal", "ectoplasm",
 }
 
 -- Lazy-load (must happen after love.graphics is initialized)
@@ -17,10 +18,17 @@ local function ensure_loaded()
   if _loaded then return end
   _loaded = true
   for _, res_type in ipairs(_icon_files) do
-    local ok_img, img = pcall(love.graphics.newImage, "assets/" .. res_type .. ".png")
-    if ok_img then
-      img:setFilter("linear", "linear")
-      _images[res_type] = img
+    local paths = {
+      "assets/" .. res_type .. ".png",
+      "../assets/" .. res_type .. ".png",
+    }
+    for _, path in ipairs(paths) do
+      local ok_img, img = pcall(love.graphics.newImage, path)
+      if ok_img and img then
+        img:setFilter("linear", "linear")
+        _images[res_type] = img
+        break
+      end
     end
   end
 end

@@ -26,7 +26,7 @@
 --   effect         (string)  Effect key: "summon_worker", "produce", "draw_cards", etc.
 --   effect_args    (table?)  Extra data for the effect
 --   once_per_turn  (bool?)   Defaults to false
---   trigger        (string?) For triggered: "on_construct", "on_destroyed", "start_of_turn", "end_of_turn"
+--   trigger        (string?) For triggered: "on_play", "on_destroyed", "start_of_turn", "end_of_turn"
 
 return {
 
@@ -159,7 +159,7 @@ return {
     faction = "Human",
     kind = "Structure",
     population = 1,
-    text = "Action — 2 Wood: Play a Tier 1 Human Warrior from your hand.",
+    text = "Action — 2 Wood: Play a Tier 1 Human Warrior. Action — 1 Wood, 1 Metal: Play a Tier 2 Human Warrior.",
     costs = { { type = "stone", amount = 2 } },
     abilities = {
       {
@@ -167,6 +167,12 @@ return {
         cost = { { type = "wood", amount = 2 } },
         effect = "play_unit",
         effect_args = { faction = "Human", subtypes = {"Warrior"}, tier = 1 },
+      },
+      {
+        type = "activated",
+        cost = { { type = "wood", amount = 1 }, { type = "metal", amount = 1 } },
+        effect = "play_unit",
+        effect_args = { faction = "Human", subtypes = {"Warrior"}, tier = 2 },
       },
     },
   },
@@ -260,14 +266,20 @@ return {
     faction = "Orc",
     kind = "Structure",
     population = 1,
-    text = "Action — 2 Food: Play a Tier 1 Orc Warrior from your hand.",
+    text = "Action — 1 Blood, 1 Bones: Play a Tier 1 Orc Warrior. Action — 2 Blood, 2 Bones: Play a Tier 2 Orc Warrior.",
     costs = { { type = "stone", amount = 2 } },
     abilities = {
       {
         type = "activated",
-        cost = { { type = "food", amount = 2 } },
+        cost = { { type = "blood", amount = 1 }, { type = "bones", amount = 1 } },
         effect = "play_unit",
         effect_args = { faction = "Orc", subtypes = {"Warrior"}, tier = 1 },
+      },
+      {
+        type = "activated",
+        cost = { { type = "blood", amount = 2 }, { type = "bones", amount = 2 } },
+        effect = "play_unit",
+        effect_args = { faction = "Orc", subtypes = {"Warrior"}, tier = 2 },
       },
     },
   },
@@ -278,12 +290,12 @@ return {
     kind = "Structure",
     population = 6,
     health = 5,
-    text = "Construct: Draw 3 Cards. Discard a random card when destroyed.",
+    text = "On Play: Draw 3 Cards. Discard a random card when destroyed.",
     costs = { { type = "stone", amount = 2 } },
     abilities = {
       {
         type = "triggered",
-        trigger = "on_construct",
+        trigger = "on_play",
         effect = "draw_cards",
         effect_args = { amount = 3 },
       },
@@ -333,6 +345,25 @@ return {
         effect = "sacrifice_produce",
         effect_args = { condition = "non_undead", resource = "blood", amount = 1 },
         label = "Sacrifice",
+      },
+    },
+  },
+
+  {
+    id = "ORC_STRUCTURE_FIGHTING_PITS",
+    name = "Fighting Pits",
+    faction = "Orc",
+    kind = "Structure",
+    population = 1,
+    text = "Action — Sacrifice a Warrior: Play a Warrior one rank higher. Orc workers count as Rank 0 Warriors.",
+    costs = { { type = "stone", amount = 3 } },
+    abilities = {
+      {
+        type = "activated",
+        cost = {},
+        effect = "sacrifice_upgrade",
+        effect_args = { subtypes = {"Warrior"} },
+        label = "Sacrifice Upgrade",
       },
     },
   },
