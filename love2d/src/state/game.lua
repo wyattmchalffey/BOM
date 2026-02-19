@@ -1257,7 +1257,8 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         -- Two-step flow for sacrifice_produce abilities
         if ab.effect == "sacrifice_produce" then
           local eligible = abilities.find_sacrifice_targets(p, ab.effect_args)
-          if #eligible == 0 then
+          local has_worker_to_sacrifice = (p.totalWorkers or 0) > 0
+          if #eligible == 0 and not has_worker_to_sacrifice then
             sound.play("error")
             return
           end

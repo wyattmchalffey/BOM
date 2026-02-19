@@ -8,6 +8,34 @@ local game_state = require("src.game.state")
 
 local actions = {}
 
+local function is_undead(card_def)
+  if not card_def or not card_def.subtypes then return false end
+  for _, st in ipairs(card_def.subtypes) do
+    if st == "Undead" then return true end
+  end
+  return false
+end
+
+local function fire_on_ally_death_triggers(player, game_state, dead_card_def)
+  for _, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and card_def.abilities then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "triggered" and ab.trigger == "on_ally_death" then
+          local args = ab.effect_args or {}
+          local blocked = false
+          if args.condition == "non_undead" and is_undead(dead_card_def) then
+            blocked = true
+          end
+          if not blocked then
+            abilities.resolve(ab, player, game_state)
+          end
+        end
+      end
+    end
+  end
+end
+
 -- Check if a card def has a specific static effect
 local function has_static_effect(card_def, effect_name)
   if not card_def or not card_def.abilities then return false end
@@ -411,6 +439,11 @@ function actions.sacrifice_unit(g, player_index, card_def, source_key, ability_i
         abilities.resolve(ab, p, g)
       end
     end
+  end
+
+  -- Fire ally-death triggers (e.g. Crypt) for the destroyed ally.
+  if t_ok and t_def then
+    fire_on_ally_death_triggers(p, g, t_def)
   end
 
   -- Remove from board
