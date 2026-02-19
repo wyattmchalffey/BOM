@@ -1056,6 +1056,47 @@ local function is_attack_unit_board_entry(game_state, pi, board_index)
   return def.kind == "Unit"
 end
 
+local function has_static_effect(card_def, effect_name)
+  if not card_def or not card_def.abilities then return false end
+  for _, ab in ipairs(card_def.abilities) do
+    if ab.type == "static" and ab.effect == effect_name then
+      return true
+    end
+  end
+  return false
+end
+
+local function can_stage_attack_target(game_state, attacker_pi, attacker_board_index, target_pi, target_index)
+  local atk_player = game_state.players[attacker_pi + 1]
+  local def_player = game_state.players[target_pi + 1]
+  if not atk_player or not def_player then return false end
+
+  local atk_entry = atk_player.board[attacker_board_index]
+  if not atk_entry then return false end
+  local atk_ok, atk_def = pcall(cards.get_card_def, atk_entry.card_id)
+  if not atk_ok or not atk_def or atk_def.kind ~= "Unit" then return false end
+
+  if target_index == 0 then
+    return true
+  end
+
+  local target_entry = def_player.board[target_index]
+  if not target_entry then return false end
+  local tgt_ok, tgt_def = pcall(cards.get_card_def, target_entry.card_id)
+  if not tgt_ok or not tgt_def then return false end
+  if tgt_def.kind ~= "Unit" and tgt_def.kind ~= "Worker" and tgt_def.kind ~= "Structure" then
+    return false
+  end
+
+  if tgt_def.kind == "Unit" or tgt_def.kind == "Worker" then
+    local target_state = target_entry.state or {}
+    if target_state.rested then return true end
+    return has_static_effect(atk_def, "can_attack_non_rested")
+  end
+
+  return true
+end
+
 function GameState:_draw_arrow(x1, y1, x2, y2, color)
   local dx, dy = x2 - x1, y2 - y1
   local len = math.sqrt(dx * dx + dy * dy)
@@ -1938,6 +1979,9 @@ function GameState:mousereleased(x, y, button, istouch, presses)
         target = { type = "base" }
       elseif drop_extra and drop_extra > 0 then
         target = { type = "board", index = drop_extra }
+      end
+      if target and not can_stage_attack_target(self.game_state, self.drag.player_index, self.drag.board_index, defender_pi, target.index or 0) then
+        target = nil
       end
       if target then
         self:_set_pending_attack(self.drag.board_index, target)
