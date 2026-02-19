@@ -263,6 +263,75 @@ function commands.execute(g, command)
     return ok(nil, { { type = "special_worker_unassigned", player_index = pi, sw_index = sw_index } })
   end
 
+  if command.type == "SACRIFICE_UNIT" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local target_board_index = command.target_board_index
+    local target_worker = command.target_worker
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index then
+      return fail("invalid_sacrifice_payload")
+    end
+    if not target_board_index and not target_worker then
+      return fail("invalid_sacrifice_payload")
+    end
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+
+    local card_def
+    local source_key
+    if source.type == "base" then
+      card_def = cards.get_card_def(p.baseId)
+      source_key = "base:" .. ability_index
+    elseif source.type == "board" then
+      local entry = p.board[source.index]
+      if not entry then return fail("missing_board_entry") end
+      card_def = cards.get_card_def(entry.card_id)
+      source_key = "board:" .. source.index .. ":" .. ability_index
+    else
+      return fail("invalid_source_type")
+    end
+
+    if not card_def or not card_def.abilities then return fail("no_abilities") end
+    local ab = card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "sacrifice_produce" then
+      return fail("not_sacrifice_ability")
+    end
+
+    if not can_activate(g, pi, card_def, source_key, ability_index) then
+      return fail("ability_not_activatable")
+    end
+
+    if target_worker then
+      -- Sacrificing a worker token
+      if p.totalWorkers <= 0 then return fail("no_workers") end
+      local worker_extra = command.target_worker_extra
+      actions.sacrifice_worker(g, pi, card_def, source_key, ability_index, target_worker, worker_extra)
+      return ok(
+        { source_type = source.type, ability_index = ability_index, target_worker = true },
+        { { type = "worker_sacrificed", player_index = pi } }
+      )
+    else
+      -- Sacrificing a board entry
+      local eligible = abilities.find_sacrifice_targets(p, ab.effect_args)
+      local is_eligible = false
+      for _, idx in ipairs(eligible) do
+        if idx == target_board_index then is_eligible = true; break end
+      end
+      if not is_eligible then return fail("target_not_eligible") end
+
+      actions.sacrifice_unit(g, pi, card_def, source_key, ability_index, target_board_index)
+      local sacrificed_entry = p.board[target_board_index]
+      local sacrificed_id = sacrificed_entry and sacrificed_entry.card_id
+      return ok(
+        { source_type = source.type, ability_index = ability_index, target_board_index = target_board_index, card_id = sacrificed_id },
+        { { type = "unit_sacrificed", player_index = pi, target_board_index = target_board_index } }
+      )
+    end
+  end
+
   return fail("unknown_command")
 end
 

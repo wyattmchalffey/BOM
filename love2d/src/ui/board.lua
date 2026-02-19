@@ -180,6 +180,14 @@ function board.structures_area_rect(panel_x, panel_y, panel_w, panel_h, panel_in
   return board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index or 0)
 end
 
+-- Centered starting x for n tiles within a row area
+local function centered_row_x(row_ax, row_aw, n)
+  if n <= 0 then return row_ax end
+  local total_w = n * BFIELD_TILE_W + (n - 1) * BFIELD_GAP
+  return row_ax + (row_aw - total_w) / 2
+end
+board.centered_row_x = centered_row_x
+
 -- Tile position within a row (0-based tile_index)
 function board.structure_tile_rect(panel_x, panel_y, panel_w, panel_h, tile_index, card_def, panel_index)
   local ax, ay = board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index or 0)
@@ -585,7 +593,6 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
   love.graphics.setColor(0.6, 0.62, 0.7, is_active and 0.8 or 0.5)
   love.graphics.setFont(util.get_font(9))
   if is_base then
-    love.graphics.print("Base", tx + 8, ty + 20)
     local life = player.life or 30
     local stat_h = 20
     local stat_y = ty + th - stat_h - 4
@@ -863,39 +870,92 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     love.graphics.rectangle("line", back_ax, back_ay, back_aw, BFIELD_TILE_H, 4, 4)
     love.graphics.rectangle("line", front_ax, front_ay, front_aw, BFIELD_TILE_H, 4, 4)
 
-    -- Row labels
-    love.graphics.setFont(util.get_font(8))
-    love.graphics.setColor(0.4, 0.42, 0.5, is_active and 0.5 or 0.25)
-    love.graphics.print("STRUCTURES", back_ax + 2, back_ay - 11)
-    love.graphics.print("UNITS", front_ax + 2, front_ay - 11)
 
     -- Draw base tile (centered, near resources)
     local base_bx, base_by = board.base_rect(px, py, pw, ph, panel)
     local base_group = { card_id = player.baseId, count = 1, first_si = 0, scale = 1, entries = {} }
     draw_battlefield_tile(base_bx, base_by, BFIELD_TILE_W, BFIELD_TILE_H, base_group, base_def, pi, game_state, is_active, accent, hover, drag, t, player, true)
 
-    -- Draw structures in back row
+    -- Draw structures in back row (centered)
     local struct_groups = group_board_entries(player, "Structure")
+    local struct_start_x = centered_row_x(back_ax, back_aw, #struct_groups)
     for gi, group in ipairs(struct_groups) do
       local ok, sdef = pcall(cards.get_card_def, group.card_id)
       if ok and sdef then
-        local tile_x = back_ax + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
-        if tile_x + BFIELD_TILE_W <= back_ax + back_aw + 2 then
-          draw_battlefield_tile(tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, group, sdef, pi, game_state, is_active, accent, hover, drag, t, player, false)
-        end
+        local tile_x = struct_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        draw_battlefield_tile(tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, group, sdef, pi, game_state, is_active, accent, hover, drag, t, player, false)
       end
     end
 
-    -- Draw units in front row
+    -- Draw units in front row (centered)
     local unit_groups = group_board_entries(player, "Unit")
+    local unit_start_x = centered_row_x(front_ax, front_aw, #unit_groups)
     for gi, group in ipairs(unit_groups) do
       local ok, udef = pcall(cards.get_card_def, group.card_id)
       if ok and udef then
-        local tile_x = front_ax + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
-        if tile_x + BFIELD_TILE_W <= front_ax + front_aw + 2 then
-          draw_battlefield_tile(tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, group, udef, pi, game_state, is_active, accent, hover, drag, t, player, false)
+        local tile_x = unit_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        draw_battlefield_tile(tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, group, udef, pi, game_state, is_active, accent, hover, drag, t, player, false)
+      end
+    end
+
+    -- Sacrifice selection overlay: highlight eligible tiles, dim others
+    local sac_indices = hand_state and hand_state.sacrifice_eligible_indices
+    if sac_indices and panel == 0 then
+      local function is_sac_eligible(si)
+        for _, ei in ipairs(sac_indices) do
+          if ei == si then return true end
+        end
+        return false
+      end
+      -- Dim structures (not eligible for sacrifice)
+      for gi, group in ipairs(struct_groups) do
+        local tile_x = struct_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        love.graphics.setColor(0, 0, 0, 0.5)
+        love.graphics.rectangle("fill", tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+      end
+      -- Overlay units
+      for gi, group in ipairs(unit_groups) do
+        local tile_x = unit_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if is_sac_eligible(group.first_si) then
+          local pulse = 0.3 + 0.2 * math.sin(t * 4)
+          love.graphics.setColor(0.9, 0.2, 0.2, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, front_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
         end
       end
+      -- Highlight all worker locations (any workers can be sacrificed)
+      local sac_pulse = 0.3 + 0.2 * math.sin(t * 4)
+      local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
+      local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player)
+      if unassigned > 0 then
+        love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", uax - 2, uay - 2, uaw + 4, uah + 4, 6, 6)
+        love.graphics.setLineWidth(1)
+      end
+      local srl_x, srl_y, srl_w, srl_h = board.resource_left_rect(px, py, pw, ph, panel)
+      local res_left_key = (player.faction == "Human") and "wood" or "food"
+      if (player.workersOn[res_left_key] or 0) > 0 then
+        love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", srl_x - 2, srl_y - 2, srl_w + 4, srl_h + 4, 6, 6)
+        love.graphics.setLineWidth(1)
+      end
+      local srr_x, srr_y, srr_w, srr_h = board.resource_right_rect(px, py, pw, ph, panel)
+      if (player.workersOn.stone or 0) > 0 then
+        love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", srr_x - 2, srr_y - 2, srr_w + 4, srr_h + 4, 6, 6)
+        love.graphics.setLineWidth(1)
+      end
+      -- Prompt banner
+      love.graphics.setFont(util.get_font(12))
+      love.graphics.setColor(0.9, 0.3, 0.3, 0.7 + 0.2 * math.sin(t * 3))
+      love.graphics.printf("Select an ally to sacrifice", px, front_ay - 20, pw, "center")
     end
 
     -- Resource nodes: title + placeholder only, centered in panel
@@ -1285,12 +1345,12 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
       return "structure", pi, 0
     end
 
-    -- ── Hit test helper for a row of grouped tiles ──
+    -- ── Hit test helper for a row of grouped tiles (centered) ──
     local function hit_test_row(row_ax, row_ay, row_aw, groups, source_type)
+      local start_x = centered_row_x(row_ax, row_aw, #groups)
       for gi, group in ipairs(groups) do
         local s_ok, sdef = pcall(cards.get_card_def, group.card_id)
-        local offset = gi - 1
-        local tx = row_ax + offset * (BFIELD_TILE_W + BFIELD_GAP)
+        local tx = start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
         local tw, th = BFIELD_TILE_W, BFIELD_TILE_H
         if tx + tw > row_ax + row_aw + 2 then break end
         if util.point_in_rect(mx, my, tx, row_ay, tw, th) then

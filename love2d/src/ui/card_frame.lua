@@ -348,19 +348,25 @@ function card_frame.draw_ability_button(ab, bx, by, bw, opts)
     love.graphics.rectangle("line", bx, by, bw, btn_h, r, r)
   end
 
-  -- Measure content width to center icons
-  local freq_w_est = draw_frequency_icon(ab, -1000, -1000, icon_s, 0)
-  local cost_w_est = draw_cost_cluster(ab.cost, -1000, -1000, icon_s, 0)
-  local total_w = freq_w_est + cost_w_est
-  local cx = bx + (bw - total_w) / 2
-  local cy = by + (btn_h - icon_s) / 2
+  if ab.label then
+    love.graphics.setColor(1, 1, 1, alpha)
+    love.graphics.setFont(util.get_font(9))
+    love.graphics.printf(ab.label, bx, by + (btn_h - 10) / 2, bw, "center")
+  else
+    -- Measure content width to center icons
+    local freq_w_est = draw_frequency_icon(ab, -1000, -1000, icon_s, 0)
+    local cost_w_est = draw_cost_cluster(ab.cost, -1000, -1000, icon_s, 0)
+    local total_w = freq_w_est + cost_w_est
+    local cx = bx + (bw - total_w) / 2
+    local cy = by + (btn_h - icon_s) / 2
 
-  -- Frequency icon
-  local freq_w = draw_frequency_icon(ab, cx, cy, icon_s, alpha)
-  cx = cx + freq_w
+    -- Frequency icon
+    local freq_w = draw_frequency_icon(ab, cx, cy, icon_s, alpha)
+    cx = cx + freq_w
 
-  -- Cost icons
-  draw_cost_cluster(ab.cost, cx, cy, icon_s, alpha)
+    -- Cost icons
+    draw_cost_cluster(ab.cost, cx, cy, icon_s, alpha)
+  end
 
   -- "Used" overlay
   if is_used then

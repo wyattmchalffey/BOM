@@ -271,6 +271,71 @@ return {
       },
     },
   },
+  {
+    id = "ORC_STRUCTURE_BREEDING_PIT",
+    name = "Breeding Pit",
+    faction = "Orc",
+    kind = "Structure",
+    population = 6,
+    health = 5,
+    text = "Construct: Draw 3 Cards. Discard a random card when destroyed.",
+    costs = { { type = "stone", amount = 2 } },
+    abilities = {
+      {
+        type = "triggered",
+        trigger = "on_construct",
+        effect = "draw_cards",
+        effect_args = { amount = 3 },
+      },
+      {
+        type = "triggered",
+        trigger = "on_destroyed",
+        effect = "discard_random",
+        effect_args = { amount = 1 },
+      },
+    },
+  },
+  {
+    id = "ORC_STRUCTURE_CRYPT",
+    name = "Crypt",
+    faction = "Orc",
+    kind = "Structure",
+    population = 1,
+    text = "Whenever a non-Undead ally dies, create 1 Bones. 2 Bones: Play a Tier 0 Undead.",
+    costs = { { type = "stone", amount = 3 } },
+    abilities = {
+      {
+        type = "triggered",
+        trigger = "on_ally_death",
+        effect = "produce",
+        effect_args = { resource = "bones", amount = 1, condition = "non_undead" },
+      },
+      {
+        type = "activated",
+        cost = { { type = "bones", amount = 2 } },
+        effect = "play_unit",
+        effect_args = { subtypes = {"Undead"}, tier = 0 },
+      },
+    },
+  },
+  {
+    id = "ORC_STRUCTURE_SACRIFICIAL_ALTAR",
+    name = "Sacrificial Altar",
+    faction = "Orc",
+    kind = "Structure",
+    population = 1,
+    text = "Action — Sacrifice a non-Undead Ally: Create 1 Blood.",
+    costs = { { type = "stone", amount = 2 } },
+    abilities = {
+      {
+        type = "activated",
+        cost = {},
+        effect = "sacrifice_produce",
+        effect_args = { condition = "non_undead", resource = "blood", amount = 1 },
+        label = "Sacrifice",
+      },
+    },
+  },
 
   ---------------------------------------------------------
   -- ORC WORKERS

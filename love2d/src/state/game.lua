@@ -55,6 +55,7 @@ function GameState.new(opts)
     hand_hover_index = nil,      -- which hand card the mouse is over (1-based)
     hand_selected_index = nil,   -- which hand card is "selected" (clicked)
     pending_play_unit = nil,      -- { source, ability_index, effect_args, eligible_indices }
+    pending_sacrifice = nil,      -- { source, ability_index, effect_args, eligible_board_indices }
     hand_y_offsets = {},          -- per-card animated y offset (negative = raised)
     command_log = replay.new_log({
       command_schema_version = commands.SCHEMA_VERSION,
@@ -454,6 +455,7 @@ function GameState:draw()
     selected_index = self.hand_selected_index,
     y_offsets = self.hand_y_offsets,
     eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or nil,
+    sacrifice_eligible_indices = self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices or nil,
   }
   board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
 
@@ -882,14 +884,15 @@ function GameState:mousepressed(x, y, button, istouch, presses)
               popup.create(cost_str, px + pw * 0.5, py + 8, { 1.0, 0.5, 0.25 })
             end
             local pi_panel_bp = self:player_to_panel(self.show_blueprint_for_player)
-            local sax, say = board.structures_area_rect(px, py, pw, ph, pi_panel_bp)
+            local sax, say, saw = board.structures_area_rect(px, py, pw, ph, pi_panel_bp)
             local struct_count = 0
             for _, e in ipairs(self.game_state.players[self.show_blueprint_for_player + 1].board) do
               local e_ok, e_def = pcall(cards.get_card_def, e.card_id)
               if e_ok and e_def and e_def.kind == "Structure" then struct_count = struct_count + 1 end
             end
             local tile_step = board.BFIELD_TILE_W + board.BFIELD_GAP
-            popup.create("Built!", sax + (struct_count - 1) * tile_step + board.BFIELD_TILE_W / 2, say + 20, { 0.4, 0.9, 1.0 })
+            local start_x = board.centered_row_x(sax, saw, struct_count)
+            popup.create("Built!", start_x + (struct_count - 1) * tile_step + board.BFIELD_TILE_W / 2, say + 20, { 0.4, 0.9, 1.0 })
             local board_entries = self.game_state.players[self.show_blueprint_for_player + 1].board
             local entry = board_entries[#board_entries]
             entry.scale = 0
@@ -921,6 +924,11 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     -- Clicked on empty space: cancel pending selection or deselect hand card
     if self.pending_play_unit then
       self.pending_play_unit = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_sacrifice then
+      self.pending_sacrifice = nil
       sound.play("click")
       return
     end
@@ -971,6 +979,76 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         while #self.hand_y_offsets > #p.hand do
           table.remove(self.hand_y_offsets)
         end
+      else
+        sound.play("error")
+      end
+    else
+      sound.play("error")
+    end
+    return
+  end
+
+  -- Worker click during pending sacrifice selection
+  if self.pending_sacrifice and (kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" or kind == "unassigned_pool") then
+    local pending = self.pending_sacrifice
+    local p = self.game_state.players[self.local_player_index + 1]
+    local result = self:dispatch_command({
+      type = "SACRIFICE_UNIT",
+      player_index = self.local_player_index,
+      source = pending.source,
+      ability_index = pending.ability_index,
+      target_worker = kind,
+      target_worker_extra = idx,
+    })
+    if result.ok then
+      sound.play("coin")
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      local args = pending.effect_args or {}
+      if args.resource then
+        popup.create("+" .. (args.amount or 1) .. " " .. args.resource, px_b + pw_b / 2, py_b + 8, { 0.9, 0.2, 0.3 })
+      end
+      popup.create("Worker sacrificed!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.3, 0.3 })
+      self.pending_sacrifice = nil
+    else
+      sound.play("error")
+    end
+    return
+  end
+
+  -- Board tile click during pending sacrifice selection
+  if kind == "structure" and self.pending_sacrifice then
+    local pending = self.pending_sacrifice
+    local target_si = idx
+    local is_eligible = false
+    for _, ei in ipairs(pending.eligible_board_indices) do
+      if ei == target_si then is_eligible = true; break end
+    end
+    if is_eligible then
+      local p = self.game_state.players[self.local_player_index + 1]
+      local sacrificed_entry = p.board[target_si]
+      local sacrificed_name = "Unit"
+      if sacrificed_entry then
+        local s_ok, s_def = pcall(cards.get_card_def, sacrificed_entry.card_id)
+        if s_ok and s_def then sacrificed_name = s_def.name end
+      end
+      local result = self:dispatch_command({
+        type = "SACRIFICE_UNIT",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        target_board_index = target_si,
+      })
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        local args = pending.effect_args or {}
+        if args.resource then
+          popup.create("+" .. (args.amount or 1) .. " " .. args.resource, px_b + pw_b / 2, py_b + 8, { 0.9, 0.2, 0.3 })
+        end
+        popup.create(sacrificed_name .. " sacrificed!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.3, 0.3 })
+        self.pending_sacrifice = nil
       else
         sound.play("error")
       end
@@ -1093,6 +1171,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     -- Clear hand selection and pending state on turn change
     self.hand_selected_index = nil
     self.pending_play_unit = nil
+    self.pending_sacrifice = nil
     -- Show turn banner
     self.turn_banner_timer = 1.2
     self.turn_banner_text = (self.game_state.activePlayer == self.local_player_index) and "Your Turn" or "Opponent's Turn"
@@ -1173,6 +1252,25 @@ function GameState:mousepressed(x, y, button, istouch, presses)
             sound.play("click")
             return
           end
+        end
+
+        -- Two-step flow for sacrifice_produce abilities
+        if ab.effect == "sacrifice_produce" then
+          local eligible = abilities.find_sacrifice_targets(p, ab.effect_args)
+          if #eligible == 0 then
+            sound.play("error")
+            return
+          end
+          self.pending_sacrifice = {
+            source = { type = info.source, index = info.board_index },
+            ability_index = info.ability_index,
+            effect_args = ab.effect_args,
+            eligible_board_indices = eligible,
+          }
+          self.hand_selected_index = nil
+          self.pending_play_unit = nil
+          sound.play("click")
+          return
         end
 
         local before_workers = p.totalWorkers
@@ -1465,6 +1563,11 @@ function GameState:keypressed(key, scancode, isrepeat)
   if key == "escape" then
     if self.pending_play_unit then
       self.pending_play_unit = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_sacrifice then
+      self.pending_sacrifice = nil
       sound.play("click")
       return
     end

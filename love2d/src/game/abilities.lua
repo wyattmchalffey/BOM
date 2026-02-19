@@ -29,11 +29,23 @@ effect_handlers.summon_worker = function(ability, player, g)
 end
 
 effect_handlers.draw_cards = function(ability, player, g)
-  -- TODO: implement when hand/draw system exists
+  local args = ability.effect_args or {}
+  local amount = args.amount or 1
+  for _ = 1, amount do
+    if not player.deck or #player.deck == 0 then break end
+    local card_id = table.remove(player.deck)
+    player.hand[#player.hand + 1] = card_id
+  end
 end
 
 effect_handlers.discard_random = function(ability, player, g)
-  -- TODO: implement when hand system exists
+  local args = ability.effect_args or {}
+  local amount = args.amount or 1
+  for _ = 1, amount do
+    if #player.hand == 0 then break end
+    local idx = math.random(1, #player.hand)
+    table.remove(player.hand, idx)
+  end
 end
 
 effect_handlers.play_unit = function(ability, player, g)
@@ -131,6 +143,29 @@ function abilities.find_matching_hand_indices(player, effect_args)
         match = false
       end
       if match then indices[#indices + 1] = i end
+    end
+  end
+  return indices
+end
+
+-- Return board indices of non-Structure entries eligible for sacrifice (non-Undead units/workers).
+function abilities.find_sacrifice_targets(player, effect_args)
+  local args = effect_args or {}
+  local indices = {}
+  for si, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and card_def.kind ~= "Structure" then
+      local excluded = false
+      if args.condition == "non_undead" then
+        if card_def.subtypes then
+          for _, st in ipairs(card_def.subtypes) do
+            if st == "Undead" then excluded = true; break end
+          end
+        end
+      end
+      if not excluded then
+        indices[#indices + 1] = si
+      end
     end
   end
   return indices

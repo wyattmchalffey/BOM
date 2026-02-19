@@ -311,6 +311,130 @@ function actions.build_structure(g, player_index, card_id)
   return true
 end
 
+-- Sacrifice a worker token to produce a resource.
+-- worker_kind: "worker_unassigned", "worker_left", "worker_right", "structure_worker", "unassigned_pool"
+-- worker_extra: board_index for structure_worker, nil otherwise
+function actions.sacrifice_worker(g, player_index, card_def, source_key, ability_index, worker_kind, worker_extra)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
+  local p = g.players[player_index + 1]
+
+  local ability
+  if ability_index and card_def.abilities then
+    ability = card_def.abilities[ability_index]
+  end
+  if not ability or ability.type ~= "activated" or ability.effect ~= "sacrifice_produce" then return g end
+
+  local key = tostring(player_index) .. ":" .. source_key
+  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
+
+  if p.totalWorkers <= 0 then return g end
+
+  -- Unassign the worker from its current location first
+  if worker_kind == "worker_left" then
+    local res_left = (p.faction == "Human") and "wood" or "food"
+    if (p.workersOn[res_left] or 0) > 0 then
+      p.workersOn[res_left] = p.workersOn[res_left] - 1
+    else
+      return g
+    end
+  elseif worker_kind == "worker_right" then
+    if (p.workersOn.stone or 0) > 0 then
+      p.workersOn.stone = p.workersOn.stone - 1
+    else
+      return g
+    end
+  elseif worker_kind == "structure_worker" then
+    local bi = worker_extra
+    if bi and p.board[bi] then
+      local entry = p.board[bi]
+      entry.workers = entry.workers or 0
+      if entry.workers > 0 then
+        entry.workers = entry.workers - 1
+      else
+        return g
+      end
+    else
+      return g
+    end
+  else
+    -- Unassigned worker: verify there is one
+    local unassigned = actions.count_unassigned_workers(p)
+    if unassigned <= 0 then return g end
+  end
+
+  p.totalWorkers = p.totalWorkers - 1
+
+  local args = ability.effect_args or {}
+  local res = args.resource
+  local amount = args.amount or 1
+  if res then
+    p.resources[res] = (p.resources[res] or 0) + amount
+  end
+
+  g.activatedUsedThisTurn[key] = true
+  return g
+end
+
+-- Sacrifice a board entry to produce a resource
+function actions.sacrifice_unit(g, player_index, card_def, source_key, ability_index, target_board_index)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
+  local p = g.players[player_index + 1]
+
+  local ability
+  if ability_index and card_def.abilities then
+    ability = card_def.abilities[ability_index]
+  end
+  if not ability or ability.type ~= "activated" or ability.effect ~= "sacrifice_produce" then return g end
+
+  local key = tostring(player_index) .. ":" .. source_key
+  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
+
+  local target = p.board[target_board_index]
+  if not target then return g end
+
+  -- Unassign any workers on the sacrificed entry
+  if target.workers and target.workers > 0 then
+    target.workers = 0
+  end
+  -- Unassign special workers assigned to this entry
+  for _, sw in ipairs(p.specialWorkers) do
+    if sw.assigned_to == target_board_index then
+      sw.assigned_to = nil
+    end
+  end
+
+  -- Fire on_destroyed triggers on the sacrificed card
+  local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
+  if t_ok and t_def and t_def.abilities then
+    for _, ab in ipairs(t_def.abilities) do
+      if ab.type == "triggered" and ab.trigger == "on_destroyed" then
+        abilities.resolve(ab, p, g)
+      end
+    end
+  end
+
+  -- Remove from board
+  table.remove(p.board, target_board_index)
+
+  -- Fix special worker assignments that pointed to indices after the removed one
+  for _, sw in ipairs(p.specialWorkers) do
+    if type(sw.assigned_to) == "number" and sw.assigned_to > target_board_index then
+      sw.assigned_to = sw.assigned_to - 1
+    end
+  end
+
+  -- Produce the resource
+  local args = ability.effect_args or {}
+  local res = args.resource
+  local amount = args.amount or 1
+  if res then
+    p.resources[res] = (p.resources[res] or 0) + amount
+  end
+
+  g.activatedUsedThisTurn[key] = true
+  return g
+end
+
 -- Convenience: activate the base ability for a player
 function actions.activate_base_ability(g, player_index)
   local p = g.players[player_index + 1]
@@ -390,7 +514,6 @@ function actions.assign_special_worker(g, player_index, sw_index, target)
     local entry = p.board[bi]
     if not entry then return false end
     local card_def = cards.get_card_def(entry.card_id)
-    -- Find max_workers from produce ability
     local max_w = 0
     if card_def and card_def.abilities then
       for _, ab in ipairs(card_def.abilities) do
@@ -400,10 +523,24 @@ function actions.assign_special_worker(g, player_index, sw_index, target)
       end
     end
     if max_w <= 0 then return false end
-    -- Check capacity: regular + special workers
+    -- Try requested entry first; if full, find another copy of the same card
+    local target_bi = bi
     local current = (entry.workers or 0) + actions.count_special_on_structure(p, bi)
-    if current >= max_w then return false end
-    sw.assigned_to = bi
+    if current >= max_w then
+      local found = false
+      for si, other in ipairs(p.board) do
+        if other.card_id == entry.card_id and si ~= bi then
+          local oc = (other.workers or 0) + actions.count_special_on_structure(p, si)
+          if oc < max_w then
+            target_bi = si
+            found = true
+            break
+          end
+        end
+      end
+      if not found then return false end
+    end
+    sw.assigned_to = target_bi
     return true
   end
   return false
