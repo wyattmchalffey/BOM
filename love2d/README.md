@@ -17,6 +17,7 @@ Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc
 - **Drag a worker** (circle) from the unassigned pool onto a resource node to assign; drag from a node back to the unassigned pool (or onto the other node) to move.
 - Only the **active player** can move workers.
 - **"End turn / Start next"** ends the current turn and starts the next player’s turn (they gain 1 worker and produce resources from current assignments).
+- **Debug hotkey: `F8`** grants **+5** to each resource currently tracked for your local player (for testing only).
 
 ## Project outline
 
