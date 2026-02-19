@@ -107,6 +107,12 @@ function commands.execute(g, command)
     return ok(nil, { { type = "combat_resolved" } })
   end
 
+  if command.type == "ASSIGN_DAMAGE_ORDER" then
+    local ok_ord, reason = combat.assign_damage_order(g, command.player_index, command.orders)
+    if not ok_ord then return fail(reason) end
+    return ok(nil, { { type = "damage_order_assigned", player_index = command.player_index } })
+  end
+
   if command.type == "DEBUG_ADD_RESOURCE" then
     local pi = command.player_index
     local resource = command.resource

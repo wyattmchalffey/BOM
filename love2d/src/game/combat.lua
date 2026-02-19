@@ -138,6 +138,18 @@ local function get_blockers_for_attacker(combat_state, attacker_board_index)
   return out
 end
 
+local function get_attackers_with_multiple_blockers(combat_state)
+  local counts = {}
+  for _, b in ipairs(combat_state.blockers or {}) do
+    counts[b.attacker_board_index] = (counts[b.attacker_board_index] or 0) + 1
+  end
+  local out = {}
+  for attacker_index, count in pairs(counts) do
+    if count > 1 then out[#out + 1] = attacker_index end
+  end
+  return out
+end
+
 local function queue_damage(q, side, board_index, amount, source_def)
   if amount <= 0 then return end
   q[#q + 1] = {
@@ -295,6 +307,55 @@ function combat.assign_blockers(g, player_index, assignments)
     }
   end
 
+  local need_orders = get_attackers_with_multiple_blockers(c)
+  if #need_orders > 0 then
+    c.stage = "AWAITING_DAMAGE_ORDER"
+    c.damage_orders = c.damage_orders or {}
+    c.attackers_needing_order = need_orders
+  else
+    c.stage = "BLOCKERS_ASSIGNED"
+  end
+  return true, "ok"
+end
+
+function combat.assign_damage_order(g, player_index, orders)
+  local c = g.pendingCombat
+  if not c or c.stage ~= "AWAITING_DAMAGE_ORDER" then return false, "no_pending_combat" end
+  if player_index ~= c.attacker then return false, "not_attacker" end
+  if type(orders) ~= "table" then return false, "invalid_orders" end
+
+  c.damage_orders = c.damage_orders or {}
+  for _, order in ipairs(orders) do
+    local attacker_index = order.attacker_board_index
+    local blocker_indices = order.blocker_board_indices
+    if type(attacker_index) ~= "number" or type(blocker_indices) ~= "table" then
+      return false, "invalid_order"
+    end
+
+    local legal_blockers = get_blockers_for_attacker(c, attacker_index)
+    if #legal_blockers < 2 then return false, "attacker_does_not_need_order" end
+
+    local needed = {}
+    for _, bi in ipairs(legal_blockers) do needed[bi] = true end
+    local seen = {}
+
+    for _, bi in ipairs(blocker_indices) do
+      if not needed[bi] or seen[bi] then return false, "invalid_blocker_order_member" end
+      seen[bi] = true
+    end
+    for bi, _ in pairs(needed) do
+      if not seen[bi] then return false, "incomplete_blocker_order" end
+    end
+
+    c.damage_orders[attacker_index] = blocker_indices
+  end
+
+  for _, attacker_index in ipairs(c.attackers_needing_order or {}) do
+    if not c.damage_orders[attacker_index] then
+      return false, "missing_damage_order"
+    end
+  end
+
   c.stage = "BLOCKERS_ASSIGNED"
   return true, "ok"
 end
@@ -325,6 +386,9 @@ function combat.resolve(g)
           attacker.invalidated = true
         else
           local blockers = get_blockers_for_attacker(c, attacker.board_index)
+          if c.damage_orders and c.damage_orders[attacker.board_index] then
+            blockers = c.damage_orders[attacker.board_index]
+          end
           local queue_for_attacker = atk_first[attacker.board_index] and first_q or normal_q
 
           if #blockers > 0 then

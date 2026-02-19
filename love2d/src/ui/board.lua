@@ -544,6 +544,33 @@ local function draw_button(bx, by, bw, bh, label, is_hov, is_press, accent_r, ac
 end
 
 -- Group board entries by card_id, filtered by kind ("Structure" or nil for units/other)
+local function state_signature(v)
+  local tv = type(v)
+  if tv == "nil" then return "nil" end
+  if tv == "number" or tv == "boolean" then return tostring(v) end
+  if tv == "string" then return string.format("%q", v) end
+  if tv ~= "table" then return "<" .. tv .. ">" end
+
+  local keys = {}
+  for k in pairs(v) do
+    keys[#keys + 1] = tostring(k)
+  end
+  table.sort(keys)
+
+  local parts = {"{"}
+  for i, ks in ipairs(keys) do
+    local key_val = v[ks]
+    if key_val == nil then
+      local as_num = tonumber(ks)
+      if as_num ~= nil then key_val = v[as_num] end
+    end
+    parts[#parts + 1] = ks .. ":" .. state_signature(key_val)
+    if i < #keys then parts[#parts + 1] = "," end
+  end
+  parts[#parts + 1] = "}"
+  return table.concat(parts)
+end
+
 local function group_board_entries(player, kind_filter, forced_singletons)
   local groups = {}
   local group_map = {}
@@ -557,10 +584,13 @@ local function group_board_entries(player, kind_filter, forced_singletons)
         local key = entry.card_id
         if is_unit then
           local st = entry.state or {}
+          local state_key = state_signature(st)
           if forced_singletons[si] then
             key = "single:" .. tostring(si)
           elseif st.stack_id ~= nil then
-            key = "stack:" .. tostring(st.stack_id)
+            key = "stack:" .. tostring(st.stack_id) .. ":state:" .. state_key
+          else
+            key = "unit:" .. tostring(entry.card_id) .. ":state:" .. state_key
           end
         end
 
