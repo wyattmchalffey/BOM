@@ -1716,6 +1716,13 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
+  if kind == "structure" and pi == self.local_player_index and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx) then
+    local mx, my = love.mouse.getPosition()
+    self.drag = { player_index = pi, from = "attack_unit", display_x = mx, display_y = my, board_index = idx }
+    sound.play("whoosh", 0.6)
+    return
+  end
+
   if kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" then
     sound.play("pop")
     local from
