@@ -66,7 +66,7 @@ effect_handlers.play_unit = function(ability, player, g)
     if ok and card_def and card_def.kind == "Unit" then
       local match = true
       if args.faction and card_def.faction ~= args.faction then match = false end
-      if args.tier and (card_def.tier or 0) > args.tier then match = false end
+      if args.tier and (card_def.tier or 0) ~= args.tier then match = false end
       if args.subtypes and card_def.subtypes then
         local has_subtype = false
         for _, req_sub in ipairs(args.subtypes) do
@@ -113,7 +113,15 @@ effect_handlers.produce_multiple = function(ability, player, g)
 end
 
 effect_handlers.produce = function(ability, player, g)
-  -- Static production abilities are handled by the turn system, not activated
+  -- Static production abilities are handled by the turn system.
+  -- Triggered/activated produce should resolve immediately.
+  if ability.type == "static" then return end
+  local args = ability.effect_args or {}
+  local res = args.resource
+  local amount = args.amount or 0
+  if res and amount > 0 and player.resources[res] ~= nil then
+    player.resources[res] = player.resources[res] + amount
+  end
 end
 
 effect_handlers.skip_draw = function(ability, player, g)
@@ -129,7 +137,7 @@ function abilities.find_matching_hand_indices(player, effect_args)
     if ok and card_def and card_def.kind == "Unit" then
       local match = true
       if args.faction and card_def.faction ~= args.faction then match = false end
-      if args.tier and (card_def.tier or 0) > args.tier then match = false end
+      if args.tier and (card_def.tier or 0) ~= args.tier then match = false end
       if args.subtypes and card_def.subtypes then
         local has_subtype = false
         for _, req in ipairs(args.subtypes) do

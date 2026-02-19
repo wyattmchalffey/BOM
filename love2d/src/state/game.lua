@@ -56,6 +56,8 @@ function GameState.new(opts)
     hand_selected_index = nil,   -- which hand card is "selected" (clicked)
     pending_play_unit = nil,      -- { source, ability_index, effect_args, eligible_indices }
     pending_sacrifice = nil,      -- { source, ability_index, effect_args, eligible_board_indices }
+    pending_hand_sacrifice = nil, -- { hand_index, required_count, selected_targets }
+    pending_upgrade = nil, -- { source, ability_index, stage, sacrifice_target, eligible_hand_indices, eligible_board_indices }
     hand_y_offsets = {},          -- per-card animated y offset (negative = raised)
     command_log = replay.new_log({
       command_schema_version = commands.SCHEMA_VERSION,
@@ -454,8 +456,8 @@ function GameState:draw()
     hover_index = self.hand_hover_index,
     selected_index = self.hand_selected_index,
     y_offsets = self.hand_y_offsets,
-    eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or nil,
-    sacrifice_eligible_indices = self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices or nil,
+    eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or (self.pending_upgrade and self.pending_upgrade.eligible_hand_indices) or nil,
+    sacrifice_eligible_indices = (self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices) or (self.pending_upgrade and self.pending_upgrade.eligible_board_indices) or (self.pending_hand_sacrifice and {}) or nil,
   }
   board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
 
@@ -932,6 +934,16 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       sound.play("click")
       return
     end
+    if self.pending_upgrade then
+      self.pending_upgrade = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_hand_sacrifice then
+      self.pending_hand_sacrifice = nil
+      sound.play("click")
+      return
+    end
     if self.hand_selected_index then
       self.hand_selected_index = nil
       sound.play("click")
@@ -984,6 +996,41 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       end
     else
       sound.play("error")
+    end
+    return
+  end
+
+  -- Worker click during pending hand sacrifice selection (e.g. Loving Family)
+  if self.pending_hand_sacrifice and (kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" or kind == "unassigned_pool") then
+    local pending = self.pending_hand_sacrifice
+    pending.selected_targets[#pending.selected_targets + 1] = { kind = kind, extra = idx }
+
+    if #pending.selected_targets >= pending.required_count then
+      local p = self.game_state.players[self.local_player_index + 1]
+      local result = self:dispatch_command({
+        type = "PLAY_FROM_HAND_WITH_SACRIFICES",
+        player_index = self.local_player_index,
+        hand_index = pending.hand_index,
+        sacrifice_targets = pending.selected_targets,
+      })
+      if result.ok then
+        sound.play("coin")
+        shake.trigger(4, 0.15)
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        popup.create("-" .. pending.required_count .. " Workers", px_b + pw_b * 0.5, py_b + ph_b - 80, { 1.0, 0.5, 0.25 })
+        popup.create("Loving Family played!", px_b + pw_b * 0.5, py_b + ph_b - 110, { 0.9, 0.8, 0.2 })
+        self.hand_selected_index = nil
+        self.pending_hand_sacrifice = nil
+        while #self.hand_y_offsets > #p.hand do
+          table.remove(self.hand_y_offsets)
+        end
+      else
+        self.pending_hand_sacrifice = nil
+        sound.play("error")
+      end
+    else
+      sound.play("click")
     end
     return
   end
@@ -1058,6 +1105,91 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
+  -- Click during Fighting Pits sacrifice-upgrade flow
+  if self.pending_upgrade then
+    local pending = self.pending_upgrade
+    local p = self.game_state.players[self.local_player_index + 1]
+
+    if pending.stage == "sacrifice" and (kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" or kind == "unassigned_pool") then
+      local eligible = {}
+      for hi, hid in ipairs(p.hand) do
+        local ok_h, hdef = pcall(cards.get_card_def, hid)
+        if ok_h and hdef and hdef.subtypes then
+          local is_w = false
+          for _, st in ipairs(hdef.subtypes) do if st == "Warrior" then is_w = true; break end end
+          if is_w and (hdef.tier or 0) == 1 then eligible[#eligible + 1] = hi end
+        end
+      end
+      if #eligible == 0 then self.pending_upgrade = nil; sound.play("error"); return end
+      pending.sacrifice_target = { target_worker = kind, target_worker_extra = idx }
+      pending.stage = "hand"
+      pending.eligible_hand_indices = eligible
+      sound.play("click")
+      return
+    end
+
+    if pending.stage == "sacrifice" and kind == "structure" then
+      local target_si = idx
+      local entry = p.board[target_si]
+      local ok_t, tdef = entry and pcall(cards.get_card_def, entry.card_id)
+      local is_warrior = false
+      if ok_t and tdef and tdef.subtypes and tdef.kind ~= "Structure" then
+        for _, st in ipairs(tdef.subtypes) do if st == "Warrior" then is_warrior = true; break end end
+      end
+      if not is_warrior then sound.play("error"); return end
+      local next_tier = (tdef.tier or 0) + 1
+      local eligible = {}
+      for hi, hid in ipairs(p.hand) do
+        local ok_h, hdef = pcall(cards.get_card_def, hid)
+        if ok_h and hdef and hdef.subtypes then
+          local is_w = false
+          for _, st in ipairs(hdef.subtypes) do if st == "Warrior" then is_w = true; break end end
+          if is_w and (hdef.tier or 0) == next_tier then eligible[#eligible + 1] = hi end
+        end
+      end
+      if #eligible == 0 then self.pending_upgrade = nil; sound.play("error"); return end
+      pending.sacrifice_target = { target_board_index = target_si }
+      pending.stage = "hand"
+      pending.eligible_hand_indices = eligible
+      sound.play("click")
+      return
+    end
+
+    if pending.stage == "hand" and kind == "hand_card" then
+      local is_eligible = false
+      for _, ei in ipairs(pending.eligible_hand_indices or {}) do if ei == idx then is_eligible = true; break end end
+      if not is_eligible then sound.play("error"); return end
+
+      local payload = {
+        type = "SACRIFICE_UPGRADE_PLAY",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        hand_index = idx,
+      }
+      if pending.sacrifice_target.target_board_index then
+        payload.target_board_index = pending.sacrifice_target.target_board_index
+      else
+        payload.target_worker = pending.sacrifice_target.target_worker
+        payload.target_worker_extra = pending.sacrifice_target.target_worker_extra
+      end
+      local result = self:dispatch_command(payload)
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        popup.create("Fighting Pits upgrade!", px_b + pw_b / 2, py_b + ph_b - 90, { 0.9, 0.3, 0.3 })
+        self.pending_upgrade = nil
+        self.hand_selected_index = nil
+        while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+      else
+        self.pending_upgrade = nil
+        sound.play("error")
+      end
+      return
+    end
+  end
+
   -- Hand card click: toggle selection or play from hand
   if kind == "hand_card" then
     if self.hand_selected_index == idx then
@@ -1075,28 +1207,14 @@ function GameState:mousepressed(x, y, button, istouch, presses)
           end
           if sac_ab then
             local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
-            local actions_mod = require("src.game.actions")
-            local unassigned = actions_mod.count_unassigned_workers(local_p)
-            if unassigned >= sacrifice_count then
-              local result = self:dispatch_command({
-                type = "PLAY_FROM_HAND",
-                player_index = pi,
+            if (local_p.totalWorkers or 0) >= sacrifice_count then
+              self.pending_hand_sacrifice = {
                 hand_index = idx,
-              })
-              if result.ok then
-                sound.play("coin")
-                shake.trigger(4, 0.15)
-                local pi_panel = self:player_to_panel(pi)
-                local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-                popup.create("-" .. sacrifice_count .. " Workers", px_b + pw_b * 0.5, py_b + ph_b - 80, { 1.0, 0.5, 0.25 })
-                popup.create("Loving Family played!", px_b + pw_b * 0.5, py_b + ph_b - 110, { 0.9, 0.8, 0.2 })
-                self.hand_selected_index = nil
-                -- Update hand y_offsets
-                while #self.hand_y_offsets > #local_p.hand do
-                  table.remove(self.hand_y_offsets)
-                end
-                return
-              end
+                required_count = sacrifice_count,
+                selected_targets = {},
+              }
+              sound.play("click")
+              return
             end
           end
         end
@@ -1172,6 +1290,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     self.hand_selected_index = nil
     self.pending_play_unit = nil
     self.pending_sacrifice = nil
+    self.pending_upgrade = nil
     -- Show turn banner
     self.turn_banner_timer = 1.2
     self.turn_banner_text = (self.game_state.activePlayer == self.local_player_index) and "Your Turn" or "Opponent's Turn"
@@ -1254,10 +1373,42 @@ function GameState:mousepressed(x, y, button, istouch, presses)
           end
         end
 
+        -- Two-step flow for sacrifice_upgrade abilities (Fighting Pits)
+        if ab.effect == "sacrifice_upgrade" then
+          local warrior_indices = {}
+          for si, entry in ipairs(p.board) do
+            local ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
+            if ok_t and tdef and tdef.kind ~= "Structure" and tdef.subtypes then
+              for _, st in ipairs(tdef.subtypes) do
+                if st == "Warrior" then warrior_indices[#warrior_indices + 1] = si; break end
+              end
+            end
+          end
+          local has_workers = (p.totalWorkers or 0) > 0
+          if #warrior_indices == 0 and not has_workers then
+            sound.play("error")
+            return
+          end
+          self.pending_upgrade = {
+            source = { type = info.source, index = info.board_index },
+            ability_index = info.ability_index,
+            stage = "sacrifice",
+            sacrifice_target = nil,
+            eligible_hand_indices = nil,
+            eligible_board_indices = warrior_indices,
+          }
+          self.hand_selected_index = nil
+          self.pending_play_unit = nil
+          self.pending_sacrifice = nil
+          sound.play("click")
+          return
+        end
+
         -- Two-step flow for sacrifice_produce abilities
         if ab.effect == "sacrifice_produce" then
           local eligible = abilities.find_sacrifice_targets(p, ab.effect_args)
-          if #eligible == 0 then
+          local has_worker_to_sacrifice = (p.totalWorkers or 0) > 0
+          if #eligible == 0 and not has_worker_to_sacrifice then
             sound.play("error")
             return
           end
@@ -1551,6 +1702,32 @@ function GameState:mousemoved(x, y, dx, dy, istouch)
 end
 
 function GameState:keypressed(key, scancode, isrepeat)
+  if key == "f8" then
+    local pi = self.local_player_index
+    local p = self.game_state.players[pi + 1]
+    local gained = 0
+    for _, res in ipairs(config.resource_types) do
+      if p.resources[res] ~= nil then
+        local result = self:dispatch_command({
+          type = "DEBUG_ADD_RESOURCE",
+          player_index = pi,
+          resource = res,
+          amount = 5,
+        })
+        if result.ok then gained = gained + 1 end
+      end
+    end
+    if gained > 0 then
+      sound.play("coin")
+      local panel = self:player_to_panel(pi)
+      local px, py, pw = board.panel_rect(panel)
+      popup.create("[DEBUG] +5 all resources", px + pw / 2, py + 8, { 1.0, 0.85, 0.2 })
+    else
+      sound.play("error")
+    end
+    return
+  end
+
   if deck_viewer.is_open() then
     local was_open = deck_viewer.is_open()
     deck_viewer.keypressed(key)
@@ -1568,6 +1745,16 @@ function GameState:keypressed(key, scancode, isrepeat)
     end
     if self.pending_sacrifice then
       self.pending_sacrifice = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_upgrade then
+      self.pending_upgrade = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_hand_sacrifice then
+      self.pending_hand_sacrifice = nil
       sound.play("click")
       return
     end
