@@ -117,6 +117,7 @@ function state.create_initial_game_state(setup)
     phase = "MAIN",
     priorityPlayer = first_player,
     pendingAction = nil,
+    pendingCombat = nil,
     activatedUsedThisTurn = {},
   }
 end
