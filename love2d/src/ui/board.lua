@@ -1463,6 +1463,9 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
       local uk, up, ue = hit_test_row(front_ax, front_ay, front_aw, unit_groups, "front")
       if uk then return uk, up, ue end
     end
+    if util.point_in_rect(mx, my, front_ax, front_ay, front_aw, BFIELD_TILE_H) then
+      return "unit_row", pi
+    end
 
     local bx, by, bw, bh = board.blueprint_slot_rect(px, py, pw, ph, panel)
     if util.point_in_rect(mx, my, bx, by, bw, bh) then
