@@ -16,7 +16,7 @@
 --   tier        (number?) 0 / 1 / 2 / 3
 --   keywords    (table?)  { "rush", "flying", ... } — references data/keywords.lua
 --   subtypes    (table?)  { "Warrior", "Mounted", ... } — parsed from type line
---   upkeep      (table?)  End-of-turn upkeep cost for units: { { type = "food", amount = N } }
+--   upkeep      (table?)  End-of-turn upkeep cost for units: { { type = "<resource>", amount = N }, ... }
 --                          Units that can't pay upkeep die.
 --   abilities   (table?)  List of structured ability definitions (see below)
 --
@@ -403,7 +403,7 @@ return {
     health = 3,
     text = "",
     costs = {},
-    upkeep = {},
+    upkeep = { { type = "food", amount = 1 } },
     subtypes = { "Warrior" },
     abilities = {},
   },
