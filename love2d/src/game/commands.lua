@@ -33,6 +33,19 @@ local function has_subtype(card_def, subtype)
   return false
 end
 
+local function copy_table(t)
+  if type(t) ~= "table" then return t end
+  local out = {}
+  for k, v in pairs(t) do
+    if type(v) == "table" then
+      out[k] = copy_table(v)
+    else
+      out[k] = v
+    end
+  end
+  return out
+end
+
 local function can_activate(g, player_index, card_def, source_key, ability_index)
   if g.phase ~= "MAIN" then return false end
   if player_index ~= g.activePlayer then return false end
@@ -99,8 +112,7 @@ function commands.execute(g, command)
     if pi ~= g.activePlayer then return fail("not_active_player") end
 
     local p = g.players[pi + 1]
-    local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
-    if p.totalWorkers - assigned <= 0 then return fail("no_unassigned_workers") end
+    if actions.count_unassigned_workers(p) <= 0 then return fail("no_unassigned_workers") end
 
     actions.assign_worker_to_resource(g, pi, resource)
     return ok(nil, { { type = "worker_assigned", player_index = pi, resource = resource } })
@@ -221,8 +233,7 @@ function commands.execute(g, command)
     local board_index = command.board_index
     if pi ~= g.activePlayer then return fail("not_active_player") end
     local p = g.players[pi + 1]
-    local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
-    if p.totalWorkers - assigned <= 0 then return fail("no_unassigned_workers") end
+    if actions.count_unassigned_workers(p) <= 0 then return fail("no_unassigned_workers") end
     actions.assign_worker_to_structure(g, pi, board_index)
     return ok(nil, { { type = "structure_worker_assigned", player_index = pi, board_index = board_index } })
   end
@@ -234,6 +245,29 @@ function commands.execute(g, command)
     actions.unassign_worker_from_structure(g, pi, board_index)
     return ok(nil, { { type = "structure_worker_unassigned", player_index = pi, board_index = board_index } })
   end
+
+  if command.type == "DEPLOY_WORKER_TO_UNIT_ROW" then
+    local pi = command.player_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+
+    local deployed = actions.deploy_worker_to_unit_row(g, pi)
+    if not deployed then return fail("deploy_worker_failed") end
+
+    return ok(nil, { { type = "worker_deployed_to_unit_row", player_index = pi } })
+  end
+
+  if command.type == "RECLAIM_WORKER_FROM_UNIT_ROW" then
+    local pi = command.player_index
+    local board_index = command.board_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if not board_index then return fail("missing_board_index") end
+
+    local reclaimed = actions.reclaim_worker_from_unit_row(g, pi, board_index)
+    if not reclaimed then return fail("reclaim_worker_failed") end
+
+    return ok(nil, { { type = "worker_reclaimed_from_unit_row", player_index = pi, board_index = board_index } })
+  end
+
 
   if command.type == "PLAY_FROM_HAND_WITH_SACRIFICES" then
     local pi = command.player_index
@@ -380,8 +414,9 @@ function commands.execute(g, command)
       activated = g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key],
     }
     for k, v in pairs(p.resources) do snapshot.resources[k] = v end
-    for i, e in ipairs(p.board) do snapshot.board[i] = { card_id = e.card_id, workers = e.workers or 0 } end
-    for i, sw in ipairs(p.specialWorkers) do snapshot.specialWorkers[i] = { card_id = sw.card_id, assigned_to = sw.assigned_to } end
+    for i, e in ipairs(p.board) do snapshot.board[i] = copy_table(e) end
+    for i, sw in ipairs(p.specialWorkers) do snapshot.specialWorkers[i] = copy_table(sw) end
+    snapshot.workerStatePool = copy_table(p.workerStatePool or {})
 
     local ok_apply = true
     if target_board_index then
@@ -396,7 +431,7 @@ function commands.execute(g, command)
     if ok_apply then
       g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = true
       table.remove(p.hand, hand_index)
-      p.board[#p.board + 1] = { card_id = hand_id }
+      p.board[#p.board + 1] = { card_id = hand_id, state = {} }
       actions.resolve_on_play_triggers(g, pi, hand_id)
     end
 
@@ -407,9 +442,10 @@ function commands.execute(g, command)
       p.workersOn.stone = snapshot.workersOn.stone
       for k, v in pairs(snapshot.resources) do p.resources[k] = v end
       p.board = {}
-      for i, e in ipairs(snapshot.board) do p.board[i] = { card_id = e.card_id, workers = e.workers } end
+      for i, e in ipairs(snapshot.board) do p.board[i] = copy_table(e) end
       p.specialWorkers = {}
-      for i, sw in ipairs(snapshot.specialWorkers) do p.specialWorkers[i] = { card_id = sw.card_id, assigned_to = sw.assigned_to } end
+      for i, sw in ipairs(snapshot.specialWorkers) do p.specialWorkers[i] = copy_table(sw) end
+      p.workerStatePool = copy_table(snapshot.workerStatePool or {})
       if snapshot.activated then
         g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = snapshot.activated
       else

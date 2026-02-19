@@ -8,6 +8,20 @@ local game_state = require("src.game.state")
 
 local actions = {}
 
+
+local function copy_table(t)
+  if type(t) ~= "table" then return t end
+  local out = {}
+  for k, v in pairs(t) do
+    if type(v) == "table" then
+      out[k] = copy_table(v)
+    else
+      out[k] = v
+    end
+  end
+  return out
+end
+
 local function is_undead(card_def)
   if not card_def or not card_def.subtypes then return false end
   for _, st in ipairs(card_def.subtypes) do
@@ -123,7 +137,15 @@ local function destroy_board_entry(player, game_state, board_index)
   for _, sw in ipairs(player.specialWorkers) do
     if sw.assigned_to == board_index then
       sw.assigned_to = nil
+    elseif type(sw.assigned_to) == "table" and sw.assigned_to.type == "field" and sw.assigned_to.board_index == board_index then
+      sw.assigned_to = nil
     end
+  end
+
+  if target.special_worker_index and player.specialWorkers[target.special_worker_index] then
+    local ref = player.specialWorkers[target.special_worker_index]
+    ref.state = copy_table(target.state or ref.state or {})
+    ref.assigned_to = nil
   end
 
   local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
@@ -138,11 +160,13 @@ local function destroy_board_entry(player, game_state, board_index)
     fire_on_ally_death_triggers(player, game_state, t_def)
   end
 
-  player.graveyard[#player.graveyard + 1] = target.card_id
+  player.graveyard[#player.graveyard + 1] = { card_id = target.card_id, state = copy_table(target.state or {}) }
   table.remove(player.board, board_index)
   for _, sw in ipairs(player.specialWorkers) do
     if type(sw.assigned_to) == "number" and sw.assigned_to > board_index then
       sw.assigned_to = sw.assigned_to - 1
+    elseif type(sw.assigned_to) == "table" and sw.assigned_to.type == "field" and sw.assigned_to.board_index and sw.assigned_to.board_index > board_index then
+      sw.assigned_to.board_index = sw.assigned_to.board_index - 1
     end
   end
 
@@ -282,11 +306,21 @@ function actions.count_structure_workers(p)
   return total
 end
 
+function actions.count_field_worker_cards(p)
+  local total = 0
+  for _, entry in ipairs(p.board) do
+    local ok, def = pcall(cards.get_card_def, entry.card_id)
+    if ok and def and def.kind == "Worker" and not entry.special_worker_index then
+      total = total + 1
+    end
+  end
+  return total
+end
+
 function actions.assign_worker_to_resource(g, player_index, resource)
   if player_index ~= g.activePlayer then return g end
   local p = g.players[player_index + 1]
-  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
-  local unassigned = p.totalWorkers - assigned
+  local unassigned = actions.count_unassigned_workers(p)
   if unassigned <= 0 then return g end
   p.workersOn[resource] = p.workersOn[resource] + 1
   return g
@@ -315,8 +349,7 @@ function actions.assign_worker_to_structure(g, player_index, board_index)
     end
   end
   if max_w <= 0 then return g end
-  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
-  if p.totalWorkers - assigned <= 0 then return g end
+  if actions.count_unassigned_workers(p) <= 0 then return g end
   -- Try the requested entry first; if full, find another copy of the same card
   local target = entry
   local target_idx = board_index
@@ -415,7 +448,7 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   -- Remove card from hand and place on board
   local card_id = p.hand[hand_index]
   table.remove(p.hand, hand_index)
-  p.board[#p.board + 1] = { card_id = card_id }
+  p.board[#p.board + 1] = { card_id = card_id, state = {} }
 
   -- Fire on_play triggered abilities
   fire_on_play_triggers(p, g, card_id)
@@ -423,6 +456,54 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   return g
 end
 
+
+
+function actions.deploy_worker_to_unit_row(g, player_index)
+  local p = g.players[player_index + 1]
+  if not p then return false end
+  if player_index ~= g.activePlayer then return false end
+
+  if actions.count_unassigned_workers(p) <= 0 then return false end
+
+  local worker_def = get_faction_worker_def(p.faction)
+  if not worker_def then return false end
+
+  p.workerStatePool = p.workerStatePool or {}
+  local restored_state = nil
+  if #p.workerStatePool > 0 then
+    restored_state = table.remove(p.workerStatePool)
+  end
+  p.board[#p.board + 1] = { card_id = worker_def.id, state = restored_state or {} }
+  return true
+end
+
+function actions.reclaim_worker_from_unit_row(g, player_index, board_index)
+  local p = g.players[player_index + 1]
+  if not p then return false end
+  if player_index ~= g.activePlayer then return false end
+
+  local entry = p.board[board_index]
+  if not entry then return false end
+
+  local ok_def, card_def = pcall(cards.get_card_def, entry.card_id)
+  if not ok_def or not card_def or card_def.kind ~= "Worker" then
+    return false
+  end
+
+  p.workerStatePool = p.workerStatePool or {}
+  p.workerStatePool[#p.workerStatePool + 1] = copy_table(entry.state or {})
+
+  table.remove(p.board, board_index)
+  for _, sw in ipairs(p.specialWorkers) do
+    if type(sw.assigned_to) == "number" and sw.assigned_to > board_index then
+      sw.assigned_to = sw.assigned_to - 1
+    elseif type(sw.assigned_to) == "table" and sw.assigned_to.type == "field" and sw.assigned_to.board_index and sw.assigned_to.board_index > board_index then
+      sw.assigned_to.board_index = sw.assigned_to.board_index - 1
+    end
+  end
+
+  return true
+end
 function actions.resolve_on_play_triggers(g, player_index, card_id)
   local p = g.players[player_index + 1]
   if not p then return end
@@ -458,7 +539,7 @@ function actions.build_structure(g, player_index, card_id)
   end
 
   -- Place on board
-  p.board[#p.board + 1] = { card_id = card_id, workers = 0 }
+  p.board[#p.board + 1] = { card_id = card_id, workers = 0, state = {} }
 
   -- Fire on_play triggered abilities
   if card_def.abilities then
@@ -550,7 +631,9 @@ end
 
 -- Count unassigned regular workers for a player
 function actions.count_unassigned_workers(p)
-  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
+  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone
+    + actions.count_structure_workers(p)
+    + actions.count_field_worker_cards(p)
   return p.totalWorkers - assigned
 end
 
@@ -650,7 +733,7 @@ function actions.play_from_hand(g, player_index, hand_index, sacrifice_targets)
   table.remove(p.hand, hand_index)
 
   -- Add as special worker
-  p.specialWorkers[#p.specialWorkers + 1] = { card_id = card_id, assigned_to = nil }
+  p.specialWorkers[#p.specialWorkers + 1] = { card_id = card_id, assigned_to = nil, state = {} }
 
   return true
 end
@@ -701,6 +784,10 @@ function actions.assign_special_worker(g, player_index, sw_index, target)
     end
     sw.assigned_to = target_bi
     return true
+  elseif type(target) == "table" and target.type == "field" then
+    p.board[#p.board + 1] = { card_id = sw.card_id, special_worker_index = sw_index, state = copy_table(sw.state or {}) }
+    sw.assigned_to = { type = "field", board_index = #p.board }
+    return true
   end
   return false
 end
@@ -711,6 +798,23 @@ function actions.unassign_special_worker(g, player_index, sw_index)
   local p = g.players[player_index + 1]
   local sw = p.specialWorkers[sw_index]
   if not sw or sw.assigned_to == nil then return false end
+  if type(sw.assigned_to) == "table" and sw.assigned_to.type == "field" then
+    local bi = sw.assigned_to.board_index
+    if bi and p.board[bi] then
+      local field_entry = p.board[bi]
+      if field_entry then
+        sw.state = copy_table(field_entry.state or sw.state or {})
+      end
+      table.remove(p.board, bi)
+      for _, other in ipairs(p.specialWorkers) do
+        if type(other.assigned_to) == "number" and other.assigned_to > bi then
+          other.assigned_to = other.assigned_to - 1
+        elseif type(other.assigned_to) == "table" and other.assigned_to.type == "field" and other.assigned_to.board_index and other.assigned_to.board_index > bi then
+          other.assigned_to.board_index = other.assigned_to.board_index - 1
+        end
+      end
+    end
+  end
   sw.assigned_to = nil
   return true
 end
