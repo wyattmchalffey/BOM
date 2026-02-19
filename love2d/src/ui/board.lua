@@ -544,27 +544,65 @@ local function draw_button(bx, by, bw, bh, label, is_hov, is_press, accent_r, ac
 end
 
 -- Group board entries by card_id, filtered by kind ("Structure" or nil for units/other)
-local function group_board_entries(player, kind_filter)
+local function group_board_entries(player, kind_filter, forced_singletons)
   local groups = {}
   local group_map = {}
+  forced_singletons = forced_singletons or {}
   for si, entry in ipairs(player.board) do
     local ok, def = pcall(cards.get_card_def, entry.card_id)
     if ok and def then
       local dominated = (kind_filter == "Structure") and (def.kind == "Structure")
       local is_unit = (kind_filter == "Unit") and (def.kind ~= "Structure")
       if dominated or is_unit then
-        if group_map[entry.card_id] then
-          local g = groups[group_map[entry.card_id]]
+        local key = entry.card_id
+        if is_unit then
+          local st = entry.state or {}
+          if forced_singletons[si] then
+            key = "single:" .. tostring(si)
+          elseif st.stack_id ~= nil then
+            key = "stack:" .. tostring(st.stack_id)
+          end
+        end
+
+        if group_map[key] then
+          local g = groups[group_map[key]]
           g.count = g.count + 1
           g.entries[#g.entries + 1] = si
         else
-          group_map[entry.card_id] = #groups + 1
+          group_map[key] = #groups + 1
           groups[#groups + 1] = { card_id = entry.card_id, count = 1, first_si = si, scale = entry.scale, entries = { si } }
         end
       end
     end
   end
   return groups
+end
+
+local function build_forced_singletons(pi, game_state, combat_ui, local_player_index)
+  local forced = {}
+  local c = game_state and game_state.pendingCombat
+  if c then
+    if c.attacker == pi then
+      for _, a in ipairs(c.attackers or {}) do
+        if a and a.board_index then forced[a.board_index] = true end
+      end
+    end
+    if c.defender == pi then
+      for _, b in ipairs(c.blockers or {}) do
+        if b and b.blocker_board_index then forced[b.blocker_board_index] = true end
+      end
+    end
+  end
+
+  if combat_ui and local_player_index == pi then
+    for _, a in ipairs(combat_ui.pending_attack_declarations or {}) do
+      if a and a.attacker_board_index then forced[a.attacker_board_index] = true end
+    end
+    for _, b in ipairs(combat_ui.pending_block_assignments or {}) do
+      if b and b.blocker_board_index then forced[b.blocker_board_index] = true end
+    end
+  end
+  return forced
 end
 
 -- Draw a single battlefield tile (used for base, structures, and units)
@@ -923,7 +961,8 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     end
 
     -- Draw units in front row (centered)
-    local unit_groups = group_board_entries(player, "Unit")
+    local forced_singletons = build_forced_singletons(pi, game_state, hand_state, local_player_index)
+    local unit_groups = group_board_entries(player, "Unit", forced_singletons)
     local unit_start_x = centered_row_x(front_ax, front_aw, #unit_groups)
     for gi, group in ipairs(unit_groups) do
       local ok, udef = pcall(cards.get_card_def, group.card_id)
@@ -1325,7 +1364,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
 end
 
 -- Hit test: return "activate_base" | "blueprint" | "worker_*" | "resource_*" | "unassigned_pool" | "pass" | "end_turn" | "hand_card" | nil
-function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
+function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, combat_ui)
   local_player_index = local_player_index or 0
   -- Check hand cards first (drawn on top of everything; local player only)
   local local_p = game_state.players[local_player_index + 1]
@@ -1469,7 +1508,8 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index)
 
     -- Hit test units (front row)
     local front_ax, front_ay, front_aw = board.front_row_rect(px, py, pw, ph, panel)
-    local unit_groups = group_board_entries(player, "Unit")
+    local forced_singletons = build_forced_singletons(pi, game_state, combat_ui, local_player_index)
+    local unit_groups = group_board_entries(player, "Unit", forced_singletons)
     do
       local uk, up, ue = hit_test_row(front_ax, front_ay, front_aw, unit_groups, "front")
       if uk then return uk, up, ue end
@@ -1588,7 +1628,7 @@ function board.base_center_for_player(panel_player_index, local_player_index)
   return bx + bw / 2, by + bh / 2
 end
 
-function board.board_entry_center(game_state, panel_player_index, board_index, local_player_index)
+function board.board_entry_center(game_state, panel_player_index, board_index, local_player_index, combat_ui)
   local_player_index = local_player_index or 0
   local panel = (local_player_index == 0) and panel_player_index or (1 - panel_player_index)
   local px, py, pw, ph = board.panel_rect(panel)
@@ -1604,7 +1644,8 @@ function board.board_entry_center(game_state, panel_player_index, board_index, l
     groups = group_board_entries(player, "Structure")
     row_ax, row_ay, row_aw = board.back_row_rect(px, py, pw, ph, panel)
   else
-    groups = group_board_entries(player, "Unit")
+    local forced_singletons = build_forced_singletons(panel_player_index, game_state, combat_ui, local_player_index)
+    groups = group_board_entries(player, "Unit", forced_singletons)
     row_ax, row_ay, row_aw = board.front_row_rect(px, py, pw, ph, panel)
   end
 

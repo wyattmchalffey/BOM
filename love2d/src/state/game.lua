@@ -241,6 +241,10 @@ function GameState:dispatch_command(command)
     result = commands.execute(self.game_state, command)
   end
 
+  if command and command.type ~= "DECLARE_ATTACKERS" and #self.pending_attack_declarations > 0 then
+    self:_clear_pending_attack_declarations()
+  end
+
   replay.append(self.command_log, command, result, self.game_state)
   if not result.ok then
     sound.play("error")
@@ -471,6 +475,11 @@ end
 
 
 
+
+function GameState:_clear_pending_attack_declarations()
+  self.pending_attack_declarations = {}
+end
+
 function GameState:_set_pending_block(blocker_board_index, attacker_board_index)
   local replaced = false
   for _, blk in ipairs(self.pending_block_assignments) do
@@ -489,33 +498,34 @@ function GameState:_set_pending_block(blocker_board_index, attacker_board_index)
 end
 
 function GameState:_draw_attack_declaration_arrows()
-  local attacker_pi = self.local_player_index
-  local defender_pi = 1 - attacker_pi
+  local local_attacker = self.local_player_index
+  local local_defender = 1 - local_attacker
 
+  -- Local staged declarations (before submit)
   for _, decl in ipairs(self.pending_attack_declarations or {}) do
-    local ax, ay = board.board_entry_center(self.game_state, attacker_pi, decl.attacker_board_index, self.local_player_index)
+    local ax, ay = board.board_entry_center(self.game_state, local_attacker, decl.attacker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
     local tx, ty
     if decl.target and decl.target.type == "base" then
-      tx, ty = board.base_center_for_player(defender_pi, self.local_player_index)
+      tx, ty = board.base_center_for_player(local_defender, self.local_player_index)
     elseif decl.target and decl.target.type == "board" then
-      tx, ty = board.board_entry_center(self.game_state, defender_pi, decl.target.index, self.local_player_index)
+      tx, ty = board.board_entry_center(self.game_state, local_defender, decl.target.index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
     end
     if ax and ay and tx and ty then
       self:_draw_arrow(ax, ay, tx, ty, { 1.0, 0.3, 0.3, 0.9 })
     end
   end
 
-
-
-  local committed = self.game_state.pendingCombat and self.game_state.pendingCombat.attackers or nil
-  if committed and self.game_state.pendingCombat.attacker == attacker_pi then
+  -- Committed combat declarations (visible to both players)
+  local c = self.game_state.pendingCombat
+  local committed = c and c.attackers or nil
+  if committed then
     for _, decl in ipairs(committed) do
-      local ax, ay = board.board_entry_center(self.game_state, attacker_pi, decl.board_index, self.local_player_index)
+      local ax, ay = board.board_entry_center(self.game_state, c.attacker, decl.board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
       local tx, ty
       if decl.target and decl.target.type == "base" then
-        tx, ty = board.base_center_for_player(defender_pi, self.local_player_index)
+        tx, ty = board.base_center_for_player(c.defender, self.local_player_index)
       elseif decl.target and decl.target.type == "board" then
-        tx, ty = board.board_entry_center(self.game_state, defender_pi, decl.target.index, self.local_player_index)
+        tx, ty = board.board_entry_center(self.game_state, c.defender, decl.target.index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
       end
       if ax and ay and tx and ty then
         self:_draw_arrow(ax, ay, tx, ty, { 1.0, 0.45, 0.45, 0.7 })
@@ -523,15 +533,12 @@ function GameState:_draw_attack_declaration_arrows()
     end
   end
 
-
-
-  local c = self.game_state.pendingCombat
   if c and c.stage == "DECLARED" and c.defender == self.local_player_index then
     local defender_pi = self.local_player_index
     local attacker_pi2 = c.attacker
     for _, blk in ipairs(self.pending_block_assignments or {}) do
-      local bx, by = board.board_entry_center(self.game_state, defender_pi, blk.blocker_board_index, self.local_player_index)
-      local ax, ay = board.board_entry_center(self.game_state, attacker_pi2, blk.attacker_board_index, self.local_player_index)
+      local bx, by = board.board_entry_center(self.game_state, defender_pi, blk.blocker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+      local ax, ay = board.board_entry_center(self.game_state, attacker_pi2, blk.attacker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
       if bx and by and ax and ay then
         self:_draw_arrow(bx, by, ax, ay, { 0.35, 0.75, 1.0, 0.9 })
       end
@@ -540,8 +547,8 @@ function GameState:_draw_attack_declaration_arrows()
 
   if c and c.blockers and #c.blockers > 0 then
     for _, blk in ipairs(c.blockers) do
-      local bx, by = board.board_entry_center(self.game_state, c.defender, blk.blocker_board_index, self.local_player_index)
-      local ax, ay = board.board_entry_center(self.game_state, c.attacker, blk.attacker_board_index, self.local_player_index)
+      local bx, by = board.board_entry_center(self.game_state, c.defender, blk.blocker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+      local ax, ay = board.board_entry_center(self.game_state, c.attacker, blk.attacker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
       if bx and by and ax and ay then
         self:_draw_arrow(bx, by, ax, ay, { 0.2, 0.65, 0.95, 0.7 })
       end
@@ -549,13 +556,13 @@ function GameState:_draw_attack_declaration_arrows()
   end
 
   if self.drag and self.drag.from == "attack_unit" and self.drag.player_index == self.local_player_index then
-    local ax, ay = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index)
+    local ax, ay = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
     if ax and ay then
       self:_draw_arrow(ax, ay, self.drag.display_x, self.drag.display_y, { 1.0, 0.8, 0.2, 0.85 })
     end
   end
   if self.drag and self.drag.from == "block_unit" and self.drag.player_index == self.local_player_index then
-    local bx, by = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index)
+    local bx, by = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
     if bx and by then
       self:_draw_arrow(bx, by, self.drag.display_x, self.drag.display_y, { 0.35, 0.75, 1.0, 0.85 })
     end
@@ -572,6 +579,8 @@ function GameState:draw()
     y_offsets = self.hand_y_offsets,
     eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or (self.pending_upgrade and self.pending_upgrade.eligible_hand_indices) or nil,
     sacrifice_eligible_indices = (self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices) or (self.pending_upgrade and self.pending_upgrade.eligible_board_indices) or (self.pending_hand_sacrifice and {}) or nil,
+    pending_attack_declarations = self.pending_attack_declarations,
+    pending_block_assignments = self.pending_block_assignments,
   }
   board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
   self:_draw_attack_declaration_arrows()
@@ -1089,10 +1098,16 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
+  local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
   local idx = extra  -- backwards compat: numeric index for hand_card, structure, etc.
+
+  -- If attack declarations are staged and player performs another action, clear staged attack arrows.
+  if #self.pending_attack_declarations > 0 and kind and kind ~= "pass" and kind ~= "structure" then
+    self:_clear_pending_attack_declarations()
+  end
   if not kind then
     -- Clicked on empty space: cancel pending selection or deselect hand card
+    self:_clear_pending_attack_declarations()
     if self.pending_play_unit then
       self.pending_play_unit = nil
       sound.play("click")
@@ -1460,7 +1475,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     self.pending_play_unit = nil
     self.pending_sacrifice = nil
     self.pending_upgrade = nil
-    self.pending_attack_declarations = {}
+    self:_clear_pending_attack_declarations()
     self.pending_block_assignments = {}
     -- Show turn banner
     self.turn_banner_timer = 1.2
@@ -1477,7 +1492,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         declarations = self.pending_attack_declarations,
       })
       if result.ok then
-        self.pending_attack_declarations = {}
+        self:_clear_pending_attack_declarations()
         self.pending_block_assignments = {}
         sound.play("whoosh")
       else
@@ -1716,13 +1731,6 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  if kind == "structure" and pi == self.local_player_index and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx) then
-    local mx, my = love.mouse.getPosition()
-    self.drag = { player_index = pi, from = "attack_unit", display_x = mx, display_y = my, board_index = idx }
-    sound.play("whoosh", 0.6)
-    return
-  end
-
   if kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" then
     sound.play("pop")
     local from
@@ -1808,7 +1816,7 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   if deck_viewer.is_open() then return end
 
   if not self.drag then return end
-  local kind, pi, drop_extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
+  local kind, pi, drop_extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
 
   -- Feature 2: Invalid drop zone -> snap back
   local allow_opponent_drop = (self.drag.from == "attack_unit" or self.drag.from == "block_unit") and kind and pi == (1 - self.drag.player_index)
@@ -2048,7 +2056,7 @@ end
 
 function GameState:mousemoved(x, y, dx, dy, istouch)
   -- Update hover state for UI highlights
-  local kind, pi, idx = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
+  local kind, pi, idx = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
   if kind then
     self.hover = { kind = kind, pi = pi, idx = idx }
   else
