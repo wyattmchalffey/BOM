@@ -66,7 +66,7 @@ effect_handlers.play_unit = function(ability, player, g)
     if ok and card_def and card_def.kind == "Unit" then
       local match = true
       if args.faction and card_def.faction ~= args.faction then match = false end
-      if args.tier and (card_def.tier or 0) > args.tier then match = false end
+      if args.tier and (card_def.tier or 0) ~= args.tier then match = false end
       if args.subtypes and card_def.subtypes then
         local has_subtype = false
         for _, req_sub in ipairs(args.subtypes) do
@@ -137,7 +137,7 @@ function abilities.find_matching_hand_indices(player, effect_args)
     if ok and card_def and card_def.kind == "Unit" then
       local match = true
       if args.faction and card_def.faction ~= args.faction then match = false end
-      if args.tier and (card_def.tier or 0) > args.tier then match = false end
+      if args.tier and (card_def.tier or 0) ~= args.tier then match = false end
       if args.subtypes and card_def.subtypes then
         local has_subtype = false
         for _, req in ipairs(args.subtypes) do
