@@ -25,6 +25,14 @@ local function ok(meta, events)
   return { ok = true, reason = "ok", meta = meta, events = events or {} }
 end
 
+local function has_subtype(card_def, subtype)
+  if not card_def or not card_def.subtypes then return false end
+  for _, st in ipairs(card_def.subtypes) do
+    if st == subtype then return true end
+  end
+  return false
+end
+
 local function can_activate(g, player_index, card_def, source_key, ability_index)
   if g.phase ~= "MAIN" then return false end
   if player_index ~= g.activePlayer then return false end
@@ -310,6 +318,109 @@ function commands.execute(g, command)
     local unassigned = actions.unassign_special_worker(g, pi, sw_index)
     if not unassigned then return fail("unassign_failed") end
     return ok(nil, { { type = "special_worker_unassigned", player_index = pi, sw_index = sw_index } })
+  end
+
+  if command.type == "SACRIFICE_UPGRADE_PLAY" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local hand_index = command.hand_index
+    local target_board_index = command.target_board_index
+    local target_worker = command.target_worker
+    local target_worker_extra = command.target_worker_extra
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index or not hand_index then return fail("invalid_upgrade_payload") end
+    if not target_board_index and not target_worker then return fail("invalid_upgrade_payload") end
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+
+    local card_def
+    local source_key
+    if source.type == "board" then
+      local entry = p.board[source.index]
+      if not entry then return fail("missing_board_entry") end
+      card_def = cards.get_card_def(entry.card_id)
+      source_key = "board:" .. source.index .. ":" .. ability_index
+    else
+      return fail("invalid_source_type")
+    end
+
+    if not card_def or not card_def.abilities then return fail("no_abilities") end
+    local ab = card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "sacrifice_upgrade" then return fail("not_sacrifice_upgrade_ability") end
+    if not can_activate(g, pi, card_def, source_key, ability_index) then return fail("ability_not_activatable") end
+
+    local sacrificed_tier = 0
+    if target_board_index then
+      local entry = p.board[target_board_index]
+      if not entry then return fail("invalid_sacrifice_target") end
+      local ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
+      if not ok_t or not tdef or tdef.kind == "Structure" or not has_subtype(tdef, "Warrior") then
+        return fail("invalid_sacrifice_target")
+      end
+      sacrificed_tier = tdef.tier or 0
+    else
+      sacrificed_tier = 0
+    end
+
+    if hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
+    local hand_id = p.hand[hand_index]
+    local ok_h, hdef = pcall(cards.get_card_def, hand_id)
+    if not ok_h or not hdef or not has_subtype(hdef, "Warrior") or (hdef.tier or 0) ~= (sacrificed_tier + 1) then
+      return fail("hand_card_not_eligible")
+    end
+
+    local snapshot = {
+      totalWorkers = p.totalWorkers,
+      workersOn = { food = p.workersOn.food, wood = p.workersOn.wood, stone = p.workersOn.stone },
+      resources = {},
+      board = {},
+      specialWorkers = {},
+      activated = g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key],
+    }
+    for k, v in pairs(p.resources) do snapshot.resources[k] = v end
+    for i, e in ipairs(p.board) do snapshot.board[i] = { card_id = e.card_id, workers = e.workers or 0 } end
+    for i, sw in ipairs(p.specialWorkers) do snapshot.specialWorkers[i] = { card_id = sw.card_id, assigned_to = sw.assigned_to } end
+
+    local ok_apply = true
+    if target_board_index then
+      ok_apply = actions.sacrifice_board_entry(g, pi, target_board_index)
+    else
+      ok_apply = actions.sacrifice_worker_token(g, pi, target_worker, target_worker_extra)
+    end
+
+    if ok_apply then
+      if hand_index < 1 or hand_index > #p.hand then ok_apply = false end
+    end
+    if ok_apply then
+      g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = true
+      table.remove(p.hand, hand_index)
+      p.board[#p.board + 1] = { card_id = hand_id }
+    end
+
+    if not ok_apply then
+      p.totalWorkers = snapshot.totalWorkers
+      p.workersOn.food = snapshot.workersOn.food
+      p.workersOn.wood = snapshot.workersOn.wood
+      p.workersOn.stone = snapshot.workersOn.stone
+      for k, v in pairs(snapshot.resources) do p.resources[k] = v end
+      p.board = {}
+      for i, e in ipairs(snapshot.board) do p.board[i] = { card_id = e.card_id, workers = e.workers } end
+      p.specialWorkers = {}
+      for i, sw in ipairs(snapshot.specialWorkers) do p.specialWorkers[i] = { card_id = sw.card_id, assigned_to = sw.assigned_to } end
+      if snapshot.activated then
+        g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = snapshot.activated
+      else
+        g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = nil
+      end
+      return fail("upgrade_failed")
+    end
+
+    return ok(
+      { card_id = hand_id, source_type = source.type, ability_index = ability_index },
+      { { type = "unit_played_from_sacrifice_upgrade", player_index = pi, card_id = hand_id } }
+    )
   end
 
   if command.type == "SACRIFICE_UNIT" then

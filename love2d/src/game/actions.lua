@@ -429,6 +429,43 @@ function actions.sacrifice_worker(g, player_index, card_def, source_key, ability
   return g
 end
 
+function actions.sacrifice_board_entry(g, player_index, target_board_index)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
+  local p = g.players[player_index + 1]
+  local target = p.board[target_board_index]
+  if not target then return false end
+
+  if target.workers and target.workers > 0 then
+    target.workers = 0
+  end
+  for _, sw in ipairs(p.specialWorkers) do
+    if sw.assigned_to == target_board_index then
+      sw.assigned_to = nil
+    end
+  end
+
+  local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
+  if t_ok and t_def and t_def.abilities then
+    for _, ab in ipairs(t_def.abilities) do
+      if ab.type == "triggered" and ab.trigger == "on_destroyed" then
+        abilities.resolve(ab, p, g)
+      end
+    end
+  end
+  if t_ok and t_def then
+    fire_on_ally_death_triggers(p, g, t_def)
+  end
+
+  table.remove(p.board, target_board_index)
+  for _, sw in ipairs(p.specialWorkers) do
+    if type(sw.assigned_to) == "number" and sw.assigned_to > target_board_index then
+      sw.assigned_to = sw.assigned_to - 1
+    end
+  end
+
+  return true
+end
+
 -- Sacrifice a board entry to produce a resource
 function actions.sacrifice_unit(g, player_index, card_def, source_key, ability_index, target_board_index)
   if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
@@ -443,44 +480,8 @@ function actions.sacrifice_unit(g, player_index, card_def, source_key, ability_i
   local key = tostring(player_index) .. ":" .. source_key
   if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
 
-  local target = p.board[target_board_index]
-  if not target then return g end
-
-  -- Unassign any workers on the sacrificed entry
-  if target.workers and target.workers > 0 then
-    target.workers = 0
-  end
-  -- Unassign special workers assigned to this entry
-  for _, sw in ipairs(p.specialWorkers) do
-    if sw.assigned_to == target_board_index then
-      sw.assigned_to = nil
-    end
-  end
-
-  -- Fire on_destroyed triggers on the sacrificed card
-  local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
-  if t_ok and t_def and t_def.abilities then
-    for _, ab in ipairs(t_def.abilities) do
-      if ab.type == "triggered" and ab.trigger == "on_destroyed" then
-        abilities.resolve(ab, p, g)
-      end
-    end
-  end
-
-  -- Fire ally-death triggers (e.g. Crypt) for the destroyed ally.
-  if t_ok and t_def then
-    fire_on_ally_death_triggers(p, g, t_def)
-  end
-
-  -- Remove from board
-  table.remove(p.board, target_board_index)
-
-  -- Fix special worker assignments that pointed to indices after the removed one
-  for _, sw in ipairs(p.specialWorkers) do
-    if type(sw.assigned_to) == "number" and sw.assigned_to > target_board_index then
-      sw.assigned_to = sw.assigned_to - 1
-    end
-  end
+  local removed = actions.sacrifice_board_entry(g, player_index, target_board_index)
+  if not removed then return g end
 
   -- Produce the resource
   local args = ability.effect_args or {}
