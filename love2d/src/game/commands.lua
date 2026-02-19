@@ -6,6 +6,7 @@
 local actions = require("src.game.actions")
 local cards = require("src.game.cards")
 local abilities = require("src.game.abilities")
+local combat = require("src.game.combat")
 
 local commands = {}
 
@@ -86,6 +87,24 @@ function commands.execute(g, command)
       { active_player = g.activePlayer, turn_number = g.turnNumber },
       { { type = "turn_ended", player_index = ending_player }, { type = "active_player_changed", player_index = g.activePlayer } }
     )
+  end
+
+  if command.type == "DECLARE_ATTACKERS" then
+    local ok_decl, reason = combat.declare_attackers(g, command.player_index, command.declarations)
+    if not ok_decl then return fail(reason) end
+    return ok(nil, { { type = "attackers_declared", player_index = command.player_index } })
+  end
+
+  if command.type == "ASSIGN_BLOCKERS" then
+    local ok_blk, reason = combat.assign_blockers(g, command.player_index, command.assignments)
+    if not ok_blk then return fail(reason) end
+    return ok(nil, { { type = "blockers_assigned", player_index = command.player_index } })
+  end
+
+  if command.type == "RESOLVE_COMBAT" then
+    local ok_res, reason = combat.resolve(g)
+    if not ok_res then return fail(reason) end
+    return ok(nil, { { type = "combat_resolved" } })
   end
 
   if command.type == "DEBUG_ADD_RESOURCE" then
