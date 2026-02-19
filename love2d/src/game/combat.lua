@@ -1,4 +1,5 @@
 local cards = require("src.game.cards")
+local abilities = require("src.game.abilities")
 
 local combat = {}
 
@@ -24,22 +25,154 @@ local function ensure_state(entry)
   return entry.state
 end
 
-local function get_attacker(g, combat_state, attacker_board_index)
+local function copy_table(t)
+  if type(t) ~= "table" then return t end
+  local out = {}
+  for k, v in pairs(t) do
+    out[k] = copy_table(v)
+  end
+  return out
+end
+
+local function is_undead(card_def)
+  if not card_def or not card_def.subtypes then return false end
+  for _, st in ipairs(card_def.subtypes) do
+    if st == "Undead" then return true end
+  end
+  return false
+end
+
+local function fire_on_ally_death_triggers(player, g, dead_card_def)
+  for _, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and card_def.abilities then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "triggered" and ab.trigger == "on_ally_death" then
+          local args = ab.effect_args or {}
+          local blocked = args.condition == "non_undead" and is_undead(dead_card_def)
+          if not blocked then
+            abilities.resolve(ab, player, g)
+          end
+        end
+      end
+    end
+  end
+end
+
+local function destroy_board_entry(player, g, board_index)
+  local target = player.board[board_index]
+  if not target then return false end
+
+  if target.workers and target.workers > 0 then
+    target.workers = 0
+  end
+  for _, sw in ipairs(player.specialWorkers or {}) do
+    if sw.assigned_to == board_index then
+      sw.assigned_to = nil
+    elseif type(sw.assigned_to) == "table" and sw.assigned_to.type == "field" and sw.assigned_to.board_index == board_index then
+      sw.assigned_to = nil
+    end
+  end
+
+  if target.special_worker_index and player.specialWorkers and player.specialWorkers[target.special_worker_index] then
+    local ref = player.specialWorkers[target.special_worker_index]
+    ref.state = copy_table(target.state or ref.state or {})
+    ref.assigned_to = nil
+  end
+
+  local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
+  if t_ok and t_def and t_def.abilities then
+    for _, ab in ipairs(t_def.abilities) do
+      if ab.type == "triggered" and ab.trigger == "on_destroyed" then
+        abilities.resolve(ab, player, g)
+      end
+    end
+  end
+  if t_ok and t_def then
+    fire_on_ally_death_triggers(player, g, t_def)
+  end
+
+  player.graveyard[#player.graveyard + 1] = { card_id = target.card_id, state = copy_table(target.state or {}) }
+  table.remove(player.board, board_index)
+
+  for _, sw in ipairs(player.specialWorkers or {}) do
+    if type(sw.assigned_to) == "number" and sw.assigned_to > board_index then
+      sw.assigned_to = sw.assigned_to - 1
+    elseif type(sw.assigned_to) == "table" and sw.assigned_to.type == "field" and sw.assigned_to.board_index and sw.assigned_to.board_index > board_index then
+      sw.assigned_to.board_index = sw.assigned_to.board_index - 1
+    end
+  end
+
+  return true
+end
+
+local function can_target_unit(attacker_def, target_entry)
+  local tstate = ensure_state(target_entry)
+  if tstate.rested then return true end
+  return has_static_effect(attacker_def, "can_attack_non_rested")
+end
+
+local function get_attacker(combat_state, attacker_board_index)
   for _, a in ipairs(combat_state.attackers or {}) do
     if a.board_index == attacker_board_index then return a end
   end
   return nil
 end
 
-local function can_target_unit(attacker_def, target_entry, target_def)
-  local tstate = ensure_state(target_entry)
-  if tstate.rested then return true end
-  return has_static_effect(attacker_def, "can_attack_non_rested")
+local function unstack_attack_group(combat_state, stack_id)
+  if not stack_id then return end
+  for _, a in ipairs(combat_state.attackers or {}) do
+    if a.attack_stack_id == stack_id then
+      a.attack_stack_id = nil
+    end
+  end
+end
+
+local function get_blockers_for_attacker(combat_state, attacker_board_index)
+  local out = {}
+  for _, b in ipairs(combat_state.blockers or {}) do
+    if b.attacker_board_index == attacker_board_index then
+      out[#out + 1] = b.blocker_board_index
+    end
+  end
+  return out
+end
+
+local function queue_damage(q, side, board_index, amount, source_def)
+  if amount <= 0 then return end
+  q[#q + 1] = {
+    side = side,
+    board_index = board_index,
+    amount = amount,
+    deathtouch = has_keyword(source_def, "deathtouch"),
+  }
+end
+
+local function apply_damage_queue(g, atk_player, def_player, q)
+  for _, ev in ipairs(q) do
+    local player = (ev.side == "atk") and atk_player or def_player
+    local entry = player.board[ev.board_index]
+    if entry then
+      local st = ensure_state(entry)
+      st.damage = (st.damage or 0) + ev.amount
+      if ev.deathtouch then st.marked_for_death = true end
+    end
+  end
+end
+
+local function build_first_strike_flags(player)
+  local flags = {}
+  for i, entry in ipairs(player.board) do
+    local ok, def = pcall(cards.get_card_def, entry.card_id)
+    flags[i] = ok and def and has_keyword(def, "first_strike") or false
+  end
+  return flags
 end
 
 function combat.declare_attackers(g, player_index, declarations)
   if g.phase ~= "MAIN" then return false, "wrong_phase" end
   if player_index ~= g.activePlayer then return false, "not_active_player" end
+  if g.pendingCombat then return false, "combat_already_pending" end
   if type(declarations) ~= "table" or #declarations == 0 then return false, "invalid_declarations" end
 
   local defender_index = (player_index == 0) and 1 or 0
@@ -59,13 +192,20 @@ function combat.declare_attackers(g, player_index, declarations)
     local bi = decl.attacker_board_index
     if type(bi) ~= "number" or seen[bi] then return false, "invalid_attacker" end
     seen[bi] = true
+
     local entry = atk_player.board[bi]
     if not entry then return false, "missing_attacker" end
+
     local card_def = cards.get_card_def(entry.card_id)
-    if not card_def or (card_def.kind ~= "Unit" and card_def.kind ~= "Worker") then return false, "attacker_not_unit" end
+    if not card_def or (card_def.kind ~= "Unit" and card_def.kind ~= "Worker") then
+      return false, "attacker_not_unit"
+    end
 
     local estate = ensure_state(entry)
     if estate.rested then return false, "attacker_rested" end
+    if has_keyword(card_def, "crew") and not estate.crewed then
+      return false, "attacker_not_crewed"
+    end
 
     local target = decl.target
     if type(target) ~= "table" or (target.type ~= "base" and target.type ~= "board") then
@@ -73,22 +213,20 @@ function combat.declare_attackers(g, player_index, declarations)
     end
 
     if target.type == "board" then
-      local te = def_player.board[target.index]
-      if not te then return false, "missing_target" end
-      local tdef = cards.get_card_def(te.card_id)
+      local target_entry = def_player.board[target.index]
+      if not target_entry then return false, "missing_target" end
+      local tdef = cards.get_card_def(target_entry.card_id)
       if not tdef then return false, "missing_target" end
       if tdef.kind ~= "Unit" and tdef.kind ~= "Worker" and tdef.kind ~= "Structure" then
         return false, "invalid_target_kind"
       end
-      if (tdef.kind == "Unit" or tdef.kind == "Worker") and not can_target_unit(card_def, te, tdef) then
+      if (tdef.kind == "Unit" or tdef.kind == "Worker") and not can_target_unit(card_def, target_entry) then
         return false, "target_unit_not_rested"
       end
     end
 
-    -- Move out of board stacks when declared.
     local stack_id = estate.stack_id
     estate.stack_id = nil
-
     if not has_keyword(card_def, "vigilance") then
       estate.rested = true
     end
@@ -112,6 +250,7 @@ function combat.assign_blockers(g, player_index, assignments)
   if type(assignments) ~= "table" then return false, "invalid_assignments" end
 
   local def_player = g.players[c.defender + 1]
+  local atk_player = g.players[c.attacker + 1]
   local seen_blockers = {}
 
   for _, asn in ipairs(assignments) do
@@ -133,10 +272,8 @@ function combat.assign_blockers(g, player_index, assignments)
     local bstate = ensure_state(blocker_entry)
     if bstate.rested then return false, "blocker_rested" end
 
-    local attacker = get_attacker(g, c, attacker_index)
+    local attacker = get_attacker(c, attacker_index)
     if not attacker then return false, "missing_attacker" end
-
-    local atk_player = g.players[c.attacker + 1]
     local attacker_entry = atk_player.board[attacker.board_index]
     if not attacker_entry then
       attacker.invalidated = true
@@ -147,12 +284,10 @@ function combat.assign_blockers(g, player_index, assignments)
       end
     end
 
-    -- Blockers from stacks also unstack.
     bstate.stack_id = nil
     bstate.rested = true
 
-    -- If blocker is assigned to one attacker from declaration stack, pull it out of visual stack.
-    attacker.attack_stack_id = nil
+    unstack_attack_group(c, attacker.attack_stack_id)
 
     c.blockers[#c.blockers + 1] = {
       blocker_board_index = blocker_index,
@@ -164,43 +299,21 @@ function combat.assign_blockers(g, player_index, assignments)
   return true, "ok"
 end
 
-local function get_blockers_for_attacker(c, attacker_board_index)
-  local out = {}
-  for _, b in ipairs(c.blockers or {}) do
-    if b.attacker_board_index == attacker_board_index then
-      out[#out + 1] = b.blocker_board_index
-    end
-  end
-  return out
-end
-
-local function schedule_damage(damage_events, side, board_index, amount, source_has_deathtouch)
-  if amount <= 0 then return end
-  damage_events[#damage_events + 1] = {
-    side = side,
-    board_index = board_index,
-    amount = amount,
-    deathtouch = source_has_deathtouch,
-  }
-end
-
-local function apply_board_damage(player, board_index, amount)
-  local entry = player.board[board_index]
-  if not entry then return end
-  local state = ensure_state(entry)
-  state.damage = (state.damage or 0) + amount
-end
-
 function combat.resolve(g)
   local c = g.pendingCombat
   if not c then return false, "no_pending_combat" end
-  if c.stage ~= "DECLARED" and c.stage ~= "BLOCKERS_ASSIGNED" then return false, "invalid_combat_stage" end
+  if c.stage ~= "DECLARED" and c.stage ~= "BLOCKERS_ASSIGNED" then
+    return false, "invalid_combat_stage"
+  end
 
   local atk_player = g.players[c.attacker + 1]
   local def_player = g.players[c.defender + 1]
+  local atk_first = build_first_strike_flags(atk_player)
+  local def_first = build_first_strike_flags(def_player)
 
-  local damage_queue = {}
-  local base_damage = 0
+  local first_q, normal_q = {}, {}
+  local base_damage_first = 0
+  local base_damage_normal = 0
 
   for _, attacker in ipairs(c.attackers) do
     if not attacker.invalidated then
@@ -208,45 +321,62 @@ function combat.resolve(g)
       if atk_entry then
         local atk_def = cards.get_card_def(atk_entry.card_id)
         local atk_state = ensure_state(atk_entry)
-        local atk_hp = (atk_def.health or 0) - (atk_state.damage or 0)
-        if atk_hp > 0 then
+        if has_keyword(atk_def, "crew") and not atk_state.crewed then
+          attacker.invalidated = true
+        else
           local blockers = get_blockers_for_attacker(c, attacker.board_index)
+          local queue_for_attacker = atk_first[attacker.board_index] and first_q or normal_q
+
           if #blockers > 0 then
             local remaining_atk = atk_def.attack or 0
             for _, bi in ipairs(blockers) do
               local b_entry = def_player.board[bi]
               if b_entry then
                 local b_def = cards.get_card_def(b_entry.card_id)
+                local b_queue = def_first[bi] and first_q or normal_q
                 local b_state = ensure_state(b_entry)
-                local b_hp = (b_def.health or 0) - (b_state.damage or 0)
-                if b_hp > 0 then
-                  local to_blocker = math.min(remaining_atk, b_hp)
-                  schedule_damage(damage_queue, "def", bi, to_blocker, has_keyword(atk_def, "deathtouch"))
-                  remaining_atk = remaining_atk - to_blocker
-                  schedule_damage(damage_queue, "atk", attacker.board_index, b_def.attack or 0, has_keyword(b_def, "deathtouch"))
+                if has_keyword(b_def, "crew") and not b_state.crewed then
+                  -- crewless blocker deals no combat damage
+                else
+                  queue_damage(b_queue, "atk", attacker.board_index, b_def.attack or 0, b_def)
                 end
+                local bhp = b_def.health or 0
+                if has_keyword(atk_def, "deathtouch") then bhp = 1 end
+                local to_blocker = math.min(remaining_atk, bhp)
+                queue_damage(queue_for_attacker, "def", bi, to_blocker, atk_def)
+                remaining_atk = remaining_atk - to_blocker
               end
             end
+
             if remaining_atk > 0 and has_keyword(atk_def, "trample") then
               if attacker.target.type == "base" then
-                base_damage = base_damage + remaining_atk
-              elseif attacker.target.type == "board" then
-                local te = def_player.board[attacker.target.index]
-                if te then
-                  schedule_damage(damage_queue, "def", attacker.target.index, remaining_atk, has_keyword(atk_def, "deathtouch"))
+                if atk_first[attacker.board_index] then
+                  base_damage_first = base_damage_first + remaining_atk
+                else
+                  base_damage_normal = base_damage_normal + remaining_atk
                 end
+              elseif attacker.target.type == "board" and def_player.board[attacker.target.index] then
+                queue_damage(queue_for_attacker, "def", attacker.target.index, remaining_atk, atk_def)
               end
             end
           else
             if attacker.target.type == "base" then
-              base_damage = base_damage + (atk_def.attack or 0)
+              if atk_first[attacker.board_index] then
+                base_damage_first = base_damage_first + (atk_def.attack or 0)
+              else
+                base_damage_normal = base_damage_normal + (atk_def.attack or 0)
+              end
             elseif attacker.target.type == "board" then
               local te = def_player.board[attacker.target.index]
               if te then
                 local tdef = cards.get_card_def(te.card_id)
-                schedule_damage(damage_queue, "def", attacker.target.index, atk_def.attack or 0, has_keyword(atk_def, "deathtouch"))
+                queue_damage(queue_for_attacker, "def", attacker.target.index, atk_def.attack or 0, atk_def)
                 if tdef.kind == "Unit" or tdef.kind == "Worker" then
-                  schedule_damage(damage_queue, "atk", attacker.board_index, tdef.attack or 0, has_keyword(tdef, "deathtouch"))
+                  local tstate = ensure_state(te)
+                  if not (has_keyword(tdef, "crew") and not tstate.crewed) then
+                    local t_queue = def_first[attacker.target.index] and first_q or normal_q
+                    queue_damage(t_queue, "atk", attacker.board_index, tdef.attack or 0, tdef)
+                  end
                 end
               end
             end
@@ -256,50 +386,48 @@ function combat.resolve(g)
     end
   end
 
-  for _, ev in ipairs(damage_queue) do
-    local player = (ev.side == "atk") and atk_player or def_player
-    apply_board_damage(player, ev.board_index, ev.amount)
-    if ev.deathtouch then
-      local e = player.board[ev.board_index]
-      if e then
-        local st = ensure_state(e)
-        st.marked_for_death = true
-      end
-    end
-  end
+  apply_damage_queue(g, atk_player, def_player, first_q)
+  def_player.life = math.max(0, (def_player.life or 0) - base_damage_first)
 
-  def_player.life = math.max(0, (def_player.life or 0) - base_damage)
-
-  local deaths = { atk = {}, def = {} }
+  local dead_atk, dead_def = {}, {}
   for i, e in ipairs(atk_player.board) do
-    local def = cards.get_card_def(e.card_id)
+    local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    local hp = (def.health or 0) - (st.damage or 0)
-    if st.marked_for_death or hp <= 0 then deaths.atk[#deaths.atk + 1] = i end
+    if st.marked_for_death or ((d.health or 0) - (st.damage or 0) <= 0) then
+      dead_atk[#dead_atk + 1] = i
+    end
   end
   for i, e in ipairs(def_player.board) do
-    local def = cards.get_card_def(e.card_id)
+    local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    local hp = (def.health or 0) - (st.damage or 0)
-    if st.marked_for_death or hp <= 0 then deaths.def[#deaths.def + 1] = i end
-  end
-
-  for i = #deaths.atk, 1, -1 do
-    local bi = deaths.atk[i]
-    if atk_player.board[bi] then
-      local entry = table.remove(atk_player.board, bi)
-      atk_player.graveyard[#atk_player.graveyard + 1] = { card_id = entry.card_id, state = entry.state }
+    if st.marked_for_death or ((d.health or 0) - (st.damage or 0) <= 0) then
+      dead_def[#dead_def + 1] = i
     end
   end
-  for i = #deaths.def, 1, -1 do
-    local bi = deaths.def[i]
-    if def_player.board[bi] then
-      local entry = table.remove(def_player.board, bi)
-      def_player.graveyard[#def_player.graveyard + 1] = { card_id = entry.card_id, state = entry.state }
+  for i = #dead_atk, 1, -1 do destroy_board_entry(atk_player, g, dead_atk[i]) end
+  for i = #dead_def, 1, -1 do destroy_board_entry(def_player, g, dead_def[i]) end
+
+  apply_damage_queue(g, atk_player, def_player, normal_q)
+  def_player.life = math.max(0, (def_player.life or 0) - base_damage_normal)
+
+  dead_atk, dead_def = {}, {}
+  for i, e in ipairs(atk_player.board) do
+    local d = cards.get_card_def(e.card_id)
+    local st = ensure_state(e)
+    if st.marked_for_death or ((d.health or 0) - (st.damage or 0) <= 0) then
+      dead_atk[#dead_atk + 1] = i
     end
   end
+  for i, e in ipairs(def_player.board) do
+    local d = cards.get_card_def(e.card_id)
+    local st = ensure_state(e)
+    if st.marked_for_death or ((d.health or 0) - (st.damage or 0) <= 0) then
+      dead_def[#dead_def + 1] = i
+    end
+  end
+  for i = #dead_atk, 1, -1 do destroy_board_entry(atk_player, g, dead_atk[i]) end
+  for i = #dead_def, 1, -1 do destroy_board_entry(def_player, g, dead_def[i]) end
 
-  -- Clear transient markers/damage on survivors each combat (no persistent wounds in current ruleset).
   for _, p in ipairs({ atk_player, def_player }) do
     for _, e in ipairs(p.board) do
       local st = ensure_state(e)

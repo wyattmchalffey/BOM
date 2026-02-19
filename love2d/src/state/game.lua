@@ -75,6 +75,7 @@ function GameState.new(opts)
     reconnect_attempts = 0,
     reconnect_timer = 0,
     pending_attack_declarations = {}, -- { { attacker_board_index, target={type="base"|"board", index?} } }
+    pending_block_assignments = {}, -- { { blocker_board_index, attacker_board_index } }
     sync_poll_timer = 0,
     sync_poll_interval = 1.0,
   }, GameState)
@@ -468,6 +469,25 @@ function GameState:_set_pending_attack(attacker_board_index, target)
   end
 end
 
+
+
+function GameState:_set_pending_block(blocker_board_index, attacker_board_index)
+  local replaced = false
+  for _, blk in ipairs(self.pending_block_assignments) do
+    if blk.blocker_board_index == blocker_board_index then
+      blk.attacker_board_index = attacker_board_index
+      replaced = true
+      break
+    end
+  end
+  if not replaced then
+    self.pending_block_assignments[#self.pending_block_assignments + 1] = {
+      blocker_board_index = blocker_board_index,
+      attacker_board_index = attacker_board_index,
+    }
+  end
+end
+
 function GameState:_draw_attack_declaration_arrows()
   local attacker_pi = self.local_player_index
   local defender_pi = 1 - attacker_pi
@@ -503,10 +523,41 @@ function GameState:_draw_attack_declaration_arrows()
     end
   end
 
+
+
+  local c = self.game_state.pendingCombat
+  if c and c.stage == "DECLARED" and c.defender == self.local_player_index then
+    local defender_pi = self.local_player_index
+    local attacker_pi2 = c.attacker
+    for _, blk in ipairs(self.pending_block_assignments or {}) do
+      local bx, by = board.board_entry_center(self.game_state, defender_pi, blk.blocker_board_index, self.local_player_index)
+      local ax, ay = board.board_entry_center(self.game_state, attacker_pi2, blk.attacker_board_index, self.local_player_index)
+      if bx and by and ax and ay then
+        self:_draw_arrow(bx, by, ax, ay, { 0.35, 0.75, 1.0, 0.9 })
+      end
+    end
+  end
+
+  if c and c.blockers and #c.blockers > 0 then
+    for _, blk in ipairs(c.blockers) do
+      local bx, by = board.board_entry_center(self.game_state, c.defender, blk.blocker_board_index, self.local_player_index)
+      local ax, ay = board.board_entry_center(self.game_state, c.attacker, blk.attacker_board_index, self.local_player_index)
+      if bx and by and ax and ay then
+        self:_draw_arrow(bx, by, ax, ay, { 0.2, 0.65, 0.95, 0.7 })
+      end
+    end
+  end
+
   if self.drag and self.drag.from == "attack_unit" and self.drag.player_index == self.local_player_index then
     local ax, ay = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index)
     if ax and ay then
       self:_draw_arrow(ax, ay, self.drag.display_x, self.drag.display_y, { 1.0, 0.8, 0.2, 0.85 })
+    end
+  end
+  if self.drag and self.drag.from == "block_unit" and self.drag.player_index == self.local_player_index then
+    local bx, by = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index)
+    if bx and by then
+      self:_draw_arrow(bx, by, self.drag.display_x, self.drag.display_y, { 0.35, 0.75, 1.0, 0.85 })
     end
   end
 end
@@ -547,7 +598,7 @@ function GameState:draw()
   end
 
   -- Dragged worker / unit follows cursor (drawn on top so it's always visible)
-  if self.drag and self.drag.from ~= "attack_unit" then
+  if self.drag and self.drag.from ~= "attack_unit" and self.drag.from ~= "block_unit" then
     local dx, dy = self.drag.display_x, self.drag.display_y
     local r = board.WORKER_R
     local drag_r = r * 1.2
@@ -1410,6 +1461,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     self.pending_sacrifice = nil
     self.pending_upgrade = nil
     self.pending_attack_declarations = {}
+    self.pending_block_assignments = {}
     -- Show turn banner
     self.turn_banner_timer = 1.2
     self.turn_banner_text = (self.game_state.activePlayer == self.local_player_index) and "Your Turn" or "Opponent's Turn"
@@ -1417,6 +1469,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   end
 
   if kind == "pass" then
+    local c = self.game_state.pendingCombat
     if pi == self.game_state.activePlayer and pi == self.local_player_index and #self.pending_attack_declarations > 0 then
       local result = self:dispatch_command({
         type = "DECLARE_ATTACKERS",
@@ -1425,10 +1478,37 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       })
       if result.ok then
         self.pending_attack_declarations = {}
+        self.pending_block_assignments = {}
         sound.play("whoosh")
       else
         sound.play("error")
       end
+      return
+    end
+
+    if c and c.stage == "DECLARED" and c.defender == self.local_player_index then
+      local result = self:dispatch_command({
+        type = "ASSIGN_BLOCKERS",
+        player_index = self.local_player_index,
+        assignments = self.pending_block_assignments,
+      })
+      if result.ok then
+        self.pending_block_assignments = {}
+        sound.play("whoosh")
+      else
+        sound.play("error")
+      end
+      return
+    end
+
+    if c and c.stage == "BLOCKERS_ASSIGNED" and c.attacker == self.local_player_index then
+      local result = self:dispatch_command({ type = "RESOLVE_COMBAT", player_index = self.local_player_index })
+      if result.ok then
+        sound.play("build")
+      else
+        sound.play("error")
+      end
+      return
     end
     return
   end
@@ -1612,9 +1692,29 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  -- Only the local player can move workers, and only on their turn
+  -- Only local player can initiate drag interactions.
   if self.authoritative_adapter and pi ~= self.local_player_index then return end
-  if pi ~= self.game_state.activePlayer then return end
+
+  local c = self.game_state.pendingCombat
+  local can_declare_attack = (pi == self.game_state.activePlayer and pi == self.local_player_index and not c)
+  local can_assign_blocks = (c and c.stage == "DECLARED" and c.defender == self.local_player_index and pi == self.local_player_index)
+  local can_worker_actions = (pi == self.game_state.activePlayer and pi == self.local_player_index and not c)
+
+  if kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx) and can_declare_attack then
+    local mx, my = love.mouse.getPosition()
+    self.drag = { player_index = pi, from = "attack_unit", display_x = mx, display_y = my, board_index = idx }
+    sound.play("whoosh", 0.6)
+    return
+  end
+
+  if not can_worker_actions and not can_assign_blocks then return end
+
+  if can_assign_blocks and kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx) then
+    local mx, my = love.mouse.getPosition()
+    self.drag = { player_index = pi, from = "block_unit", display_x = mx, display_y = my, board_index = idx }
+    sound.play("whoosh", 0.55)
+    return
+  end
 
   if kind == "structure" and pi == self.local_player_index and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx) then
     local mx, my = love.mouse.getPosition()
@@ -1711,7 +1811,7 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   local kind, pi, drop_extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index)
 
   -- Feature 2: Invalid drop zone -> snap back
-  local allow_opponent_drop = self.drag.from == "attack_unit" and kind and pi == (1 - self.drag.player_index)
+  local allow_opponent_drop = (self.drag.from == "attack_unit" or self.drag.from == "block_unit") and kind and pi == (1 - self.drag.player_index)
   if not kind or (pi ~= self.drag.player_index and not allow_opponent_drop) then
     if self.drag.from ~= "attack_unit" then
       self:_spawn_snap_back()
@@ -1738,6 +1838,18 @@ function GameState:mousereleased(x, y, button, istouch, presses)
         did_drop = true
         sound.play("click")
       end
+    end
+    if not did_drop then sound.play("error") end
+    self.drag = nil
+    return
+  end
+
+  if from == "block_unit" then
+    local attacker_pi = 1 - self.drag.player_index
+    if pi == attacker_pi and kind == "structure" and drop_extra and drop_extra > 0 then
+      self:_set_pending_block(self.drag.board_index, drop_extra)
+      did_drop = true
+      sound.play("click")
     end
     if not did_drop then sound.play("error") end
     self.drag = nil
