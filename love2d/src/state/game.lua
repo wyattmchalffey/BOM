@@ -336,7 +336,7 @@ function GameState:update(dt)
     if k == "blueprint" or k == "end_turn" or k == "pass" or k == "activate_base"
        or k == "activate_ability" or k == "ability_hover"
        or k == "worker_unassigned" or k == "worker_left" or k == "worker_right"
-       or k == "structure" or k == "structure_worker" or k == "hand_card" or k == "unit_deck"
+       or k == "structure" or k == "structure_worker" or k == "hand_card" or k == "unit_deck" or k == "unit_row"
        or k == "special_worker_unassigned" or k == "special_worker_resource" or k == "special_worker_structure" then
       want_hand = true
     end
@@ -855,6 +855,15 @@ function GameState:draw()
 
   -- Vignette: drawn last, on top of everything
   textures.draw_vignette()
+end
+
+
+local function is_worker_board_entry(game_state, pi, board_index)
+  local player = game_state.players[pi + 1]
+  local entry = player and player.board and player.board[board_index]
+  if not entry then return false end
+  local ok, def = pcall(cards.get_card_def, entry.card_id)
+  return ok and def and def.kind == "Worker"
 end
 
 function GameState:mousepressed(x, y, button, istouch, presses)
@@ -1498,6 +1507,10 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     end
     local mx, my = love.mouse.getPosition()
     self.drag = { player_index = pi, from = from, display_x = mx, display_y = my, board_index = idx }
+  elseif kind == "structure" and is_worker_board_entry(self.game_state, pi, idx) then
+    sound.play("pop")
+    local mx, my = love.mouse.getPosition()
+    self.drag = { player_index = pi, from = "unit_worker_card", display_x = mx, display_y = my, board_index = idx }
   end
 
   -- Special worker drag
@@ -1532,6 +1545,9 @@ function GameState:_get_worker_origin(pi, from)
     -- Snap back to unassigned pool center
     local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
     return uax + uaw / 2, uay + uah / 2
+  elseif from == "unit_worker_card" then
+    local fax, fay, faw = board.front_row_rect(px, py, pw, ph, panel)
+    return fax + faw / 2, fay + board.BFIELD_TILE_H / 2
   end
   return px + pw / 2, py + ph / 2
 end
@@ -1617,7 +1633,9 @@ function GameState:mousereleased(x, y, button, istouch, presses)
 
   -- Drop target (unassigned pool or clicking an unassigned worker = same zone)
   if kind == "unassigned_pool" or kind == "worker_unassigned" then
-    if from == "left" then
+    if from == "unit_worker_card" then
+      did_drop = self:dispatch_command({ type = "RECLAIM_WORKER_FROM_UNIT_ROW", player_index = pi, board_index = self.drag.board_index }).ok
+    elseif from == "left" then
       did_drop = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = res_left }).ok
     elseif from == "right" then
       did_drop = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
@@ -1625,7 +1643,12 @@ function GameState:mousereleased(x, y, button, istouch, presses)
       did_drop = self:dispatch_command({ type = "UNASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = self.drag.board_index }).ok
     end
   elseif kind == "resource_left" then
-    if from == "unassigned" then
+    if from == "unit_worker_card" then
+      local reclaim_res = self:dispatch_command({ type = "RECLAIM_WORKER_FROM_UNIT_ROW", player_index = pi, board_index = self.drag.board_index })
+      if reclaim_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = res_left }).ok
+      end
+    elseif from == "unassigned" then
       did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = res_left }).ok
     elseif from == "right" then
       local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = "stone" })
@@ -1639,7 +1662,12 @@ function GameState:mousereleased(x, y, button, istouch, presses)
       end
     end
   elseif kind == "resource_right" then
-    if from == "unassigned" then
+    if from == "unit_worker_card" then
+      local reclaim_res = self:dispatch_command({ type = "RECLAIM_WORKER_FROM_UNIT_ROW", player_index = pi, board_index = self.drag.board_index })
+      if reclaim_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
+      end
+    elseif from == "unassigned" then
       did_drop = self:dispatch_command({ type = "ASSIGN_WORKER", player_index = pi, resource = "stone" }).ok
     elseif from == "left" then
       local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = res_left })
@@ -1653,9 +1681,19 @@ function GameState:mousereleased(x, y, button, istouch, presses)
       end
     end
   elseif kind == "structure" or kind == "structure_worker" then
-    -- Dropping onto a structure tile
+    -- Dropping onto a structure/unit tile
     local drop_si = drop_extra
-    if from == "unassigned" and drop_si then
+    local drop_is_worker_card = drop_si and is_worker_board_entry(self.game_state, pi, drop_si)
+    if from == "unit_worker_card" and drop_is_worker_card then
+      did_drop = true
+    elseif from == "unit_worker_card" and drop_si then
+      local reclaim_res = self:dispatch_command({ type = "RECLAIM_WORKER_FROM_UNIT_ROW", player_index = pi, board_index = self.drag.board_index })
+      if reclaim_res.ok then
+        did_drop = self:dispatch_command({ type = "ASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = drop_si }).ok
+      end
+    elseif from ~= "unit_worker_card" and drop_is_worker_card then
+      did_drop = self:dispatch_command({ type = "DEPLOY_WORKER_TO_UNIT_ROW", player_index = pi }).ok
+    elseif from == "unassigned" and drop_si then
       did_drop = self:dispatch_command({ type = "ASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = drop_si }).ok
     elseif from == "left" and drop_si then
       local unassign_res = self:dispatch_command({ type = "UNASSIGN_WORKER", player_index = pi, resource = res_left })
@@ -1675,6 +1713,12 @@ function GameState:mousereleased(x, y, button, istouch, presses)
           did_drop = self:dispatch_command({ type = "ASSIGN_STRUCTURE_WORKER", player_index = pi, board_index = drop_si }).ok
         end
       end
+    end
+  elseif kind == "unit_row" then
+    if from == "unit_worker_card" then
+      did_drop = true
+    else
+      did_drop = self:dispatch_command({ type = "DEPLOY_WORKER_TO_UNIT_ROW", player_index = pi }).ok
     end
   end
 

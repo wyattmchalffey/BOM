@@ -235,6 +235,29 @@ function commands.execute(g, command)
     return ok(nil, { { type = "structure_worker_unassigned", player_index = pi, board_index = board_index } })
   end
 
+  if command.type == "DEPLOY_WORKER_TO_UNIT_ROW" then
+    local pi = command.player_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+
+    local deployed = actions.deploy_worker_to_unit_row(g, pi)
+    if not deployed then return fail("deploy_worker_failed") end
+
+    return ok(nil, { { type = "worker_deployed_to_unit_row", player_index = pi } })
+  end
+
+  if command.type == "RECLAIM_WORKER_FROM_UNIT_ROW" then
+    local pi = command.player_index
+    local board_index = command.board_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if not board_index then return fail("missing_board_index") end
+
+    local reclaimed = actions.reclaim_worker_from_unit_row(g, pi, board_index)
+    if not reclaimed then return fail("reclaim_worker_failed") end
+
+    return ok(nil, { { type = "worker_reclaimed_from_unit_row", player_index = pi, board_index = board_index } })
+  end
+
+
   if command.type == "PLAY_FROM_HAND_WITH_SACRIFICES" then
     local pi = command.player_index
     local hand_index = command.hand_index

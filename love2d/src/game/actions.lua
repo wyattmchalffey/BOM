@@ -423,6 +423,48 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   return g
 end
 
+
+
+function actions.deploy_worker_to_unit_row(g, player_index)
+  local p = g.players[player_index + 1]
+  if not p then return false end
+  if player_index ~= g.activePlayer then return false end
+
+  local assigned = p.workersOn.food + p.workersOn.wood + p.workersOn.stone + actions.count_structure_workers(p)
+  local unassigned = p.totalWorkers - assigned
+  if unassigned <= 0 then return false end
+
+  local worker_def = get_faction_worker_def(p.faction)
+  if not worker_def then return false end
+
+  p.totalWorkers = p.totalWorkers - 1
+  p.board[#p.board + 1] = { card_id = worker_def.id }
+  return true
+end
+
+function actions.reclaim_worker_from_unit_row(g, player_index, board_index)
+  local p = g.players[player_index + 1]
+  if not p then return false end
+  if player_index ~= g.activePlayer then return false end
+
+  local entry = p.board[board_index]
+  if not entry then return false end
+
+  local ok_def, card_def = pcall(cards.get_card_def, entry.card_id)
+  if not ok_def or not card_def or card_def.kind ~= "Worker" then
+    return false
+  end
+
+  table.remove(p.board, board_index)
+  for _, sw in ipairs(p.specialWorkers) do
+    if type(sw.assigned_to) == "number" and sw.assigned_to > board_index then
+      sw.assigned_to = sw.assigned_to - 1
+    end
+  end
+
+  p.totalWorkers = math.min((p.totalWorkers or 0) + 1, p.maxWorkers or 99)
+  return true
+end
 function actions.resolve_on_play_triggers(g, player_index, card_id)
   local p = g.players[player_index + 1]
   if not p then return end
