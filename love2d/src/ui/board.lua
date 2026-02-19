@@ -1579,4 +1579,45 @@ board.BFIELD_TILE_W = BFIELD_TILE_W
 board.BFIELD_TILE_H = BFIELD_TILE_H
 board.BFIELD_GAP = BFIELD_GAP
 
+
+function board.base_center_for_player(panel_player_index, local_player_index)
+  local_player_index = local_player_index or 0
+  local panel = (local_player_index == 0) and panel_player_index or (1 - panel_player_index)
+  local px, py, pw, ph = board.panel_rect(panel)
+  local bx, by, bw, bh = board.base_rect(px, py, pw, ph, panel)
+  return bx + bw / 2, by + bh / 2
+end
+
+function board.board_entry_center(game_state, panel_player_index, board_index, local_player_index)
+  local_player_index = local_player_index or 0
+  local panel = (local_player_index == 0) and panel_player_index or (1 - panel_player_index)
+  local px, py, pw, ph = board.panel_rect(panel)
+  local player = game_state.players[panel_player_index + 1]
+  local entry = player and player.board and player.board[board_index]
+  if not entry then return nil end
+  local ok, def = pcall(cards.get_card_def, entry.card_id)
+  if not ok or not def then return nil end
+
+  local groups
+  local row_ax, row_ay, row_aw
+  if def.kind == "Structure" then
+    groups = group_board_entries(player, "Structure")
+    row_ax, row_ay, row_aw = board.back_row_rect(px, py, pw, ph, panel)
+  else
+    groups = group_board_entries(player, "Unit")
+    row_ax, row_ay, row_aw = board.front_row_rect(px, py, pw, ph, panel)
+  end
+
+  local start_x = centered_row_x(row_ax, row_aw, #groups)
+  for gi, g in ipairs(groups) do
+    for _, si in ipairs(g.entries or {}) do
+      if si == board_index then
+        local tx = start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        return tx + BFIELD_TILE_W / 2, row_ay + BFIELD_TILE_H / 2
+      end
+    end
+  end
+  return nil
+end
+
 return board
