@@ -393,6 +393,7 @@ function card_frame.draw(x, y, params)
   local type_line = params.typeLine or ""
   local text = params.text or ""
   local costs = params.costs or {}
+  local upkeep = params.upkeep or {}
   local attack = params.attack
   local health = params.health
   local tier = params.tier
@@ -511,7 +512,26 @@ function card_frame.draw(x, y, params)
     love.graphics.setFont(tier_font)
     love.graphics.printf(tier_label, pill_x, pill_y + 1, pill_w, "center")
   end
-  cy = cy + 13
+
+  -- Upkeep strip for units/resources that must be paid at end of turn.
+  if upkeep and #upkeep > 0 then
+    local up_h = 14
+    love.graphics.setColor(0.28, 0.12, 0.12, 0.45)
+    love.graphics.rectangle("fill", cx, cy + 12, header_w, up_h, 3, 3)
+    love.graphics.setColor(0.8, 0.35, 0.35, 0.65)
+    love.graphics.rectangle("line", cx, cy + 12, header_w, up_h, 3, 3)
+    love.graphics.setFont(util.get_font(8))
+    love.graphics.setColor(0.95, 0.75, 0.75, 0.95)
+    love.graphics.print("Upkeep", cx + 4, cy + 15)
+    local icon_s = 10
+    local cost_w = measure_cost_cluster(upkeep, icon_s)
+    local ux = cx + header_w - cost_w - 4
+    local uy = cy + 14
+    draw_cost_cluster(upkeep, ux, uy, icon_s, 0.95)
+    cy = cy + 28
+  else
+    cy = cy + 13
+  end
 
   cy = cy + 2
 
