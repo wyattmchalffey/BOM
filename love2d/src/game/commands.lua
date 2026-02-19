@@ -67,6 +67,23 @@ function commands.execute(g, command)
     )
   end
 
+  if command.type == "DEBUG_ADD_RESOURCE" then
+    local pi = command.player_index
+    local resource = command.resource
+    local amount = command.amount or 0
+
+    local p = g.players[(pi or -1) + 1]
+    if not p then return fail("invalid_player") end
+    if type(resource) ~= "string" or p.resources[resource] == nil then return fail("invalid_resource") end
+    if type(amount) ~= "number" or amount == 0 then return fail("invalid_amount") end
+
+    p.resources[resource] = math.max(0, p.resources[resource] + amount)
+    return ok(
+      { player_index = pi, resource = resource, amount = amount, total = p.resources[resource] },
+      { { type = "resource_debug_added", player_index = pi, resource = resource, amount = amount } }
+    )
+  end
+
   if command.type == "ASSIGN_WORKER" then
     local pi = command.player_index
     local resource = command.resource
@@ -208,6 +225,38 @@ function commands.execute(g, command)
     if pi ~= g.activePlayer then return fail("not_active_player") end
     actions.unassign_worker_from_structure(g, pi, board_index)
     return ok(nil, { { type = "structure_worker_unassigned", player_index = pi, board_index = board_index } })
+  end
+
+  if command.type == "PLAY_FROM_HAND_WITH_SACRIFICES" then
+    local pi = command.player_index
+    local hand_index = command.hand_index
+    local sacrifice_targets = command.sacrifice_targets
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    local p = g.players[pi + 1]
+    if not hand_index or hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
+    local card_id = p.hand[hand_index]
+    local card_ok, card_def = pcall(cards.get_card_def, card_id)
+    if not card_ok or not card_def then return fail("invalid_card") end
+
+    local sac_ab = nil
+    if card_def.abilities then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "static" and ab.effect == "play_cost_sacrifice" then sac_ab = ab; break end
+      end
+    end
+    if not sac_ab then return fail("card_not_playable") end
+    local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
+    if type(sacrifice_targets) ~= "table" or #sacrifice_targets ~= sacrifice_count then
+      return fail("invalid_sacrifice_targets")
+    end
+
+    local played = actions.play_from_hand(g, pi, hand_index, sacrifice_targets)
+    if not played then return fail("play_failed") end
+    return ok(
+      { card_id = card_id },
+      { { type = "card_played_from_hand", player_index = pi, card_id = card_id } }
+    )
   end
 
   if command.type == "PLAY_FROM_HAND" then
