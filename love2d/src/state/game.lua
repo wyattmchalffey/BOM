@@ -1509,7 +1509,14 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       })
       if result.ok then
         self.pending_block_assignments = {}
-        sound.play("whoosh")
+        -- Defender pass completes blocker assignment; resolve immediately so
+        -- combat does not require another attacker pass.
+        local resolve_result = self:dispatch_command({ type = "RESOLVE_COMBAT", player_index = c.attacker })
+        if resolve_result.ok then
+          sound.play("build")
+        else
+          sound.play("error")
+        end
       else
         sound.play("error")
       end

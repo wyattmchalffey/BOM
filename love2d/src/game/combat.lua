@@ -393,14 +393,16 @@ function combat.resolve(g)
   for i, e in ipairs(atk_player.board) do
     local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    if st.marked_for_death or ((d.health or 0) - (st.damage or 0) <= 0) then
+    local lethal_by_damage = (d.health ~= nil) and ((d.health or 0) - (st.damage or 0) <= 0)
+    if st.marked_for_death or lethal_by_damage then
       dead_atk[#dead_atk + 1] = i
     end
   end
   for i, e in ipairs(def_player.board) do
     local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    if st.marked_for_death or ((d.health or 0) - (st.damage or 0) <= 0) then
+    local lethal_by_damage = (d.health ~= nil) and ((d.health or 0) - (st.damage or 0) <= 0)
+    if st.marked_for_death or lethal_by_damage then
       dead_def[#dead_def + 1] = i
     end
   end
@@ -414,14 +416,16 @@ function combat.resolve(g)
   for i, e in ipairs(atk_player.board) do
     local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    if st.marked_for_death or ((d.health or 0) - (st.damage or 0) <= 0) then
+    local lethal_by_damage = (d.health ~= nil) and ((d.health or 0) - (st.damage or 0) <= 0)
+    if st.marked_for_death or lethal_by_damage then
       dead_atk[#dead_atk + 1] = i
     end
   end
   for i, e in ipairs(def_player.board) do
     local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    if st.marked_for_death or ((d.health or 0) - (st.damage or 0) <= 0) then
+    local lethal_by_damage = (d.health ~= nil) and ((d.health or 0) - (st.damage or 0) <= 0)
+    if st.marked_for_death or lethal_by_damage then
       dead_def[#dead_def + 1] = i
     end
   end

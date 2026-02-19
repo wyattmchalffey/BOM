@@ -591,6 +591,13 @@ local function build_forced_singletons(pi, game_state, combat_ui, local_player_i
       for _, b in ipairs(c.blockers or {}) do
         if b and b.blocker_board_index then forced[b.blocker_board_index] = true end
       end
+      -- If a specific defender unit is being attacked, force it out of its stack
+      -- so target selection/feedback reflects the exact chosen defender.
+      for _, a in ipairs(c.attackers or {}) do
+        if a and a.target and a.target.type == "board" and a.target.index then
+          forced[a.target.index] = true
+        end
+      end
     end
   end
 
@@ -600,6 +607,14 @@ local function build_forced_singletons(pi, game_state, combat_ui, local_player_i
     end
     for _, b in ipairs(combat_ui.pending_block_assignments or {}) do
       if b and b.blocker_board_index then forced[b.blocker_board_index] = true end
+    end
+  elseif combat_ui and local_player_index ~= pi then
+    -- While staging local attack declarations, force currently targeted defender
+    -- units out of stacks for clear target feedback.
+    for _, a in ipairs(combat_ui.pending_attack_declarations or {}) do
+      if a and a.target and a.target.type == "board" and a.target.index then
+        forced[a.target.index] = true
+      end
     end
   end
   return forced
