@@ -102,6 +102,17 @@ local function special_worker_multiplier(sw_card_id)
   return 1
 end
 
+local function fire_on_play_triggers(player, game_state, played_card_id)
+  local ok, def = pcall(cards.get_card_def, played_card_id)
+  if ok and def and def.abilities then
+    for _, ab in ipairs(def.abilities) do
+      if ab.type == "triggered" and (ab.trigger == "on_play" or ab.trigger == "on_construct") then
+        abilities.resolve(ab, player, game_state)
+      end
+    end
+  end
+end
+
 -- Get the play_cost_sacrifice ability from a card def (returns ability or nil)
 local function get_sacrifice_ability(card_def)
   if not card_def or not card_def.abilities then return nil end
@@ -339,17 +350,16 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   table.remove(p.hand, hand_index)
   p.board[#p.board + 1] = { card_id = card_id }
 
-  -- Fire on_construct triggered abilities
-  local ok, unit_def = pcall(cards.get_card_def, card_id)
-  if ok and unit_def and unit_def.abilities then
-    for _, ab in ipairs(unit_def.abilities) do
-      if ab.type == "triggered" and ab.trigger == "on_construct" then
-        abilities.resolve(ab, p, g)
-      end
-    end
-  end
+  -- Fire on_play triggered abilities
+  fire_on_play_triggers(p, g, card_id)
 
   return g
+end
+
+function actions.resolve_on_play_triggers(g, player_index, card_id)
+  local p = g.players[player_index + 1]
+  if not p then return end
+  fire_on_play_triggers(p, g, card_id)
 end
 
 -- Build a structure from the blueprint deck
@@ -383,10 +393,10 @@ function actions.build_structure(g, player_index, card_id)
   -- Place on board
   p.board[#p.board + 1] = { card_id = card_id, workers = 0 }
 
-  -- Fire on_construct triggered abilities
+  -- Fire on_play triggered abilities
   if card_def.abilities then
     for _, ab in ipairs(card_def.abilities) do
-      if ab.type == "triggered" and ab.trigger == "on_construct" then
+      if ab.type == "triggered" and (ab.trigger == "on_play" or ab.trigger == "on_construct") then
         abilities.resolve(ab, p, g)
       end
     end

@@ -10,6 +10,7 @@ local _images = {}
 local _icon_files = {
   "food", "wood", "stone", "metal", "gold",
   "bones", "blood", "fire", "water",
+  "crystal", "ectoplasm",
 }
 
 -- Lazy-load (must happen after love.graphics is initialized)

@@ -397,6 +397,7 @@ function commands.execute(g, command)
       g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = true
       table.remove(p.hand, hand_index)
       p.board[#p.board + 1] = { card_id = hand_id }
+      actions.resolve_on_play_triggers(g, pi, hand_id)
     end
 
     if not ok_apply then

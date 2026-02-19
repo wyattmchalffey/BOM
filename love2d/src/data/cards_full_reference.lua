@@ -26,7 +26,7 @@
 --   effect         (string)  Effect key: "summon_worker", "produce", "draw_cards", etc.
 --   effect_args    (table?)  Extra data for the effect
 --   once_per_turn  (bool?)   Defaults to false
---   trigger        (string?) For triggered: "on_construct", "on_destroyed", "start_of_turn", "end_of_turn"
+--   trigger        (string?) For triggered: "on_play", "on_destroyed", "start_of_turn", "end_of_turn"
 
 return {
 
@@ -315,12 +315,12 @@ return {
     faction = "Human",
     kind = "Structure",
     population = 1,
-    text = "Construct: Draw 1 Card. Passive — Generate 1 extra resource for each 3 Peasants assigned.",
+    text = "On Play: Draw 1 Card. Passive — Generate 1 extra resource for each 3 Peasants assigned.",
     costs = { { type = "wood", amount = 2 } },
     abilities = {
       {
         type = "triggered",
-        trigger = "on_construct",
+        trigger = "on_play",
         effect = "draw_cards",
         effect_args = { amount = 1 },
       },
@@ -970,12 +970,12 @@ return {
     kind = "Structure",
     population = 6,
     health = 5,
-    text = "Construct: Draw 3 Cards. Discard a random card when destroyed.",
+    text = "On Play: Draw 3 Cards. Discard a random card when destroyed.",
     costs = { { type = "stone", amount = 2 } },
     abilities = {
       {
         type = "triggered",
-        trigger = "on_construct",
+        trigger = "on_play",
         effect = "draw_cards",
         effect_args = { amount = 3 },
       },
@@ -1829,12 +1829,12 @@ return {
     faction = "Elf",
     kind = "Structure",
     population = 4,
-    text = "On Construct: Draw a Card. When Destroyed: Discard a Card.",
+    text = "On On Play: Draw a Card. When Destroyed: Discard a Card.",
     costs = { { type = "wood", amount = 1 } },
     abilities = {
       {
         type = "triggered",
-        trigger = "on_construct",
+        trigger = "on_play",
         effect = "draw_cards",
         effect_args = { amount = 1 },
       },
@@ -2293,7 +2293,7 @@ return {
     abilities = {
       {
         type = "triggered",
-        trigger = "on_construct",
+        trigger = "on_play",
         effect = "produce",
         effect_args = { resource = "crystal", amount = 1 },
       },
