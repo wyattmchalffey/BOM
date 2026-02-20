@@ -109,6 +109,24 @@ local function has_static_effect(card_def, effect_name)
   return false
 end
 
+local function should_skip_awaken(card_def)
+  return has_static_effect(card_def, "cannot_awaken")
+    or has_static_effect(card_def, "stay_rested")
+    or has_static_effect(card_def, "prevent_awakening")
+end
+
+local function awaken_rested_board_combatants(player)
+  for _, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and (card_def.kind == "Unit" or card_def.kind == "Worker") then
+      entry.state = entry.state or {}
+      if entry.state.rested and not should_skip_awaken(card_def) then
+        entry.state.rested = false
+      end
+    end
+  end
+end
+
 local function special_worker_multiplier(sw_card_id)
   local ok, sw_def = pcall(cards.get_card_def, sw_card_id)
   if not ok or not sw_def then return 1 end
@@ -220,6 +238,7 @@ function actions.start_turn(g)
   g.activatedUsedThisTurn = {}
   local active = g.activePlayer
   local p = g.players[active + 1]
+  awaken_rested_board_combatants(p)
   -- Gain workers
   p.totalWorkers = math.min(p.totalWorkers + config.workers_gained_per_turn, p.maxWorkers or 99)
   -- Produce resources from assigned workers
@@ -448,7 +467,7 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   -- Remove card from hand and place on board
   local card_id = p.hand[hand_index]
   table.remove(p.hand, hand_index)
-  p.board[#p.board + 1] = { card_id = card_id, state = {} }
+  p.board[#p.board + 1] = { card_id = card_id, state = { rested = false } }
 
   -- Fire on_play triggered abilities
   fire_on_play_triggers(p, g, card_id)
@@ -473,7 +492,9 @@ function actions.deploy_worker_to_unit_row(g, player_index)
   if #p.workerStatePool > 0 then
     restored_state = table.remove(p.workerStatePool)
   end
-  p.board[#p.board + 1] = { card_id = worker_def.id, state = restored_state or {} }
+  local final_state = restored_state or {}
+  if final_state.rested == nil then final_state.rested = false end
+  p.board[#p.board + 1] = { card_id = worker_def.id, state = final_state }
   return true
 end
 
@@ -487,6 +508,11 @@ function actions.reclaim_worker_from_unit_row(g, player_index, board_index)
 
   local ok_def, card_def = pcall(cards.get_card_def, entry.card_id)
   if not ok_def or not card_def or card_def.kind ~= "Worker" then
+    return false
+  end
+
+  local est = entry.state or {}
+  if est.rested then
     return false
   end
 
@@ -539,7 +565,7 @@ function actions.build_structure(g, player_index, card_id)
   end
 
   -- Place on board
-  p.board[#p.board + 1] = { card_id = card_id, workers = 0, state = {} }
+  p.board[#p.board + 1] = { card_id = card_id, workers = 0, state = { rested = false } }
 
   -- Fire on_play triggered abilities
   if card_def.abilities then
@@ -785,7 +811,9 @@ function actions.assign_special_worker(g, player_index, sw_index, target)
     sw.assigned_to = target_bi
     return true
   elseif type(target) == "table" and target.type == "field" then
-    p.board[#p.board + 1] = { card_id = sw.card_id, special_worker_index = sw_index, state = copy_table(sw.state or {}) }
+    local field_state = copy_table(sw.state or {})
+    if field_state.rested == nil then field_state.rested = false end
+    p.board[#p.board + 1] = { card_id = sw.card_id, special_worker_index = sw_index, state = field_state }
     sw.assigned_to = { type = "field", board_index = #p.board }
     return true
   end
