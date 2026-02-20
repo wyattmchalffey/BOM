@@ -490,6 +490,11 @@ function actions.reclaim_worker_from_unit_row(g, player_index, board_index)
     return false
   end
 
+  local est = entry.state or {}
+  if est.rested then
+    return false
+  end
+
   p.workerStatePool = p.workerStatePool or {}
   p.workerStatePool[#p.workerStatePool + 1] = copy_table(entry.state or {})
 
