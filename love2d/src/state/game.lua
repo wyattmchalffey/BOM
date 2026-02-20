@@ -458,6 +458,18 @@ end
 
 
 function GameState:_set_pending_attack(attacker_board_index, target)
+  local local_player = self.game_state.players[self.local_player_index + 1]
+  local attacker_entry = local_player and local_player.board and local_player.board[attacker_board_index]
+  if not attacker_entry then return end
+
+  local ok_def, attacker_def = pcall(cards.get_card_def, attacker_entry.card_id)
+  if not ok_def or not attacker_def then return end
+  if attacker_def.kind ~= "Unit" and attacker_def.kind ~= "Worker" then return end
+  if (attacker_def.attack or 0) <= 0 then return end
+
+  local ast = attacker_entry.state or {}
+  if ast.rested then return end
+
   local replaced = false
   for _, decl in ipairs(self.pending_attack_declarations) do
     if decl.attacker_board_index == attacker_board_index then
@@ -479,6 +491,27 @@ end
 
 function GameState:_clear_pending_attack_declarations()
   self.pending_attack_declarations = {}
+end
+
+function GameState:_prune_invalid_pending_attacks()
+  local player = self.game_state.players[self.local_player_index + 1]
+  if not player then
+    self.pending_attack_declarations = {}
+    return
+  end
+
+  local kept = {}
+  for _, decl in ipairs(self.pending_attack_declarations or {}) do
+    local entry = player.board[decl.attacker_board_index]
+    if entry then
+      local ok_def, def = pcall(cards.get_card_def, entry.card_id)
+      local st = entry.state or {}
+      if ok_def and def and (def.kind == "Unit" or def.kind == "Worker") and (def.attack or 0) > 0 and not st.rested then
+        kept[#kept + 1] = decl
+      end
+    end
+  end
+  self.pending_attack_declarations = kept
 end
 
 function GameState:_set_pending_block(blocker_board_index, attacker_board_index)
@@ -626,6 +659,8 @@ end
 
 function GameState:draw()
   shake.apply()
+
+  self:_prune_invalid_pending_attacks()
 
   -- Build hand_state for board.draw
   local hand_state = {
@@ -1047,13 +1082,17 @@ local function is_worker_board_entry(game_state, pi, board_index)
   return ok and def and def.kind == "Worker"
 end
 
-local function is_attack_unit_board_entry(game_state, pi, board_index)
+local function is_attack_unit_board_entry(game_state, pi, board_index, require_attack)
   local player = game_state.players[pi + 1]
   local entry = player and player.board and player.board[board_index]
   if not entry then return false end
   local ok, def = pcall(cards.get_card_def, entry.card_id)
   if not ok or not def then return false end
-  return def.kind == "Unit"
+  if def.kind ~= "Unit" and def.kind ~= "Worker" then return false end
+  if require_attack then
+    return (def.attack or 0) > 0
+  end
+  return true
 end
 
 local function has_static_effect(card_def, effect_name)
@@ -1074,7 +1113,9 @@ local function can_stage_attack_target(game_state, attacker_pi, attacker_board_i
   local atk_entry = atk_player.board[attacker_board_index]
   if not atk_entry then return false end
   local atk_ok, atk_def = pcall(cards.get_card_def, atk_entry.card_id)
-  if not atk_ok or not atk_def or atk_def.kind ~= "Unit" then return false end
+  if not atk_ok or not atk_def then return false end
+  if atk_def.kind ~= "Unit" and atk_def.kind ~= "Worker" then return false end
+  if (atk_def.attack or 0) <= 0 then return false end
 
   if target_index == 0 then
     return true
@@ -1085,6 +1126,9 @@ local function can_stage_attack_target(game_state, attacker_pi, attacker_board_i
   local tgt_ok, tgt_def = pcall(cards.get_card_def, target_entry.card_id)
   if not tgt_ok or not tgt_def then return false end
   if tgt_def.kind ~= "Unit" and tgt_def.kind ~= "Worker" and tgt_def.kind ~= "Structure" then
+    return false
+  end
+  if tgt_def.kind == "Structure" and tgt_def.health == nil then
     return false
   end
 
@@ -1581,6 +1625,8 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   end
 
   if kind == "pass" then
+    self:_prune_invalid_pending_attacks()
+
     local c = self.game_state.pendingCombat
     if pi == self.game_state.activePlayer and pi == self.local_player_index and #self.pending_attack_declarations > 0 then
       local result = self:dispatch_command({
@@ -1847,7 +1893,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   local can_assign_damage_order = (c and c.stage == "AWAITING_DAMAGE_ORDER" and c.attacker == self.local_player_index and pi == self.local_player_index)
   local can_worker_actions = (pi == self.game_state.activePlayer and pi == self.local_player_index and not c)
 
-  if kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx) and can_declare_attack then
+  if kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx, true) and can_declare_attack then
     local mx, my = love.mouse.getPosition()
     self.drag = { player_index = pi, from = "attack_unit", display_x = mx, display_y = my, board_index = idx }
     sound.play("whoosh", 0.6)
@@ -1856,14 +1902,14 @@ function GameState:mousepressed(x, y, button, istouch, presses)
 
   if not can_worker_actions and not can_assign_blocks and not can_assign_damage_order then return end
 
-  if can_assign_blocks and kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx) then
+  if can_assign_blocks and kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx, false) then
     local mx, my = love.mouse.getPosition()
     self.drag = { player_index = pi, from = "block_unit", display_x = mx, display_y = my, board_index = idx }
     sound.play("whoosh", 0.55)
     return
   end
 
-  if can_assign_damage_order and kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx) then
+  if can_assign_damage_order and kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx, false) then
     local mx, my = love.mouse.getPosition()
     self.drag = { player_index = pi, from = "order_attacker", display_x = mx, display_y = my, board_index = idx }
     sound.play("whoosh", 0.5)

@@ -212,6 +212,9 @@ function combat.declare_attackers(g, player_index, declarations)
     if not card_def or (card_def.kind ~= "Unit" and card_def.kind ~= "Worker") then
       return false, "attacker_not_unit"
     end
+    if (card_def.attack or 0) <= 0 then
+      return false, "attacker_has_no_attack"
+    end
 
     local estate = ensure_state(entry)
     if estate.rested then return false, "attacker_rested" end
@@ -230,6 +233,9 @@ function combat.declare_attackers(g, player_index, declarations)
       local tdef = cards.get_card_def(target_entry.card_id)
       if not tdef then return false, "missing_target" end
       if tdef.kind ~= "Unit" and tdef.kind ~= "Worker" and tdef.kind ~= "Structure" then
+        return false, "invalid_target_kind"
+      end
+      if tdef.kind == "Structure" and tdef.health == nil then
         return false, "invalid_target_kind"
       end
       if (tdef.kind == "Unit" or tdef.kind == "Worker") and not can_target_unit(card_def, target_entry) then
