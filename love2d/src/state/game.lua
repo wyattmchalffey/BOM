@@ -1894,7 +1894,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   local can_assign_damage_order = (c and c.stage == "AWAITING_DAMAGE_ORDER" and c.attacker == self.local_player_index and pi == self.local_player_index)
   local can_worker_actions = (pi == self.game_state.activePlayer and pi == self.local_player_index and not c)
 
-  if kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx, true) and can_declare_attack then
+  if kind == "structure" and idx and idx > 0 and is_attack_unit_board_entry(self.game_state, pi, idx, true) and not is_worker_board_entry(self.game_state, pi, idx) and can_declare_attack then
     local mx, my = love.mouse.getPosition()
     self.drag = { player_index = pi, from = "attack_unit", display_x = mx, display_y = my, board_index = idx }
     sound.play("whoosh", 0.6)
@@ -2005,7 +2005,12 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   local kind, pi, drop_extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
 
   -- Feature 2: Invalid drop zone -> snap back
-  local allow_opponent_drop = (self.drag.from == "attack_unit" or self.drag.from == "block_unit" or self.drag.from == "order_attacker") and kind and pi == (1 - self.drag.player_index)
+  local allow_opponent_drop = (
+    self.drag.from == "attack_unit"
+    or self.drag.from == "block_unit"
+    or self.drag.from == "order_attacker"
+    or (self.drag.from == "unit_worker_card" and kind == "structure")
+  ) and kind and pi == (1 - self.drag.player_index)
   if not kind or (pi ~= self.drag.player_index and not allow_opponent_drop) then
     if self.drag.from ~= "attack_unit" and self.drag.from ~= "order_attacker" then
       self:_spawn_snap_back()
@@ -2039,6 +2044,31 @@ function GameState:mousereleased(x, y, button, istouch, presses)
     if not did_drop then sound.play("error") end
     self.drag = nil
     return
+  end
+
+  if from == "unit_worker_card" then
+    local defender_pi = 1 - self.drag.player_index
+    if pi == defender_pi and kind == "structure" then
+      local target
+      if drop_extra == 0 then
+        target = { type = "base" }
+      elseif drop_extra and drop_extra > 0 then
+        target = { type = "board", index = drop_extra }
+      end
+      if target and not can_stage_attack_target(self.game_state, self.drag.player_index, self.drag.board_index, defender_pi, target.index or 0) then
+        target = nil
+      end
+      if target then
+        self:_set_pending_attack(self.drag.board_index, target)
+        did_drop = true
+        sound.play("click")
+        self.drag = nil
+        return
+      end
+      sound.play("error")
+      self.drag = nil
+      return
+    end
   end
 
   if from == "block_unit" then
