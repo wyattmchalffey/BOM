@@ -1090,7 +1090,8 @@ local function is_attack_unit_board_entry(game_state, pi, board_index, require_a
   if not ok or not def then return false end
   if def.kind ~= "Unit" and def.kind ~= "Worker" then return false end
   if require_attack then
-    return (def.attack or 0) > 0
+    local st = entry.state or {}
+    return (def.attack or 0) > 0 and not st.rested
   end
   return true
 end
