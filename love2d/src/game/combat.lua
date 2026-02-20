@@ -22,6 +22,7 @@ end
 
 local function ensure_state(entry)
   entry.state = entry.state or {}
+  if entry.state.rested == nil then entry.state.rested = false end
   return entry.state
 end
 
@@ -505,7 +506,7 @@ function combat.resolve(g)
   for _, p in ipairs({ atk_player, def_player }) do
     for _, e in ipairs(p.board) do
       local st = ensure_state(e)
-      st.damage = 0
+      st.damage = nil
       st.marked_for_death = nil
     end
   end

@@ -571,6 +571,21 @@ local function state_signature(v)
   return table.concat(parts)
 end
 
+local function canonical_unit_state_for_stack(state)
+  local st = {}
+  if type(state) == "table" then
+    for k, v in pairs(state) do
+      st[k] = v
+    end
+  end
+
+  -- Keep rest-state strictly boolean for cleanup consistency.
+  if st.rested == nil then st.rested = false end
+  if st.damage == 0 then st.damage = nil end
+
+  return st
+end
+
 local function group_board_entries(player, kind_filter, forced_singletons)
   local groups = {}
   local group_map = {}
@@ -583,7 +598,7 @@ local function group_board_entries(player, kind_filter, forced_singletons)
       if dominated or is_unit then
         local key = entry.card_id
         if is_unit then
-          local st = entry.state or {}
+          local st = canonical_unit_state_for_stack(entry.state)
           local state_key = state_signature(st)
           if forced_singletons[si] then
             key = "single:" .. tostring(si)

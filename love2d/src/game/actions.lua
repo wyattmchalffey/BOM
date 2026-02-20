@@ -467,7 +467,7 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   -- Remove card from hand and place on board
   local card_id = p.hand[hand_index]
   table.remove(p.hand, hand_index)
-  p.board[#p.board + 1] = { card_id = card_id, state = {} }
+  p.board[#p.board + 1] = { card_id = card_id, state = { rested = false } }
 
   -- Fire on_play triggered abilities
   fire_on_play_triggers(p, g, card_id)
@@ -492,7 +492,9 @@ function actions.deploy_worker_to_unit_row(g, player_index)
   if #p.workerStatePool > 0 then
     restored_state = table.remove(p.workerStatePool)
   end
-  p.board[#p.board + 1] = { card_id = worker_def.id, state = restored_state or {} }
+  local final_state = restored_state or {}
+  if final_state.rested == nil then final_state.rested = false end
+  p.board[#p.board + 1] = { card_id = worker_def.id, state = final_state }
   return true
 end
 
@@ -563,7 +565,7 @@ function actions.build_structure(g, player_index, card_id)
   end
 
   -- Place on board
-  p.board[#p.board + 1] = { card_id = card_id, workers = 0, state = {} }
+  p.board[#p.board + 1] = { card_id = card_id, workers = 0, state = { rested = false } }
 
   -- Fire on_play triggered abilities
   if card_def.abilities then
@@ -809,7 +811,9 @@ function actions.assign_special_worker(g, player_index, sw_index, target)
     sw.assigned_to = target_bi
     return true
   elseif type(target) == "table" and target.type == "field" then
-    p.board[#p.board + 1] = { card_id = sw.card_id, special_worker_index = sw_index, state = copy_table(sw.state or {}) }
+    local field_state = copy_table(sw.state or {})
+    if field_state.rested == nil then field_state.rested = false end
+    p.board[#p.board + 1] = { card_id = sw.card_id, special_worker_index = sw_index, state = field_state }
     sw.assigned_to = { type = "field", board_index = #p.board }
     return true
   end
