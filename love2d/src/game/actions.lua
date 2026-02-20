@@ -109,6 +109,24 @@ local function has_static_effect(card_def, effect_name)
   return false
 end
 
+local function should_skip_awaken(card_def)
+  return has_static_effect(card_def, "cannot_awaken")
+    or has_static_effect(card_def, "stay_rested")
+    or has_static_effect(card_def, "prevent_awakening")
+end
+
+local function awaken_rested_board_combatants(player)
+  for _, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and (card_def.kind == "Unit" or card_def.kind == "Worker") then
+      entry.state = entry.state or {}
+      if entry.state.rested and not should_skip_awaken(card_def) then
+        entry.state.rested = false
+      end
+    end
+  end
+end
+
 local function special_worker_multiplier(sw_card_id)
   local ok, sw_def = pcall(cards.get_card_def, sw_card_id)
   if not ok or not sw_def then return 1 end
@@ -220,6 +238,7 @@ function actions.start_turn(g)
   g.activatedUsedThisTurn = {}
   local active = g.activePlayer
   local p = g.players[active + 1]
+  awaken_rested_board_combatants(p)
   -- Gain workers
   p.totalWorkers = math.min(p.totalWorkers + config.workers_gained_per_turn, p.maxWorkers or 99)
   -- Produce resources from assigned workers
@@ -487,6 +506,11 @@ function actions.reclaim_worker_from_unit_row(g, player_index, board_index)
 
   local ok_def, card_def = pcall(cards.get_card_def, entry.card_id)
   if not ok_def or not card_def or card_def.kind ~= "Worker" then
+    return false
+  end
+
+  local est = entry.state or {}
+  if est.rested then
     return false
   end
 
