@@ -3,6 +3,7 @@
 -- This module provides the dispatch table for resolving effects.
 
 local cards = require("src.game.cards")
+local unit_stats = require("src.game.unit_stats")
 
 local abilities = {}
 
@@ -134,6 +135,50 @@ effect_handlers.skip_draw = function(ability, player, g)
   -- Handled as a flag check during draw phase
 end
 
+effect_handlers.buff_self = function(ability, player, g, context)
+  local args = ability.effect_args or {}
+  local source_entry = context and context.source_entry
+  if type(source_entry) ~= "table" then
+    return
+  end
+
+  source_entry.state = source_entry.state or {}
+  local st = source_entry.state
+
+  local attack_delta = tonumber(args.attack or args.amount) or 0
+  local health_delta = tonumber(args.health) or 0
+  local duration = args.duration or "end_of_turn"
+
+  if duration == "end_of_turn" then
+    if attack_delta ~= 0 then
+      st.temp_attack_bonus = (st.temp_attack_bonus or 0) + attack_delta
+    end
+    if health_delta ~= 0 then
+      st.temp_health_bonus = (st.temp_health_bonus or 0) + health_delta
+    end
+  else
+    if attack_delta ~= 0 then
+      st.attack_bonus = (st.attack_bonus or 0) + attack_delta
+    end
+    if health_delta ~= 0 then
+      st.health_bonus = (st.health_bonus or 0) + health_delta
+    end
+  end
+
+  -- Activating from a stack should split this unit out for clear board state.
+  st.stack_id = nil
+
+  -- Keep values normalized if a buff ends up net-zero.
+  if unit_stats.attack_bonus(st) == 0 then
+    st.attack_bonus = nil
+    st.temp_attack_bonus = nil
+  end
+  if unit_stats.health_bonus(st) == 0 then
+    st.health_bonus = nil
+    st.temp_health_bonus = nil
+  end
+end
+
 -- Return indices of hand cards matching a play_unit ability's criteria.
 function abilities.find_matching_hand_indices(player, effect_args)
   local args = effect_args or {}
@@ -186,10 +231,10 @@ function abilities.find_sacrifice_targets(player, effect_args)
 end
 
 -- Resolve an ability's effect using the dispatch table.
-function abilities.resolve(ability, player, game_state)
+function abilities.resolve(ability, player, game_state, context)
   local handler = effect_handlers[ability.effect]
   if handler then
-    handler(ability, player, game_state)
+    handler(ability, player, game_state, context)
   end
 end
 

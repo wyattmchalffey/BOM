@@ -67,6 +67,22 @@ local function has_subtype(card_def, subtype)
   return false
 end
 
+local function required_upgrade_subtypes(effect_args)
+  local args = effect_args or {}
+  if type(args.subtypes) == "table" and #args.subtypes > 0 then
+    return args.subtypes
+  end
+  return { "Warrior" }
+end
+
+local function has_any_subtype(card_def, subtype_list)
+  if not card_def or type(card_def.subtypes) ~= "table" then return false end
+  for _, req in ipairs(subtype_list or {}) do
+    if has_subtype(card_def, req) then return true end
+  end
+  return false
+end
+
 local function copy_table(t)
   if type(t) ~= "table" then return t end
   local out = {}
@@ -245,7 +261,7 @@ function commands.execute(g, command)
       return fail("ability_not_activatable")
     end
 
-    local activated, activate_reason = actions.activate_ability(g, pi, card_def, source_key, ability_index)
+    local activated, activate_reason = actions.activate_ability(g, pi, card_def, source_key, ability_index, source)
     if not activated then
       return fail(activate_reason or "activate_failed")
     end
@@ -473,13 +489,14 @@ function commands.execute(g, command)
     local ab = card_def.abilities[ability_index]
     if not ab or ab.type ~= "activated" or ab.effect ~= "sacrifice_upgrade" then return fail("not_sacrifice_upgrade_ability") end
     if not can_activate(g, pi, card_def, source_key, ability_index) then return fail("ability_not_activatable") end
+    local upgrade_subtypes = required_upgrade_subtypes(ab.effect_args)
 
     local sacrificed_tier = 0
     if target_board_index then
       local entry = p.board[target_board_index]
       if not entry then return fail("invalid_sacrifice_target") end
       local ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
-      if not ok_t or not tdef or tdef.kind == "Structure" or not has_subtype(tdef, "Warrior") then
+      if not ok_t or not tdef or tdef.kind == "Structure" or not has_any_subtype(tdef, upgrade_subtypes) then
         return fail("invalid_sacrifice_target")
       end
       sacrificed_tier = tdef.tier or 0
@@ -490,7 +507,7 @@ function commands.execute(g, command)
     if hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
     local hand_id = p.hand[hand_index]
     local ok_h, hdef = pcall(cards.get_card_def, hand_id)
-    if not ok_h or not hdef or not has_subtype(hdef, "Warrior") or (hdef.tier or 0) ~= (sacrificed_tier + 1) then
+    if not ok_h or not hdef or not has_any_subtype(hdef, upgrade_subtypes) or (hdef.tier or 0) ~= (sacrificed_tier + 1) then
       return fail("hand_card_not_eligible")
     end
 

@@ -3,6 +3,7 @@
 local util = require("src.ui.util")
 local card_art = require("src.ui.card_art")
 local factions = require("src.data.factions")
+local keywords_data = require("src.data.keywords")
 local res_registry = require("src.data.resources")
 local textures = require("src.fx.textures")
 local res_icons = require("src.ui.res_icons")
@@ -100,6 +101,24 @@ local function ability_effect_text(ab)
     return "Create " .. (args.amount or 1) .. " " .. (args.output or "?")
   elseif e == "buff_attack" then
     return "+" .. (args.amount or 0) .. " ATK"
+  elseif e == "buff_self" then
+    local atk = args.attack or args.amount or 0
+    local hp = args.health or 0
+    local parts = {}
+    if atk ~= 0 then
+      parts[#parts + 1] = (atk > 0 and "+" or "") .. tostring(atk) .. " ATK"
+    end
+    if hp ~= 0 then
+      parts[#parts + 1] = (hp > 0 and "+" or "") .. tostring(hp) .. " HP"
+    end
+    if #parts == 0 then
+      parts[#parts + 1] = "Self buff"
+    end
+    local text = "Gain " .. table.concat(parts, ", ")
+    if args.duration == "end_of_turn" then
+      text = text .. " until end of turn"
+    end
+    return text
   elseif e == "place_counter" then
     return (args.amount or 1) .. " " .. (args.counter or "?") .. " counters"
   elseif e == "heal" then
@@ -299,7 +318,18 @@ local function passive_ability_text(ab)
     elseif e == "buff_warriors_per_scholar" then
       return prefix .. "Buff warriors per scholar"
     elseif e == "grant_keyword" or e == "gain_keyword" then
-      return prefix .. "Grant " .. (args.keyword or "?")
+      local body = "Gain " .. (args.keyword or "?")
+      if args.duration == "end_of_turn" then
+        body = body .. " until end of turn"
+      end
+      if ab.cost and #ab.cost > 0 then
+        local cost_parts = {}
+        for _, c in ipairs(ab.cost) do
+          cost_parts[#cost_parts + 1] = tostring(c.amount or 0) .. " " .. tostring(c.type or "?")
+        end
+        body = "Pay " .. table.concat(cost_parts, ", ") .. ": " .. body
+      end
+      return prefix .. body
     elseif e == "unrest_target" then
       return prefix .. "Cause unrest"
     elseif e == "steal_resource" then
@@ -336,6 +366,134 @@ local function non_activated_text(abilities_list)
   end
   if #parts == 0 then return nil end
   return table.concat(parts, ". ") .. "."
+end
+
+local function trim_text(s)
+  if type(s) ~= "string" then return "" end
+  return (s:gsub("^%s+", ""):gsub("%s+$", ""))
+end
+
+local function build_keyword_name_set()
+  local out = {}
+  for _, kd in pairs(keywords_data or {}) do
+    if type(kd) == "table" and type(kd.name) == "string" and kd.name ~= "" then
+      out[string.lower(kd.name)] = true
+    end
+  end
+  return out
+end
+
+local KEYWORD_NAME_SET = build_keyword_name_set()
+
+local function split_rule_sentences(raw_text)
+  local out = {}
+  if type(raw_text) ~= "string" or raw_text == "" then
+    return out
+  end
+
+  local i = 1
+  local n = #raw_text
+  while i <= n do
+    while i <= n and raw_text:sub(i, i):match("%s") do
+      i = i + 1
+    end
+    if i > n then break end
+
+    local j = i
+    while j <= n and not raw_text:sub(j, j):match("[%.!?]") do
+      j = j + 1
+    end
+
+    if j > n then
+      out[#out + 1] = raw_text:sub(i)
+      break
+    end
+
+    local k = j
+    while k + 1 <= n and raw_text:sub(k + 1, k + 1):match("[%.!?]") do
+      k = k + 1
+    end
+
+    out[#out + 1] = raw_text:sub(i, k)
+    i = k + 1
+  end
+
+  return out
+end
+
+local function is_keyword_sentence(sentence)
+  local core = trim_text(sentence)
+  if core == "" then return false end
+  core = core:gsub("[%.!?:]+$", "")
+  return KEYWORD_NAME_SET[string.lower(core)] == true
+end
+
+local function build_rule_segments_with_keywords(display_text)
+  local sentences = split_rule_sentences(display_text)
+  local segments = {}
+  local normal_parts = {}
+
+  local function flush_normal_parts()
+    if #normal_parts > 0 then
+      segments[#segments + 1] = {
+        text = table.concat(normal_parts, " "),
+        bold = false,
+      }
+      normal_parts = {}
+    end
+  end
+
+  for _, sentence in ipairs(sentences) do
+    local clean = trim_text(sentence)
+    if clean ~= "" then
+      if is_keyword_sentence(clean) then
+        flush_normal_parts()
+        segments[#segments + 1] = { text = clean, bold = true }
+      else
+        normal_parts[#normal_parts + 1] = clean
+      end
+    end
+  end
+
+  flush_normal_parts()
+  return segments
+end
+
+local function draw_rules_text_with_keyword_emphasis(display_text, x, y, max_w, max_y, text_color)
+  local segments = build_rule_segments_with_keywords(display_text)
+  if #segments == 0 then return end
+
+  local font = util.get_font(9)
+  local line_h = font:getHeight()
+  local draw_y = y
+
+  for _, seg in ipairs(segments) do
+    local _, lines = font:getWrap(seg.text, max_w)
+    if #lines == 0 then
+      lines = { seg.text }
+    end
+
+    for _, line in ipairs(lines) do
+      if draw_y > max_y then
+        return
+      end
+      love.graphics.setFont(font)
+      love.graphics.setColor(text_color[1], text_color[2], text_color[3], 0.9)
+      if seg.bold then
+        -- Faux-bold for keyword lines using two close draws.
+        love.graphics.print(line, x, draw_y)
+        love.graphics.print(line, x + 0.7, draw_y)
+      else
+        love.graphics.print(line, x, draw_y)
+      end
+      draw_y = draw_y + line_h
+    end
+
+    -- Force a visual break after keyworded ability lines.
+    if seg.bold then
+      draw_y = draw_y + 1
+    end
+  end
 end
 
 ---------------------------------------------------------
@@ -632,13 +790,11 @@ function card_frame.draw(x, y, params)
     display_text = non_activated_text(abilities_list) or non_activated_text(activated_ability and { activated_ability } or nil)
   end
   if display_text and display_text ~= "" then
-    love.graphics.setColor(text_color[1], text_color[2], text_color[3], 0.9)
-    love.graphics.setFont(util.get_font(9))
     local text_y = has_activated_abilities and (ab_y + 2) or (cy + 1)
     -- Ensure text doesn't go below the stat bar
     local max_text_y = y + h - pad - stat_bar_h - 20
     if text_y < max_text_y then
-      love.graphics.printf(display_text, cx + 2, text_y, art_w - 4, "left")
+      draw_rules_text_with_keyword_emphasis(display_text, cx + 2, text_y, art_w - 4, max_text_y, text_color)
     end
   end
 

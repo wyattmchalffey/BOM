@@ -5,6 +5,7 @@ local config = require("src.data.config")
 local cards = require("src.game.cards")
 local abilities = require("src.game.abilities")
 local game_state = require("src.game.state")
+local unit_stats = require("src.game.unit_stats")
 
 local actions = {}
 
@@ -105,6 +106,30 @@ local function has_static_effect(card_def, effect_name)
   if not card_def or not card_def.abilities then return false end
   for _, ab in ipairs(card_def.abilities) do
     if ab.type == "static" and ab.effect == effect_name then return true end
+  end
+  return false
+end
+
+local function has_keyword(card_def, needle, state)
+  if type(state) == "table" then
+    local temp = state.temp_keywords
+    local want_state = string.lower(needle)
+    if type(temp) == "table" then
+      if temp[want_state] == true or temp[needle] == true then
+        return true
+      end
+      for _, kw in pairs(temp) do
+        if type(kw) == "string" and string.lower(kw) == want_state then
+          return true
+        end
+      end
+    end
+  end
+
+  if not card_def or not card_def.keywords then return false end
+  local want = string.lower(needle)
+  for _, kw in ipairs(card_def.keywords) do
+    if string.lower(kw) == want then return true end
   end
   return false
 end
@@ -232,6 +257,38 @@ local function pay_unit_upkeep(player, game_state)
   end
 end
 
+local function destroy_decaying_units(player, game_state)
+  if not player or type(player.board) ~= "table" then
+    return
+  end
+
+  local decay_indices = {}
+  for bi, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and (card_def.kind == "Unit" or card_def.kind == "Worker") then
+      local st = entry.state or {}
+      if has_keyword(card_def, "decaying", st) then
+        decay_indices[#decay_indices + 1] = bi
+      end
+    end
+  end
+
+  for i = #decay_indices, 1, -1 do
+    destroy_board_entry(player, game_state, decay_indices[i])
+  end
+end
+
+local function clear_end_of_turn_modifiers(player)
+  if not player or type(player.board) ~= "table" then
+    return
+  end
+  for _, entry in ipairs(player.board) do
+    if type(entry) == "table" and type(entry.state) == "table" then
+      unit_stats.clear_end_of_turn(entry.state)
+    end
+  end
+end
+
 -- Get the play_cost_sacrifice ability from a card def (returns ability or nil)
 local function get_sacrifice_ability(card_def)
   if not card_def or not card_def.abilities then return nil end
@@ -323,6 +380,9 @@ end
 function actions.end_turn(g)
   local ending_player = g.players[g.activePlayer + 1]
   pay_unit_upkeep(ending_player, g)
+  destroy_decaying_units(g.players[1], g)
+  destroy_decaying_units(g.players[2], g)
+  clear_end_of_turn_modifiers(ending_player)
 
   g.activePlayer = (g.activePlayer == 0) and 1 or 0
   g.turnNumber = g.turnNumber + 1
@@ -434,7 +494,7 @@ end
 -- Activate an ability on a card (base, structure, etc.)
 -- source_key: unique string like "base:1" or "board:3:2" for tracking once-per-turn
 -- ability_index: optional index into card_def.abilities (defaults to first activated)
-function actions.activate_ability(g, player_index, card_def, source_key, ability_index)
+function actions.activate_ability(g, player_index, card_def, source_key, ability_index, source)
   if g.phase ~= "MAIN" then return false, "wrong_phase" end
   if player_index ~= g.activePlayer then return false, "not_active_player" end
   local p = g.players[player_index + 1]
@@ -458,7 +518,17 @@ function actions.activate_ability(g, player_index, card_def, source_key, ability
   g.activatedUsedThisTurn[key] = true
 
   -- Resolve effect
-  abilities.resolve(ability, p, g)
+  local source_entry = nil
+  if type(source) == "table" and source.type == "board" and type(source.index) == "number" then
+    source_entry = p.board[source.index]
+  end
+  abilities.resolve(ability, p, g, {
+    source = source,
+    source_entry = source_entry,
+    source_key = source_key,
+    ability_index = ability_index,
+    player_index = player_index,
+  })
 
   return true
 end

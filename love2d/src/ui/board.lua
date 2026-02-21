@@ -5,6 +5,7 @@ local card_frame = require("src.ui.card_frame")
 local util = require("src.ui.util")
 local deck_assets = require("src.ui.deck_assets")
 local cards = require("src.game.cards")
+local unit_stats = require("src.game.unit_stats")
 local abilities = require("src.game.abilities")
 local factions = require("src.data.factions")
 local config = require("src.data.config")
@@ -728,7 +729,9 @@ local function group_board_entries(player, kind_filter, forced_singletons)
           if forced_singletons[si] then
             key = "single:" .. tostring(si)
           elseif st.stack_id ~= nil then
-            key = "stack:" .. tostring(st.stack_id) .. ":state:" .. state_key
+            -- Keep stack grouping card-specific so mixed-card stacks never collapse
+            -- into a single clickable tile with the wrong board index/card identity.
+            key = "stack:" .. tostring(st.stack_id) .. ":card:" .. tostring(entry.card_id) .. ":state:" .. state_key
           else
             key = "unit:" .. tostring(entry.card_id) .. ":state:" .. state_key
           end
@@ -883,6 +886,10 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.setFont(util.get_font(10))
     love.graphics.printf("HP " .. tostring(life), tx + 4, stat_y + stat_h / 2 - 6, badge_w, "center")
   elseif (sdef.kind == "Unit" or sdef.kind == "Worker") and sdef.attack and sdef.health then
+    local attack_bonus = unit_stats.attack_bonus(st)
+    local health_bonus = unit_stats.health_bonus(st)
+    local effective_attack = unit_stats.effective_attack(sdef, st)
+    local effective_health = unit_stats.effective_health(sdef, st)
     local stat_h = 20
     local stat_y = ty + th - stat_h - 4
     local half_w = (tw - 12) / 2
@@ -894,9 +901,15 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.rectangle("line", tx + 4, stat_y, half_w, stat_h, 3, 3)
     love.graphics.setColor(1, 1, 1, 0.05)
     love.graphics.rectangle("fill", tx + 5, stat_y + 1, half_w - 2, 1)
-    love.graphics.setColor(1, 1, 1, alpha)
+    if attack_bonus > 0 then
+      love.graphics.setColor(0.75, 1.0, 0.75, alpha)
+    elseif attack_bonus < 0 then
+      love.graphics.setColor(1.0, 0.75, 0.75, alpha)
+    else
+      love.graphics.setColor(1, 1, 1, alpha)
+    end
     love.graphics.setFont(util.get_font(10))
-    love.graphics.printf("ATK " .. tostring(sdef.attack), tx + 4, stat_y + stat_h / 2 - 6, half_w, "center")
+    love.graphics.printf("ATK " .. tostring(effective_attack), tx + 4, stat_y + stat_h / 2 - 6, half_w, "center")
     -- HP badge (right)
     local right_x = tx + tw - 4 - half_w
     love.graphics.setColor(0.2, 0.35, 0.2, 0.35 * alpha)
@@ -905,9 +918,46 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.rectangle("line", right_x, stat_y, half_w, stat_h, 3, 3)
     love.graphics.setColor(1, 1, 1, 0.05)
     love.graphics.rectangle("fill", right_x + 1, stat_y + 1, half_w - 2, 1)
-    love.graphics.setColor(1, 1, 1, alpha)
+    if health_bonus > 0 then
+      love.graphics.setColor(0.75, 1.0, 0.75, alpha)
+    elseif health_bonus < 0 then
+      love.graphics.setColor(1.0, 0.75, 0.75, alpha)
+    else
+      love.graphics.setColor(1, 1, 1, alpha)
+    end
     love.graphics.setFont(util.get_font(10))
-    love.graphics.printf("HP " .. tostring(sdef.health), right_x, stat_y + stat_h / 2 - 6, half_w, "center")
+    love.graphics.printf("HP " .. tostring(effective_health), right_x, stat_y + stat_h / 2 - 6, half_w, "center")
+
+    if attack_bonus ~= 0 or health_bonus ~= 0 then
+      local mods = {}
+      if attack_bonus ~= 0 then
+        mods[#mods + 1] = (attack_bonus > 0 and "+" or "") .. tostring(attack_bonus) .. "ATK"
+      end
+      if health_bonus ~= 0 then
+        mods[#mods + 1] = (health_bonus > 0 and "+" or "") .. tostring(health_bonus) .. "HP"
+      end
+      local mod_text = table.concat(mods, " ")
+      local mod_font = util.get_font(8)
+      local tag_w = math.min(tw - 8, mod_font:getWidth(mod_text) + 8)
+      local tag_h = 12
+      local tag_x = tx + 4
+      local tag_y = ty + 20
+      if attack_bonus > 0 or health_bonus > 0 then
+        love.graphics.setColor(0.12, 0.28, 0.12, 0.92)
+        love.graphics.rectangle("fill", tag_x, tag_y, tag_w, tag_h, 3, 3)
+        love.graphics.setColor(0.55, 0.9, 0.55, 0.9)
+        love.graphics.rectangle("line", tag_x, tag_y, tag_w, tag_h, 3, 3)
+        love.graphics.setColor(0.9, 1.0, 0.9, 1.0)
+      else
+        love.graphics.setColor(0.32, 0.12, 0.12, 0.92)
+        love.graphics.rectangle("fill", tag_x, tag_y, tag_w, tag_h, 3, 3)
+        love.graphics.setColor(0.9, 0.55, 0.55, 0.9)
+        love.graphics.rectangle("line", tag_x, tag_y, tag_w, tag_h, 3, 3)
+        love.graphics.setColor(1.0, 0.9, 0.9, 1.0)
+      end
+      love.graphics.setFont(mod_font)
+      love.graphics.printf(mod_text, tag_x, tag_y + 2, tag_w, "center")
+    end
   end
 
   local ab_btn_y = is_base and (ty + 36) or (ty + 34)
@@ -1230,6 +1280,10 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     -- Sacrifice selection overlay: highlight eligible tiles, dim others
     local sac_indices = hand_state and hand_state.sacrifice_eligible_indices
     if sac_indices and panel == 0 then
+      local allow_worker_sacrifice = true
+      if hand_state.sacrifice_allow_workers ~= nil then
+        allow_worker_sacrifice = hand_state.sacrifice_allow_workers
+      end
       local function is_sac_eligible(si)
         for _, ei in ipairs(sac_indices) do
           if ei == si then return true end
@@ -1256,30 +1310,32 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
           love.graphics.rectangle("fill", tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
         end
       end
-      -- Highlight all worker locations (any workers can be sacrificed)
-      local sac_pulse = 0.3 + 0.2 * math.sin(t * 4)
-      local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
-      local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player) - count_field_worker_cards(player)
-      if unassigned > 0 then
-        love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
-        love.graphics.setLineWidth(2)
-        love.graphics.rectangle("line", uax - 2, uay - 2, uaw + 4, uah + 4, 6, 6)
-        love.graphics.setLineWidth(1)
-      end
-      local srl_x, srl_y, srl_w, srl_h = board.resource_left_rect(px, py, pw, ph, panel)
-      local res_left_key = (player.faction == "Human") and "wood" or "food"
-      if (player.workersOn[res_left_key] or 0) > 0 then
-        love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
-        love.graphics.setLineWidth(2)
-        love.graphics.rectangle("line", srl_x - 2, srl_y - 2, srl_w + 4, srl_h + 4, 6, 6)
-        love.graphics.setLineWidth(1)
-      end
-      local srr_x, srr_y, srr_w, srr_h = board.resource_right_rect(px, py, pw, ph, panel)
-      if (player.workersOn.stone or 0) > 0 then
-        love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
-        love.graphics.setLineWidth(2)
-        love.graphics.rectangle("line", srr_x - 2, srr_y - 2, srr_w + 4, srr_h + 4, 6, 6)
-        love.graphics.setLineWidth(1)
+      if allow_worker_sacrifice then
+        -- Highlight all worker locations when workers are legal sacrifices.
+        local sac_pulse = 0.3 + 0.2 * math.sin(t * 4)
+        local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
+        local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player) - count_field_worker_cards(player)
+        if unassigned > 0 then
+          love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", uax - 2, uay - 2, uaw + 4, uah + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        end
+        local srl_x, srl_y, srl_w, srl_h = board.resource_left_rect(px, py, pw, ph, panel)
+        local res_left_key = (player.faction == "Human") and "wood" or "food"
+        if (player.workersOn[res_left_key] or 0) > 0 then
+          love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", srl_x - 2, srl_y - 2, srl_w + 4, srl_h + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        end
+        local srr_x, srr_y, srr_w, srr_h = board.resource_right_rect(px, py, pw, ph, panel)
+        if (player.workersOn.stone or 0) > 0 then
+          love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", srr_x - 2, srr_y - 2, srr_w + 4, srr_h + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        end
       end
       -- Prompt banner
       love.graphics.setFont(util.get_font(12))
@@ -1711,7 +1767,6 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
         local s_ok, sdef = pcall(cards.get_card_def, group.card_id)
         local tx = start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
         local tw, th = BFIELD_TILE_W, BFIELD_TILE_H
-        if tx + tw > row_ax + row_aw + 2 then break end
         if util.point_in_rect(mx, my, tx, row_ay, tw, th) then
           local si = group.first_si
           if s_ok and sdef and sdef.abilities then

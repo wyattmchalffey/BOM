@@ -12,6 +12,7 @@ local popup = require("src.fx.popup")
 local shake = require("src.fx.shake")
 local sound = require("src.fx.sound")
 local cards = require("src.game.cards")
+local unit_stats = require("src.game.unit_stats")
 local abilities = require("src.game.abilities")
 local card_frame = require("src.ui.card_frame")
 local textures = require("src.fx.textures")
@@ -65,7 +66,7 @@ function GameState.new(opts)
     pending_play_unit = nil,      -- { source, ability_index, effect_args, eligible_indices }
     pending_sacrifice = nil,      -- { source, ability_index, effect_args, eligible_board_indices }
     pending_hand_sacrifice = nil, -- { hand_index, required_count, selected_targets }
-    pending_upgrade = nil, -- { source, ability_index, stage, sacrifice_target, eligible_hand_indices, eligible_board_indices }
+    pending_upgrade = nil, -- { source, ability_index, stage, sacrifice_target, eligible_hand_indices, eligible_board_indices, eligible_worker_sacrifice }
     hand_y_offsets = {},          -- per-card animated y offset (negative = raised)
     command_log = replay.new_log({
       command_schema_version = commands.SCHEMA_VERSION,
@@ -83,7 +84,7 @@ function GameState.new(opts)
     reconnect_attempts = 0,
     reconnect_timer = 0,
     pending_attack_declarations = {}, -- { { attacker_board_index, target={type="base"|"board", index?} } }
-    pending_attack_trigger_targets = {}, -- { { attacker_board_index, ability_index, target_board_index } }
+    pending_attack_trigger_targets = {}, -- { { attacker_board_index, ability_index, target_board_index?, activate? } }
     pending_block_assignments = {}, -- { { blocker_board_index, attacker_board_index } }
     pending_damage_orders = {}, -- map attacker_board_index -> ordered blocker board indices
     sync_poll_timer = 0,
@@ -108,7 +109,7 @@ function GameState.new(opts)
       if remote_state then
         self.game_state = remote_state
       end
-      self.multiplayer_status = "Connected (authoritative)"
+      self.multiplayer_status = "Connected"
     else
       self.multiplayer_error = connected.reason
       self.multiplayer_status = "Multiplayer unavailable: " .. tostring(connected.reason)
@@ -148,13 +149,31 @@ function GameState:player_to_panel(pi)
 end
 
 local function should_trigger_reconnect(reason)
-  return reason == "not_connected"
+  if type(reason) ~= "string" then
+    return false
+  end
+
+  if reason == "not_connected"
     or reason == "missing_transport"
     or reason == "transport_send_failed"
     or reason == "transport_receive_failed"
     or reason == "transport_decode_failed"
     or reason == "transport_encode_failed"
     or reason == "transport_error"
+    or reason == "transport_timeout"
+    or reason == "transport_no_protocol_response"
+    or reason == "thread_stopped"
+  then
+    return true
+  end
+
+  local lowered = string.lower(reason)
+  if lowered:find("transport_", 1, true) then return true end
+  if lowered:find("receive_error", 1, true) then return true end
+  if lowered:find("connection lost", 1, true) then return true end
+  if lowered:find("ws_connect_failed", 1, true) then return true end
+  if lowered:find("thread error", 1, true) then return true end
+  return false
 end
 
 function GameState:_queue_reconnect(reason)
@@ -169,9 +188,7 @@ end
 
 function GameState:_attempt_reconnect()
   if not self.authoritative_adapter then return false end
-
-  local reconnected = self.authoritative_adapter:reconnect()
-  if reconnected.ok then
+  if self.authoritative_adapter.connected then
     local remote_state = self.authoritative_adapter:get_state()
     if remote_state then
       self.game_state = remote_state
@@ -180,7 +197,33 @@ function GameState:_attempt_reconnect()
     self.reconnect_attempts = 0
     self.reconnect_timer = 0
     self.multiplayer_error = nil
-    self.multiplayer_status = "Connected (authoritative)"
+    self.multiplayer_status = "Connected"
+    return true
+  end
+
+  local ok_reconnect, reconnected = pcall(function()
+    return self.authoritative_adapter:reconnect()
+  end)
+  if not ok_reconnect then
+    reconnected = { ok = false, reason = tostring(reconnected), meta = {} }
+  end
+
+  if reconnected.ok then
+    if reconnected.meta and reconnected.meta.pending then
+      self.reconnect_timer = 0.25
+      self.multiplayer_status = "Reconnecting..."
+      return false
+    end
+
+    local remote_state = self.authoritative_adapter:get_state()
+    if remote_state then
+      self.game_state = remote_state
+    end
+    self.reconnect_pending = false
+    self.reconnect_attempts = 0
+    self.reconnect_timer = 0
+    self.multiplayer_error = nil
+    self.multiplayer_status = "Connected"
     return true
   end
 
@@ -308,6 +351,11 @@ function GameState:dispatch_command(command)
   if self.authoritative_adapter then
     local ok_submit, submit_result = pcall(function() return self.authoritative_adapter:submit(command) end)
     if not ok_submit then
+      local submit_reason = tostring(submit_result)
+      if should_trigger_reconnect(submit_reason) then
+        self:_queue_reconnect(submit_reason)
+        return { ok = false, reason = submit_reason, meta = {} }
+      end
       self:_handle_disconnect("Connection lost")
       return { ok = false, reason = "disconnected" }
     end
@@ -329,7 +377,7 @@ function GameState:dispatch_command(command)
           self.game_state = remote_state
         end
       end
-      self.multiplayer_status = "Connected (authoritative)"
+      self.multiplayer_status = "Connected"
     else
       self.multiplayer_status = "Multiplayer warning: " .. tostring(result.reason)
       if should_trigger_reconnect(result.reason) then
@@ -490,10 +538,22 @@ function GameState:update(dt)
   if self.authoritative_adapter and self.authoritative_adapter.poll then
     local ok_poll, poll_err = pcall(function() self.authoritative_adapter:poll() end)
     if not ok_poll then
-      print("[game] poll error: " .. tostring(poll_err))
-      self:_handle_disconnect("Connection lost")
+      local poll_reason = tostring(poll_err)
+      print("[game] poll error: " .. poll_reason)
+      if should_trigger_reconnect(poll_reason) then
+        self:_queue_reconnect(poll_reason)
+      else
+        self:_handle_disconnect("Connection lost")
+      end
     elseif self.authoritative_adapter._disconnected then
-      self:_handle_disconnect("Opponent disconnected")
+      local disconnect_reason = tostring(self.authoritative_adapter._disconnect_reason or "transport_receive_failed")
+      self.authoritative_adapter._disconnected = false
+      self.authoritative_adapter._disconnect_reason = nil
+      if should_trigger_reconnect(disconnect_reason) then
+        self:_queue_reconnect(disconnect_reason)
+      else
+        self:_handle_disconnect("Opponent disconnected")
+      end
     else
       if self.authoritative_adapter.state_changed then
         self.authoritative_adapter.state_changed = false
@@ -510,8 +570,13 @@ function GameState:update(dt)
       self.sync_poll_timer = self.sync_poll_interval
       local ok_sync, snap = pcall(function() return self.authoritative_adapter:sync_snapshot() end)
       if not ok_sync then
-        print("[game] sync_snapshot error: " .. tostring(snap))
-        self:_handle_disconnect("Connection lost")
+        local sync_reason = tostring(snap)
+        print("[game] sync_snapshot error: " .. sync_reason)
+        if should_trigger_reconnect(sync_reason) then
+          self:_queue_reconnect(sync_reason)
+        else
+          self:_handle_disconnect("Connection lost")
+        end
       elseif snap.ok then
         local remote_state = self.authoritative_adapter:get_state()
         if remote_state then
@@ -585,7 +650,7 @@ function GameState:_set_pending_attack(attacker_board_index, target)
   local ok_def, attacker_def = pcall(cards.get_card_def, attacker_entry.card_id)
   if not ok_def or not attacker_def then return end
   if attacker_def.kind ~= "Unit" and attacker_def.kind ~= "Worker" then return end
-  if (attacker_def.attack or 0) <= 0 then return end
+  if unit_stats.effective_attack(attacker_def, attacker_entry.state) <= 0 then return end
 
   local ast = attacker_entry.state or {}
   if ast.rested then return end
@@ -620,27 +685,43 @@ function GameState:_clear_pending_attack_trigger_targets()
   self.pending_attack_trigger_targets = {}
 end
 
-function GameState:_get_pending_attack_trigger_target(attacker_board_index, ability_index)
+function GameState:_pending_attack_trigger_entry(attacker_board_index, ability_index, create_if_missing)
   for _, item in ipairs(self.pending_attack_trigger_targets or {}) do
     if item.attacker_board_index == attacker_board_index and item.ability_index == ability_index then
-      return item.target_board_index
+      return item
     end
   end
-  return nil
+
+  if not create_if_missing then
+    return nil
+  end
+
+  local item = {
+    attacker_board_index = attacker_board_index,
+    ability_index = ability_index,
+  }
+  self.pending_attack_trigger_targets[#self.pending_attack_trigger_targets + 1] = item
+  return item
+end
+
+function GameState:_get_pending_attack_trigger_target(attacker_board_index, ability_index)
+  local item = self:_pending_attack_trigger_entry(attacker_board_index, ability_index, false)
+  return item and item.target_board_index or nil
+end
+
+function GameState:_get_pending_attack_trigger_activation(attacker_board_index, ability_index)
+  local item = self:_pending_attack_trigger_entry(attacker_board_index, ability_index, false)
+  return item and item.activate or nil
 end
 
 function GameState:_set_pending_attack_trigger_target(attacker_board_index, ability_index, target_board_index)
-  for _, item in ipairs(self.pending_attack_trigger_targets or {}) do
-    if item.attacker_board_index == attacker_board_index and item.ability_index == ability_index then
-      item.target_board_index = target_board_index
-      return
-    end
-  end
-  self.pending_attack_trigger_targets[#self.pending_attack_trigger_targets + 1] = {
-    attacker_board_index = attacker_board_index,
-    ability_index = ability_index,
-    target_board_index = target_board_index,
-  }
+  local item = self:_pending_attack_trigger_entry(attacker_board_index, ability_index, true)
+  item.target_board_index = target_board_index
+end
+
+function GameState:_set_pending_attack_trigger_activation(attacker_board_index, ability_index, activate)
+  local item = self:_pending_attack_trigger_entry(attacker_board_index, ability_index, true)
+  item.activate = (activate == true) and true or nil
 end
 
 function GameState:_is_pending_attack_trigger_target_legal(defender_pi, board_index)
@@ -672,9 +753,18 @@ function GameState:_active_attack_trigger_for_targeting(combat_state)
   end
 
   for _, trigger in ipairs(combat_state.attack_triggers) do
-    if not trigger.resolved then
+    if not trigger.resolved and trigger.requires_target then
       local selected = self:_get_pending_attack_trigger_target(trigger.attacker_board_index, trigger.ability_index)
       if selected == nil then
+        return trigger
+      end
+    end
+  end
+
+  for _, trigger in ipairs(combat_state.attack_triggers) do
+    if not trigger.resolved and trigger.optional_activate then
+      local activate = self:_get_pending_attack_trigger_activation(trigger.attacker_board_index, trigger.ability_index)
+      if activate ~= true then
         return trigger
       end
     end
@@ -691,11 +781,18 @@ function GameState:_build_attack_trigger_target_payload(combat_state)
   for _, trigger in ipairs(combat_state.attack_triggers) do
     if not trigger.resolved then
       local selected = self:_get_pending_attack_trigger_target(trigger.attacker_board_index, trigger.ability_index)
-      if selected ~= nil then
+      local activate = self:_get_pending_attack_trigger_activation(trigger.attacker_board_index, trigger.ability_index)
+      if trigger.requires_target and selected ~= nil then
         payload[#payload + 1] = {
           attacker_board_index = trigger.attacker_board_index,
           ability_index = trigger.ability_index,
           target_board_index = selected,
+        }
+      elseif trigger.optional_activate and activate == true then
+        payload[#payload + 1] = {
+          attacker_board_index = trigger.attacker_board_index,
+          ability_index = trigger.ability_index,
+          activate = true,
         }
       end
     end
@@ -717,7 +814,7 @@ function GameState:_prune_invalid_pending_attacks()
       local ok_def, def = pcall(cards.get_card_def, entry.card_id)
       local st = entry.state or {}
       local already_attacked = (st.attacked_turn == self.game_state.turnNumber) and (not can_attack_multiple_times(def))
-      if ok_def and def and (def.kind == "Unit" or def.kind == "Worker") and (def.attack or 0) > 0 and not st.rested and not already_attacked then
+      if ok_def and def and (def.kind == "Unit" or def.kind == "Worker") and unit_stats.effective_attack(def, st) > 0 and not st.rested and not already_attacked then
         kept[#kept + 1] = decl
       end
     end
@@ -912,20 +1009,23 @@ function GameState:_draw_attack_trigger_targeting_overlay()
       pending_attack_trigger_targets = self.pending_attack_trigger_targets,
     }
     local active_trigger = self:_active_attack_trigger_for_targeting(c)
-    local legal_targets = self:_attack_trigger_legal_targets(c)
+    local legal_targets = {}
+    if active_trigger and active_trigger.requires_target then
+      legal_targets = self:_attack_trigger_legal_targets(c)
 
-    for _, target_index in ipairs(legal_targets) do
-      local tx, ty = board.board_entry_center(self.game_state, c.defender, target_index, self.local_player_index, combat_ui)
-      if tx and ty then
-        local glow = 0.5 + 0.25 * math.sin(t * 4)
-        local rw = board.BFIELD_TILE_W + 8
-        local rh = board.BFIELD_TILE_H + 8
-        local rx = tx - rw / 2
-        local ry = ty - rh / 2
-        love.graphics.setColor(0.22, 0.8, 1.0, glow * 0.55)
-        love.graphics.setLineWidth(2)
-        love.graphics.rectangle("line", rx, ry, rw, rh, 7, 7)
-        love.graphics.setLineWidth(1)
+      for _, target_index in ipairs(legal_targets) do
+        local tx, ty = board.board_entry_center(self.game_state, c.defender, target_index, self.local_player_index, combat_ui)
+        if tx and ty then
+          local glow = 0.5 + 0.25 * math.sin(t * 4)
+          local rw = board.BFIELD_TILE_W + 8
+          local rh = board.BFIELD_TILE_H + 8
+          local rx = tx - rw / 2
+          local ry = ty - rh / 2
+          love.graphics.setColor(0.22, 0.8, 1.0, glow * 0.55)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", rx, ry, rw, rh, 7, 7)
+          love.graphics.setLineWidth(1)
+        end
       end
     end
 
@@ -939,26 +1039,44 @@ function GameState:_draw_attack_trigger_targeting_overlay()
             self:_draw_arrow(sx, sy, tx, ty, { 1.0, 0.85, 0.35, 0.9 })
           end
         end
+
+        if trigger.optional_activate and self:_get_pending_attack_trigger_activation(trigger.attacker_board_index, trigger.ability_index) == true then
+          local sx, sy = board.board_entry_center(self.game_state, c.attacker, trigger.attacker_board_index, self.local_player_index, combat_ui)
+          if sx and sy then
+            local glow = 0.55 + 0.25 * math.sin(t * 4)
+            local rw = board.BFIELD_TILE_W + 10
+            local rh = board.BFIELD_TILE_H + 10
+            local rx = sx - rw / 2
+            local ry = sy - rh / 2
+            love.graphics.setColor(0.2, 0.85, 0.45, glow * 0.25)
+            love.graphics.rectangle("fill", rx, ry, rw, rh, 8, 8)
+            love.graphics.setColor(0.3, 1.0, 0.6, glow * 0.9)
+            love.graphics.setLineWidth(2)
+            love.graphics.rectangle("line", rx, ry, rw, rh, 8, 8)
+            love.graphics.setLineWidth(1)
+          end
+        end
       end
     end
 
-    local prompt_text = "Targets selected. Press Pass to continue"
-    if active_trigger then
+    local function trigger_attacker_name(trigger)
       local attacker_name = "Attacker"
       local atk_player = self.game_state.players[c.attacker + 1]
-      local atk_entry = atk_player and atk_player.board and atk_player.board[active_trigger.attacker_board_index]
+      local atk_entry = atk_player and atk_player.board and atk_player.board[trigger.attacker_board_index]
       if atk_entry then
         local ok_def, def = pcall(cards.get_card_def, atk_entry.card_id)
         if ok_def and def and def.name then
           attacker_name = def.name
         end
       end
+      return attacker_name
+    end
 
-      if #legal_targets > 0 then
-        prompt_text = attacker_name .. ": select a unit-row target, then Pass"
-      else
-        prompt_text = attacker_name .. ": no valid unit-row targets. Press Pass"
-      end
+    local prompt_text = "On Attack choices set. Press Pass to continue"
+    local border_color = { 1.0, 0.78, 0.32, 0.85 }
+    local text_color = { 0.96, 0.9, 0.8, 1.0 }
+    if active_trigger then
+      local attacker_name = trigger_attacker_name(active_trigger)
 
       local sx, sy = board.board_entry_center(self.game_state, c.attacker, active_trigger.attacker_board_index, self.local_player_index, combat_ui)
       if sx and sy then
@@ -967,18 +1085,47 @@ function GameState:_draw_attack_trigger_targeting_overlay()
         local rh = board.BFIELD_TILE_H + 10
         local rx = sx - rw / 2
         local ry = sy - rh / 2
-        love.graphics.setColor(1.0, 0.75, 0.25, glow * 0.35)
-        love.graphics.rectangle("fill", rx, ry, rw, rh, 8, 8)
-        love.graphics.setColor(1.0, 0.78, 0.32, glow)
-        love.graphics.setLineWidth(2)
-        love.graphics.rectangle("line", rx, ry, rw, rh, 8, 8)
-        love.graphics.setLineWidth(1)
+
+        if active_trigger.requires_target then
+          if #legal_targets > 0 then
+            prompt_text = attacker_name .. ": select a unit-row target, then Pass"
+          else
+            prompt_text = attacker_name .. ": no valid unit-row targets. Press Pass"
+          end
+          love.graphics.setColor(1.0, 0.75, 0.25, glow * 0.35)
+          love.graphics.rectangle("fill", rx, ry, rw, rh, 8, 8)
+          love.graphics.setColor(1.0, 0.78, 0.32, glow)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", rx, ry, rw, rh, 8, 8)
+          love.graphics.setLineWidth(1)
+        elseif active_trigger.optional_activate then
+          local selected = self:_get_pending_attack_trigger_activation(active_trigger.attacker_board_index, active_trigger.ability_index) == true
+          if selected then
+            prompt_text = attacker_name .. ": ability selected. Press Pass to continue"
+            border_color = { 0.3, 0.9, 0.55, 0.85 }
+            text_color = { 0.9, 1.0, 0.92, 1.0 }
+            love.graphics.setColor(0.2, 0.85, 0.45, glow * 0.25)
+            love.graphics.rectangle("fill", rx, ry, rw, rh, 8, 8)
+            love.graphics.setColor(0.3, 1.0, 0.6, glow * 0.9)
+            love.graphics.setLineWidth(2)
+            love.graphics.rectangle("line", rx, ry, rw, rh, 8, 8)
+            love.graphics.setLineWidth(1)
+          else
+            prompt_text = attacker_name .. ": click this attacker to activate On Attack, or Pass to skip"
+            love.graphics.setColor(1.0, 0.75, 0.25, glow * 0.35)
+            love.graphics.rectangle("fill", rx, ry, rw, rh, 8, 8)
+            love.graphics.setColor(1.0, 0.78, 0.32, glow)
+            love.graphics.setLineWidth(2)
+            love.graphics.rectangle("line", rx, ry, rw, rh, 8, 8)
+            love.graphics.setLineWidth(1)
+          end
+        end
       end
     end
 
-    self:_draw_top_combat_prompt(prompt_text, { 1.0, 0.78, 0.32, 0.85 }, { 0.96, 0.9, 0.8, 1.0 })
+    self:_draw_top_combat_prompt(prompt_text, border_color, text_color)
   elseif c.defender == self.local_player_index then
-    self:_draw_top_combat_prompt("Waiting for opponent to declare On Attack targets...", { 0.65, 0.72, 0.9, 0.75 }, { 0.86, 0.9, 1.0, 1.0 })
+    self:_draw_top_combat_prompt("Waiting for opponent to resolve On Attack choices...", { 0.65, 0.72, 0.9, 0.75 }, { 0.86, 0.9, 1.0, 1.0 })
   end
 end
 
@@ -1037,18 +1184,58 @@ function GameState:_draw_combat_priority_overlay()
   self:_draw_top_combat_prompt(prompt_text, border_color, text_color)
 end
 
+function GameState:_draw_pending_hand_sacrifice_overlay()
+  local pending = self.pending_hand_sacrifice
+  if not pending then
+    return
+  end
+
+  local local_p = self.game_state and self.game_state.players and self.game_state.players[self.local_player_index + 1]
+  local card_name = "Card"
+  if local_p and local_p.hand and pending.hand_index then
+    local card_id = local_p.hand[pending.hand_index]
+    if card_id then
+      local ok_def, def = pcall(cards.get_card_def, card_id)
+      if ok_def and def and def.name then
+        card_name = def.name
+      end
+    end
+  end
+
+  local required = pending.required_count or 0
+  local selected = #(pending.selected_targets or {})
+  local prompt_text
+  if required > 0 then
+    prompt_text = card_name .. ": select workers to sacrifice (" .. selected .. "/" .. required .. ")"
+  else
+    prompt_text = card_name .. ": select workers to sacrifice"
+  end
+
+  self:_draw_top_combat_prompt(prompt_text, { 0.95, 0.78, 0.35, 0.85 }, { 0.98, 0.92, 0.8, 1.0 })
+end
+
 function GameState:draw()
   shake.apply()
 
   self:_prune_invalid_pending_attacks()
+
+  local pending_upgrade_sacrifice = (self.pending_upgrade and self.pending_upgrade.stage == "sacrifice") and self.pending_upgrade or nil
+  local pending_upgrade_hand = (self.pending_upgrade and self.pending_upgrade.stage == "hand") and self.pending_upgrade or nil
+  local sacrifice_allow_workers = nil
+  if self.pending_sacrifice or self.pending_hand_sacrifice then
+    sacrifice_allow_workers = true
+  elseif pending_upgrade_sacrifice then
+    sacrifice_allow_workers = pending_upgrade_sacrifice.eligible_worker_sacrifice == true
+  end
 
   -- Build hand_state for board.draw
   local hand_state = {
     hover_index = self.hand_hover_index,
     selected_index = self.hand_selected_index,
     y_offsets = self.hand_y_offsets,
-    eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or (self.pending_upgrade and self.pending_upgrade.eligible_hand_indices) or nil,
-    sacrifice_eligible_indices = (self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices) or (self.pending_upgrade and self.pending_upgrade.eligible_board_indices) or (self.pending_hand_sacrifice and {}) or nil,
+    eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or (pending_upgrade_hand and pending_upgrade_hand.eligible_hand_indices) or nil,
+    sacrifice_eligible_indices = (self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices) or (pending_upgrade_sacrifice and pending_upgrade_sacrifice.eligible_board_indices) or (self.pending_hand_sacrifice and {}) or nil,
+    sacrifice_allow_workers = sacrifice_allow_workers,
     pending_attack_declarations = self.pending_attack_declarations,
     pending_block_assignments = self.pending_block_assignments,
     pending_attack_trigger_targets = self.pending_attack_trigger_targets,
@@ -1057,6 +1244,7 @@ function GameState:draw()
   self:_draw_attack_declaration_arrows()
   self:_draw_attack_trigger_targeting_overlay()
   self:_draw_combat_priority_overlay()
+  self:_draw_pending_hand_sacrifice_overlay()
 
   -- Ambient particles (drawn on top of panels but below UI overlays)
   local active_player = self.game_state.players[self.game_state.activePlayer + 1]
@@ -1129,6 +1317,13 @@ function GameState:draw()
       if entry then
         local ok, def = pcall(cards.get_card_def, entry.card_id)
         if ok and def then
+          local preview_attack = def.attack
+          local preview_health = def.health
+          if si ~= 0 and (def.kind == "Unit" or def.kind == "Worker") then
+            local est = entry.state or {}
+            preview_attack = unit_stats.effective_attack(def, est)
+            preview_health = unit_stats.effective_health(def, est)
+          end
           local mx, my = love.mouse.getPosition()
           local gw, gh = love.graphics.getDimensions()
           -- Enlarged preview with ability text
@@ -1176,8 +1371,8 @@ function GameState:draw()
             text = def.text,
             costs = def.costs,
             upkeep = def.upkeep,
-            attack = def.attack,
-            health = def.health,
+            attack = preview_attack,
+            health = preview_health,
             tier = def.tier,
             abilities_list = def.abilities,
             used_abilities = used_abs,
@@ -1501,6 +1696,90 @@ local function is_worker_board_entry(game_state, pi, board_index)
   return ok and def and def.kind == "Worker"
 end
 
+local function upgrade_required_subtypes(effect_args)
+  local args = effect_args or {}
+  if type(args.subtypes) == "table" and #args.subtypes > 0 then
+    return args.subtypes
+  end
+  return { "Warrior" }
+end
+
+local function has_any_subtype(card_def, required_subtypes)
+  if not card_def or type(card_def.subtypes) ~= "table" then
+    return false
+  end
+  for _, req in ipairs(required_subtypes or {}) do
+    for _, got in ipairs(card_def.subtypes) do
+      if req == got then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+local function find_upgrade_hand_indices(player, effect_args, target_tier)
+  local out = {}
+  local required_subtypes = upgrade_required_subtypes(effect_args)
+  for hi, card_id in ipairs((player and player.hand) or {}) do
+    local ok_h, hdef = pcall(cards.get_card_def, card_id)
+    if ok_h and hdef and has_any_subtype(hdef, required_subtypes) and (hdef.tier or 0) == (target_tier or 0) then
+      out[#out + 1] = hi
+    end
+  end
+  return out
+end
+
+local function has_index(values, wanted)
+  for _, value in ipairs(values or {}) do
+    if value == wanted then return true end
+  end
+  return false
+end
+
+local function find_upgrade_board_sacrifice_indices(player, effect_args)
+  local out = {}
+  local required_subtypes = upgrade_required_subtypes(effect_args)
+  for si, entry in ipairs((player and player.board) or {}) do
+    local ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
+    if ok_t and tdef and tdef.kind ~= "Structure" and has_any_subtype(tdef, required_subtypes) then
+      local next_tier = (tdef.tier or 0) + 1
+      if #find_upgrade_hand_indices(player, effect_args, next_tier) > 0 then
+        out[#out + 1] = si
+      end
+    end
+  end
+  return out
+end
+
+local function pretty_reason(reason)
+  if type(reason) ~= "string" or reason == "" then
+    return "Action failed"
+  end
+  local text = reason:gsub("_", " ")
+  return text:gsub("^%l", string.upper)
+end
+
+local function find_pending_upgrade_target_by_click(game_state, local_player_index, eligible_indices, x, y, combat_ui)
+  local nearest_si = nil
+  local nearest_d2 = nil
+  local pick_radius = math.max(board.BFIELD_TILE_W or 86, board.BFIELD_TILE_H or 74)
+  local pick_d2 = pick_radius * pick_radius
+  for _, si in ipairs(eligible_indices or {}) do
+    local cx, cy = board.board_entry_center(game_state, local_player_index, si, local_player_index, combat_ui)
+    if cx and cy then
+      local dx = x - cx
+      local dy = y - cy
+      local d2 = dx * dx + dy * dy
+      if d2 <= pick_d2 and (not nearest_d2 or d2 < nearest_d2) then
+        nearest_d2 = d2
+        nearest_si = si
+      end
+    end
+  end
+  return nearest_si
+end
+
 local function is_attack_unit_board_entry(game_state, pi, board_index, require_attack)
   local player = game_state.players[pi + 1]
   local entry = player and player.board and player.board[board_index]
@@ -1520,7 +1799,7 @@ local function is_attack_unit_board_entry(game_state, pi, board_index, require_a
     end
     local summoning_sickness = (st.summoned_turn == game_state.turnNumber) and not immediate_attack
     local already_attacked = (st.attacked_turn == game_state.turnNumber) and (not can_attack_multiple_times(def))
-    return (def.attack or 0) > 0 and not st.rested and not summoning_sickness and not already_attacked
+    return unit_stats.effective_attack(def, st) > 0 and not st.rested and not summoning_sickness and not already_attacked
   end
   return true
 end
@@ -1545,8 +1824,8 @@ local function can_stage_attack_target(game_state, attacker_pi, attacker_board_i
   local atk_ok, atk_def = pcall(cards.get_card_def, atk_entry.card_id)
   if not atk_ok or not atk_def then return false end
   if atk_def.kind ~= "Unit" and atk_def.kind ~= "Worker" then return false end
-  if (atk_def.attack or 0) <= 0 then return false end
   local atk_state = atk_entry.state or {}
+  if unit_stats.effective_attack(atk_def, atk_state) <= 0 then return false end
   if atk_state.rested then return false end
   if atk_state.attacked_turn == game_state.turnNumber and not can_attack_multiple_times(atk_def) then
     return false
@@ -1697,13 +1976,30 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     if kind ~= "pass" then
       if combat_state.attacker == self.local_player_index then
         local active_trigger = self:_active_attack_trigger_for_targeting(combat_state)
-        if active_trigger
-          and kind == "structure"
-          and pi == combat_state.defender
-          and idx and idx > 0
-          and self:_is_pending_attack_trigger_target_legal(combat_state.defender, idx) then
-          self:_set_pending_attack_trigger_target(active_trigger.attacker_board_index, active_trigger.ability_index, idx)
-          sound.play("click")
+        if active_trigger and active_trigger.requires_target then
+          if kind == "structure"
+            and pi == combat_state.defender
+            and idx and idx > 0
+            and self:_is_pending_attack_trigger_target_legal(combat_state.defender, idx) then
+            self:_set_pending_attack_trigger_target(active_trigger.attacker_board_index, active_trigger.ability_index, idx)
+            sound.play("click")
+          else
+            sound.play("error")
+          end
+        elseif active_trigger and active_trigger.optional_activate then
+          if kind == "structure"
+            and pi == combat_state.attacker
+            and idx and idx == active_trigger.attacker_board_index then
+            local atk_player = self.game_state.players[combat_state.attacker + 1]
+            if atk_player and abilities.can_pay_cost(atk_player.resources, active_trigger.cost or {}) then
+              self:_set_pending_attack_trigger_activation(active_trigger.attacker_board_index, active_trigger.ability_index, true)
+              sound.play("click")
+            else
+              sound.play("error")
+            end
+          else
+            sound.play("error")
+          end
         else
           sound.play("error")
         end
@@ -1904,18 +2200,25 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   if self.pending_upgrade then
     local pending = self.pending_upgrade
     local p = self.game_state.players[self.local_player_index + 1]
+    local required_subtypes = upgrade_required_subtypes(pending.effect_args)
+    local function upgrade_error(msg)
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      popup.create(msg, px_b + pw_b / 2, py_b + ph_b - 118, { 1.0, 0.45, 0.35 })
+      sound.play("error")
+    end
 
     if pending.stage == "sacrifice" and (kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" or kind == "unassigned_pool") then
-      local eligible = {}
-      for hi, hid in ipairs(p.hand) do
-        local ok_h, hdef = pcall(cards.get_card_def, hid)
-        if ok_h and hdef and hdef.subtypes then
-          local is_w = false
-          for _, st in ipairs(hdef.subtypes) do if st == "Warrior" then is_w = true; break end end
-          if is_w and (hdef.tier or 0) == 1 then eligible[#eligible + 1] = hi end
-        end
+      if pending.eligible_worker_sacrifice ~= true then
+        upgrade_error("No worker upgrade available")
+        return
       end
-      if #eligible == 0 then self.pending_upgrade = nil; sound.play("error"); return end
+      local eligible = find_upgrade_hand_indices(p, pending.effect_args, 1)
+      if #eligible == 0 then
+        pending.eligible_worker_sacrifice = false
+        upgrade_error("No Tier 1 upgrade in hand")
+        return
+      end
       pending.sacrifice_target = { target_worker = kind, target_worker_extra = idx }
       pending.stage = "hand"
       pending.eligible_hand_indices = eligible
@@ -1923,26 +2226,70 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       return
     end
 
-    if pending.stage == "sacrifice" and kind == "structure" then
-      local target_si = idx
-      local entry = p.board[target_si]
-      local ok_t, tdef = entry and pcall(cards.get_card_def, entry.card_id)
-      local is_warrior = false
-      if ok_t and tdef and tdef.subtypes and tdef.kind ~= "Structure" then
-        for _, st in ipairs(tdef.subtypes) do if st == "Warrior" then is_warrior = true; break end end
+    if pending.stage == "sacrifice" and (kind == "structure" or kind == "activate_ability" or kind == "ability_hover" or kind == "unit_row") then
+      local target_si = nil
+      if kind == "structure" then
+        target_si = idx
+      elseif type(extra) == "table" and extra.source == "board" then
+        target_si = extra.board_index
       end
-      if not is_warrior then sound.play("error"); return end
-      local next_tier = (tdef.tier or 0) + 1
-      local eligible = {}
-      for hi, hid in ipairs(p.hand) do
-        local ok_h, hdef = pcall(cards.get_card_def, hid)
-        if ok_h and hdef and hdef.subtypes then
-          local is_w = false
-          for _, st in ipairs(hdef.subtypes) do if st == "Warrior" then is_w = true; break end end
-          if is_w and (hdef.tier or 0) == next_tier then eligible[#eligible + 1] = hi end
+      if pi == self.local_player_index then
+        local nearest_target = find_pending_upgrade_target_by_click(
+          self.game_state,
+          self.local_player_index,
+          pending.eligible_board_indices,
+          x, y,
+          {
+            pending_attack_declarations = self.pending_attack_declarations,
+            pending_block_assignments = self.pending_block_assignments,
+            pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+          }
+        )
+        if nearest_target and nearest_target > 0 then
+          target_si = nearest_target
         end
       end
-      if #eligible == 0 then self.pending_upgrade = nil; sound.play("error"); return end
+      if (not target_si or target_si <= 0) and pi == self.local_player_index then
+        target_si = find_pending_upgrade_target_by_click(
+          self.game_state,
+          self.local_player_index,
+          pending.eligible_board_indices,
+          x, y,
+          {
+            pending_attack_declarations = self.pending_attack_declarations,
+            pending_block_assignments = self.pending_block_assignments,
+            pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+          }
+        )
+      end
+      if not target_si or target_si <= 0 then
+        upgrade_error("Pick a highlighted ally")
+        return
+      end
+
+      local entry = p.board[target_si]
+      local ok_t, tdef = false, nil
+      if entry then
+        ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
+      end
+      if not ok_t or not tdef or tdef.kind == "Structure" or not has_any_subtype(tdef, required_subtypes) then
+        local bad_name = "unknown"
+        if entry then
+          local ok_bad, bad_def = pcall(cards.get_card_def, entry.card_id)
+          if ok_bad and bad_def and bad_def.name then bad_name = bad_def.name end
+        end
+        upgrade_error("Target mismatch: " .. bad_name)
+        return
+      end
+      local next_tier = (tdef.tier or 0) + 1
+      local eligible = find_upgrade_hand_indices(p, pending.effect_args, next_tier)
+      if #eligible == 0 then
+        upgrade_error("No matching upgrade in hand")
+        return
+      end
+      if not has_index(pending.eligible_board_indices, target_si) then
+        pending.eligible_board_indices[#pending.eligible_board_indices + 1] = target_si
+      end
       pending.sacrifice_target = { target_board_index = target_si }
       pending.stage = "hand"
       pending.eligible_hand_indices = eligible
@@ -1978,9 +2325,18 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         self.hand_selected_index = nil
         while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
       else
-        self.pending_upgrade = nil
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        popup.create(pretty_reason(result.reason), px_b + pw_b / 2, py_b + ph_b - 118, { 1.0, 0.45, 0.35 })
         sound.play("error")
       end
+      return
+    end
+
+    -- While a sacrifice-upgrade flow is active, non-matching clicks should
+    -- not silently fall through into drag/combat handlers.
+    if pending.stage == "sacrifice" or pending.stage == "hand" then
+      sound.play("error")
       return
     end
   end
@@ -2268,27 +2624,22 @@ function GameState:mousepressed(x, y, button, istouch, presses)
 
         -- Two-step flow for sacrifice_upgrade abilities (Fighting Pits)
         if ab.effect == "sacrifice_upgrade" then
-          local warrior_indices = {}
-          for si, entry in ipairs(p.board) do
-            local ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
-            if ok_t and tdef and tdef.kind ~= "Structure" and tdef.subtypes then
-              for _, st in ipairs(tdef.subtypes) do
-                if st == "Warrior" then warrior_indices[#warrior_indices + 1] = si; break end
-              end
-            end
-          end
+          local warrior_indices = find_upgrade_board_sacrifice_indices(p, ab.effect_args)
           local has_workers = (p.totalWorkers or 0) > 0
-          if #warrior_indices == 0 and not has_workers then
+          local can_sac_workers = has_workers and (#find_upgrade_hand_indices(p, ab.effect_args, 1) > 0)
+          if #warrior_indices == 0 and not can_sac_workers then
             sound.play("error")
             return
           end
           self.pending_upgrade = {
             source = { type = info.source, index = info.board_index },
             ability_index = info.ability_index,
+            effect_args = ab.effect_args,
             stage = "sacrifice",
             sacrifice_target = nil,
             eligible_hand_indices = nil,
             eligible_board_indices = warrior_indices,
+            eligible_worker_sacrifice = can_sac_workers,
           }
           self.hand_selected_index = nil
           self.pending_play_unit = nil
@@ -2640,7 +2991,10 @@ function GameState:mousereleased(x, y, button, istouch, presses)
             drop_si = drop_si - 1
           end
           local target_entry = self.game_state.players[pi + 1].board[drop_si]
-          local ok_def, target_def = target_entry and pcall(cards.get_card_def, target_entry.card_id)
+          local ok_def, target_def = false, nil
+          if target_entry then
+            ok_def, target_def = pcall(cards.get_card_def, target_entry.card_id)
+          end
           if ok_def and target_def and target_def.kind == "Worker" then
             did_drop = self:dispatch_command({ type = "ASSIGN_SPECIAL_WORKER", player_index = pi, sw_index = sw_index, target = { type = "field" } }).ok
           else

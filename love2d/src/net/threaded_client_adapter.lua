@@ -44,13 +44,16 @@ local response_ch = love.thread.getChannel("tclient_response")
 local push_ch     = love.thread.getChannel("tclient_push")
 local quit_ch     = love.thread.getChannel("tclient_quit")
 
--- Read connection args: { url, player_name, faction, deck }
+-- Read connection args:
+-- { url, player_name, faction, deck, reconnect_match_id?, reconnect_session_token? }
 local args_json = args_ch:demand()
 local args = json.decode(args_json)
 local url = args.url
 local player_name = args.player_name or "Player"
 local faction = args.faction
 local deck = args.deck
+local reconnect_match_id = args.reconnect_match_id
+local reconnect_session_token = args.reconnect_session_token
 
 -- Create sync websocket client directly (not via provider abstraction)
 -- so we have access to the raw socket for non-blocking receives.
@@ -102,7 +105,15 @@ local session = client_session.new({
 })
 
 -- Connect (blocking handshake)
-local connect_result = session:connect()
+local connect_result
+if type(reconnect_match_id) == "string" and reconnect_match_id ~= ""
+   and type(reconnect_session_token) == "string" and reconnect_session_token ~= "" then
+    session.match_id = reconnect_match_id
+    session.session_token = reconnect_session_token
+    connect_result = session:reconnect()
+else
+    connect_result = session:connect()
+end
 if not connect_result.ok then
     result_ch:push(json.encode({ ok = false, reason = connect_result.reason }))
     return
@@ -120,6 +131,7 @@ result_ch:push(json.encode({
     ok = true,
     player_index = connect_result.meta.player_index,
     match_id = connect_result.meta.match_id,
+    session_token = session.session_token,
     state = snap.meta.state,
     checksum = snap.meta.checksum,
 }))
@@ -267,6 +279,16 @@ function threaded_client_adapter.start(opts)
     -- Internal
     _state = nil,
     _checksum = nil,
+    _session_token = nil,
+    _disconnect_reason = nil,
+    _disconnected = false,
+    _reconnecting = false,
+    _connect_opts = {
+      url = opts.url,
+      player_name = opts.player_name or "Player",
+      faction = opts.faction,
+      deck = deep_copy(opts.deck),
+    },
     _thread = nil,
     _args_ch = love.thread.getChannel("tclient_args"),
     _result_ch = love.thread.getChannel("tclient_result"),
@@ -276,53 +298,95 @@ function threaded_client_adapter.start(opts)
     _quit_ch = love.thread.getChannel("tclient_quit"),
   }, threaded_client_adapter)
 
-  -- Clear channels from any previous use
+  self:_start_thread()
+
+  return self
+end
+
+function threaded_client_adapter:_clear_channels()
   self._args_ch:clear()
   self._result_ch:clear()
   self._cmd_ch:clear()
   self._response_ch:clear()
   self._push_ch:clear()
   self._quit_ch:clear()
+end
 
-  -- Start thread
+function threaded_client_adapter:_start_thread(reconnect_opts)
+  reconnect_opts = reconnect_opts or {}
+
+  self:_clear_channels()
+  self.connect_error = nil
+
   self._thread = love.thread.newThread(THREAD_CODE)
   self._args_ch:push(json.encode({
-    url = opts.url,
-    player_name = opts.player_name or "Player",
-    faction = opts.faction,
-    deck = opts.deck,
+    url = self._connect_opts.url,
+    player_name = self._connect_opts.player_name,
+    faction = self._connect_opts.faction,
+    deck = deep_copy(self._connect_opts.deck),
+    reconnect_match_id = reconnect_opts.reconnect_match_id,
+    reconnect_session_token = reconnect_opts.reconnect_session_token,
   }))
   self._thread:start()
+end
 
-  return self
+function threaded_client_adapter:_mark_disconnected(reason)
+  local msg = tostring(reason or "connection_lost")
+  self.connected = false
+  self._reconnecting = false
+  self._disconnected = true
+  self._disconnect_reason = msg
+  self.connect_error = msg
 end
 
 -- Call from update() every frame to drain push and result channels (non-blocking)
 function threaded_client_adapter:poll()
-  -- Check for connection result
-  if not self.connected and not self.connect_error then
+  -- Check for connection/reconnection result
+  if not self.connected then
     local result_json = self._result_ch:pop()
     if result_json then
       local ok_dec, result = pcall(json.decode, result_json)
       if ok_dec and result.ok then
         self.connected = true
+        self.connect_error = nil
         self.local_player_index = result.player_index
         self.match_id = result.match_id
+        if type(result.session_token) == "string" and result.session_token ~= "" then
+          self._session_token = result.session_token
+        end
         self._state = result.state
         self._checksum = result.checksum
         self.state_changed = true
+        self._reconnecting = false
+        self._disconnected = false
+        self._disconnect_reason = nil
       elseif ok_dec then
         self.connect_error = result.reason or "unknown_error"
+        if self._reconnecting then
+          self._reconnecting = false
+          self._disconnected = true
+          self._disconnect_reason = self.connect_error
+        end
       else
         self.connect_error = "decode_error"
+        if self._reconnecting then
+          self._reconnecting = false
+          self._disconnected = true
+          self._disconnect_reason = self.connect_error
+        end
       end
     end
 
-    -- Check thread errors
     if self._thread then
       local thread_err = self._thread:getError()
       if thread_err then
-        self.connect_error = "Thread error: " .. tostring(thread_err)
+        local reason = "Thread error: " .. tostring(thread_err)
+        self.connect_error = reason
+        if self._reconnecting then
+          self._reconnecting = false
+          self._disconnected = true
+          self._disconnect_reason = reason
+        end
       end
     end
   end
@@ -370,12 +434,7 @@ function threaded_client_adapter:poll()
       local ok_dec, err_msg = pcall(json.decode, err_json)
       if ok_dec and not err_msg.ok then
         print("[threaded_client_adapter] async error: " .. tostring(err_msg.reason))
-        -- Receive errors mean the connection is dead
-        if tostring(err_msg.reason):find("receive_error") then
-          self.connected = false
-          self._disconnected = true
-          print("[threaded_client_adapter] connection lost, marking disconnected")
-        end
+        self:_mark_disconnected(err_msg.reason or "async_error")
       end
     end
 
@@ -383,14 +442,10 @@ function threaded_client_adapter:poll()
       local thread_err = self._thread:getError()
       if thread_err then
         print("[threaded_client_adapter] thread error: " .. tostring(thread_err))
-        self.connected = false
-        self._disconnected = true
-      end
-      -- If the thread has stopped running, the connection is dead
-      if not self._thread:isRunning() and not self._disconnected then
+        self:_mark_disconnected("Thread error: " .. tostring(thread_err))
+      elseif not self._thread:isRunning() and not self._disconnected then
         print("[threaded_client_adapter] thread stopped, marking disconnected")
-        self.connected = false
-        self._disconnected = true
+        self:_mark_disconnected("thread_stopped")
       end
     end
   end
@@ -405,6 +460,7 @@ function threaded_client_adapter:connect()
       meta = {
         player_index = self.local_player_index,
         match_id = self.match_id,
+        session_token = self._session_token,
         checksum = self._checksum,
       },
     }
@@ -439,13 +495,43 @@ function threaded_client_adapter:get_state()
   return deep_copy(self._state)
 end
 
--- Reconnect stub (thread handles connection lifecycle)
 function threaded_client_adapter:reconnect()
-  return { ok = false, reason = "threaded_reconnect_not_supported", meta = {} }
+  if self.connected then
+    return {
+      ok = true,
+      reason = "ok",
+      meta = {
+        player_index = self.local_player_index,
+        match_id = self.match_id,
+        checksum = self._checksum,
+      },
+    }
+  end
+
+  if self._reconnecting then
+    return { ok = true, reason = "reconnect_in_progress", meta = { pending = true } }
+  end
+
+  if type(self.match_id) ~= "string" or self.match_id == ""
+      or type(self._session_token) ~= "string" or self._session_token == "" then
+    return { ok = false, reason = "missing_session", meta = {} }
+  end
+
+  self.connected = false
+  self.connect_error = nil
+  self._disconnected = false
+  self._disconnect_reason = nil
+  self._reconnecting = true
+  self:_start_thread({
+    reconnect_match_id = self.match_id,
+    reconnect_session_token = self._session_token,
+  })
+  return { ok = true, reason = "reconnect_started", meta = { pending = true } }
 end
 
 -- Shutdown the background thread
 function threaded_client_adapter:cleanup()
+  self._reconnecting = false
   self._quit_ch:push(true)
 end
 
