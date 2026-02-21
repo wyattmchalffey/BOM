@@ -19,6 +19,7 @@ local particles = require("src.fx.particles")
 local factions_data = require("src.data.factions")
 local config = require("src.data.config")
 local res_registry = require("src.data.resources")
+local deck_profiles = require("src.game.deck_profiles")
 
 local GameState = {}
 GameState.__index = GameState
@@ -28,7 +29,14 @@ function GameState.new(opts)
   local setup = opts.setup or nil
   if not setup then
     local settings = require("src.settings")
-    setup = { players = { [1] = { faction = settings.values.faction } } }
+    setup = {
+      players = {
+        [1] = {
+          faction = settings.values.faction,
+          deck = deck_profiles.get_deck(settings.values.faction),
+        },
+      },
+    }
   end
   local initial_state = game_state_module.create_initial_game_state(setup)
   local self = setmetatable({
@@ -79,6 +87,7 @@ function GameState.new(opts)
     pending_damage_orders = {}, -- map attacker_board_index -> ordered blocker board indices
     sync_poll_timer = 0,
     sync_poll_interval = 1.0,
+    _terminal_announced = false,
   }, GameState)
   -- Cache the hand cursor once
   self._cursor_hand = love.mouse.getSystemCursor("hand")
@@ -201,9 +210,52 @@ function GameState:_handle_disconnect(message)
   self._disconnect_timer = 3.0
 end
 
+local function terminal_title_for_player(g, local_player_index)
+  if not g or not g.is_terminal then
+    return nil
+  end
+  if g.winner == nil then
+    return "Draw"
+  end
+  if g.winner == local_player_index then
+    return "Victory"
+  end
+  return "Defeat"
+end
+
+function GameState:_sync_terminal_state()
+  local g = self.game_state
+  local is_terminal = g and g.is_terminal == true
+  if not is_terminal then
+    self._terminal_announced = false
+    return
+  end
+
+  if self._terminal_announced then
+    return
+  end
+  self._terminal_announced = true
+
+  -- Clear mutable UI state when match ends.
+  self.drag = nil
+  self.hand_selected_index = nil
+  self.pending_play_unit = nil
+  self.pending_sacrifice = nil
+  self.pending_upgrade = nil
+  self.pending_hand_sacrifice = nil
+  self:_clear_pending_attack_declarations()
+  self.pending_block_assignments = {}
+  self.pending_damage_orders = {}
+
+  self.turn_banner_timer = 1.6
+  self.turn_banner_text = terminal_title_for_player(g, self.local_player_index) or "Match Ended"
+  self.multiplayer_status = "Match ended"
+end
+
 function GameState:dispatch_command(command)
   -- Don't process commands during disconnect
   if self._disconnect_timer then return { ok = false, reason = "disconnected" } end
+  if self.game_state and self.game_state.is_terminal then return { ok = false, reason = "game_over" } end
 
   local result
 
@@ -246,6 +298,7 @@ function GameState:dispatch_command(command)
     self:_clear_pending_attack_declarations()
   end
 
+  self:_sync_terminal_state()
   replay.append(self.command_log, command, result, self.game_state)
   if not result.ok then
     sound.play("error")
@@ -427,6 +480,8 @@ function GameState:update(dt)
       self:_attempt_reconnect()
     end
   end
+
+  self:_sync_terminal_state()
 
   -- Disconnect countdown: show message then return to menu
   if self._disconnect_timer then
@@ -1052,6 +1107,32 @@ function GameState:draw()
     love.graphics.printf("Returning to menu...", 0, gh / 2 + 14, gw, "center")
   end
 
+  if self.game_state and self.game_state.is_terminal then
+    local gw, gh = love.graphics.getDimensions()
+    local title = terminal_title_for_player(self.game_state, self.local_player_index) or "Match Ended"
+    local title_color = { 0.9, 0.9, 0.95 }
+    if title == "Victory" then
+      title_color = { 0.45, 1.0, 0.6 }
+    elseif title == "Defeat" then
+      title_color = { 1.0, 0.35, 0.35 }
+    end
+
+    local reason = tostring(self.game_state.reason or "base_destroyed"):gsub("_", " ")
+    local subtitle = "Reason: " .. reason
+    local hint = self.return_to_menu and "Press Esc to return to menu" or "Match complete"
+
+    love.graphics.setColor(0, 0, 0, 0.6)
+    love.graphics.rectangle("fill", 0, gh / 2 - 70, gw, 140)
+    love.graphics.setFont(util.get_title_font(30))
+    love.graphics.setColor(title_color[1], title_color[2], title_color[3], 1)
+    love.graphics.printf(title, 0, gh / 2 - 44, gw, "center")
+    love.graphics.setFont(util.get_font(13))
+    love.graphics.setColor(0.82, 0.84, 0.9, 1)
+    love.graphics.printf(subtitle, 0, gh / 2 + 2, gw, "center")
+    love.graphics.setColor(0.7, 0.72, 0.8, 0.95)
+    love.graphics.printf(hint, 0, gh / 2 + 24, gw, "center")
+  end
+
   if self.multiplayer_status then
     local status_font = util.get_font(11)
     local status_text = self.multiplayer_status
@@ -1091,7 +1172,16 @@ local function is_attack_unit_board_entry(game_state, pi, board_index, require_a
   if def.kind ~= "Unit" and def.kind ~= "Worker" then return false end
   if require_attack then
     local st = entry.state or {}
-    return (def.attack or 0) > 0 and not st.rested
+    local immediate_attack = false
+    for _, kw in ipairs(def.keywords or {}) do
+      local low = string.lower(kw)
+      if low == "rush" or low == "haste" then
+        immediate_attack = true
+        break
+      end
+    end
+    local summoning_sickness = (st.summoned_turn == game_state.turnNumber) and not immediate_attack
+    return (def.attack or 0) > 0 and not st.rested and not summoning_sickness
   end
   return true
 end
@@ -1117,6 +1207,19 @@ local function can_stage_attack_target(game_state, attacker_pi, attacker_board_i
   if not atk_ok or not atk_def then return false end
   if atk_def.kind ~= "Unit" and atk_def.kind ~= "Worker" then return false end
   if (atk_def.attack or 0) <= 0 then return false end
+  local atk_state = atk_entry.state or {}
+  if atk_state.rested then return false end
+  local immediate_attack = false
+  for _, kw in ipairs(atk_def.keywords or {}) do
+    local low = string.lower(kw)
+    if low == "rush" or low == "haste" then
+      immediate_attack = true
+      break
+    end
+  end
+  if atk_state.summoned_turn == game_state.turnNumber and not immediate_attack then
+    return false
+  end
 
   if target_index == 0 then
     return true
@@ -1175,6 +1278,7 @@ end
 
 function GameState:mousepressed(x, y, button, istouch, presses)
   if button ~= 1 then return end -- left click only
+  if self.game_state and self.game_state.is_terminal then return end
   self.mouse_down = true
 
   if deck_viewer.is_open() then
@@ -1573,7 +1677,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       for _, key in ipairs(config.resource_types) do
         before[key] = p.resources[key] or 0
       end
-      self:dispatch_command({ type = "END_TURN" })
+      self:dispatch_command({ type = "END_TURN", player_index = pi })
       -- State now includes START_TURN effects from the host
       new_active = self.game_state.activePlayer
       p = self.game_state.players[new_active + 1]
@@ -1582,13 +1686,13 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       end
     else
       -- Local mode: send END_TURN and START_TURN separately
-      self:dispatch_command({ type = "END_TURN" })
+      self:dispatch_command({ type = "END_TURN", player_index = pi })
       new_active = self.game_state.activePlayer
       p = self.game_state.players[new_active + 1]
       for _, key in ipairs(config.resource_types) do
         before[key] = p.resources[key] or 0
       end
-      self:dispatch_command({ type = "START_TURN" })
+      self:dispatch_command({ type = "START_TURN", player_index = new_active })
       for _, key in ipairs(config.resource_types) do
         after[key] = p.resources[key] or 0
       end
@@ -1998,6 +2102,10 @@ end
 function GameState:mousereleased(x, y, button, istouch, presses)
   if button ~= 1 then return end
   self.mouse_down = false
+  if self.game_state and self.game_state.is_terminal then
+    self.drag = nil
+    return
+  end
 
   if deck_viewer.is_open() then return end
 

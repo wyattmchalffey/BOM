@@ -3,8 +3,8 @@
 -- Works with transport objects that implement:
 --   connect(handshake_payload)
 --   reconnect(reconnect_payload)
---   send_submit(player_index, envelope)
---   request_snapshot()
+--   send_submit(envelope)
+--   request_snapshot(snapshot_payload)
 
 local protocol = require("src.net.protocol")
 local config = require("src.data.config")
@@ -58,6 +58,9 @@ function client_session:connect()
   self.match_id = response.payload.match_id
   self.player_index = response.payload.player_index
   self.session_token = response.payload.session_token
+  if type(self.session_token) ~= "string" or self.session_token == "" then
+    return fail("missing_session_token")
+  end
   self.last_checksum = response.payload.checksum
   self.next_seq = response.payload.next_expected_seq or 1
   self.connected = true
@@ -87,6 +90,9 @@ function client_session:reconnect()
   self.player_index = response.payload.player_index
   self.last_checksum = response.payload.checksum
   self.next_seq = response.payload.next_expected_seq or self.next_seq
+  if type(response.payload.session_token) == "string" and response.payload.session_token ~= "" then
+    self.session_token = response.payload.session_token
+  end
   self.connected = true
 
   return ok({ player_index = self.player_index, match_id = self.match_id })
@@ -94,9 +100,18 @@ end
 
 function client_session:submit(command)
   if not self.connected then return fail("not_connected") end
+  if type(self.session_token) ~= "string" or self.session_token == "" then
+    return fail("missing_session_token")
+  end
 
-  local envelope = protocol.submit_command(self.match_id, self.next_seq, command, self.last_checksum)
-  local response = self.transport:send_submit(self.player_index, envelope)
+  local envelope = protocol.submit_command(
+    self.match_id,
+    self.next_seq,
+    command,
+    self.last_checksum,
+    self.session_token
+  )
+  local response = self.transport:send_submit(envelope)
 
   if response.type == "command_ack" then
     self.next_seq = (response.payload and response.payload.next_expected_seq) or (self.next_seq + 1)
@@ -141,7 +156,10 @@ end
 
 function client_session:request_snapshot()
   if not self.connected then return fail("not_connected") end
-  local response = self.transport:request_snapshot()
+  if not self.match_id or not self.session_token then return fail("missing_session") end
+
+  local snapshot_request = protocol.request_snapshot(self.match_id, self.session_token)
+  local response = self.transport:request_snapshot(snapshot_request)
   if response.type ~= "state_snapshot" then
     return fail("invalid_snapshot_response")
   end

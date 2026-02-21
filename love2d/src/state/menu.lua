@@ -14,6 +14,9 @@ local room_list_fetcher = require("src.net.room_list_fetcher")
 local sound = require("src.fx.sound")
 local settings = require("src.settings")
 local factions_data = require("src.data.factions")
+local game_state = require("src.game.state")
+local deck_validation = require("src.game.deck_validation")
+local deck_profiles = require("src.game.deck_profiles")
 
 local MenuState = {}
 MenuState.__index = MenuState
@@ -54,6 +57,13 @@ function MenuState.new(callbacks)
 
     -- Deck builder screen state
     deckbuilder_hover = nil,
+    deckbuilder_faction = nil,
+    deckbuilder_cards = {},
+    deckbuilder_counts = {},
+    deckbuilder_total = 0,
+    deckbuilder_min = 0,
+    deckbuilder_max = 0,
+    deckbuilder_error = nil,
 
     -- Connection state
     connect_error = nil,
@@ -71,6 +81,10 @@ function MenuState.new(callbacks)
     browse_hover_join = nil,
     browse_hover_host = false,
   }, MenuState)
+
+  deck_profiles.ensure_defaults()
+  self.deckbuilder_faction = settings.values.faction
+  self:refresh_deckbuilder_state()
   return self
 end
 
@@ -270,10 +284,67 @@ function MenuState:draw_settings()
 end
 
 -- Deck builder constants
-local DECK_FACTIONS = { "Human", "Orc" }
 local DECK_CARD_W = 260
 local DECK_CARD_H = 160
 local DECK_CARD_GAP = 40
+local DECK_LIST_X_PAD = 120
+local DECK_LIST_ROW_H = 34
+local DECK_LIST_TOP = 340
+
+local function supported_deck_factions()
+  local out = game_state.supported_player_factions()
+  if #out == 0 then
+    out = { settings.values.faction or "Human" }
+  end
+  return out
+end
+
+function MenuState:refresh_deckbuilder_state()
+  local available = supported_deck_factions()
+  local faction = self.deckbuilder_faction
+  if not game_state.is_supported_player_faction(faction) then
+    faction = available[1]
+  end
+  self.deckbuilder_faction = faction
+  settings.values.faction = faction
+
+  self.deckbuilder_cards = deck_validation.deck_entries_for_faction(faction)
+  local deck = deck_profiles.get_deck(faction) or {}
+  self.deckbuilder_counts = deck_profiles.build_counts(faction, deck)
+  local validated = deck_validation.validate_decklist(faction, deck)
+  local meta = validated.meta or {}
+  self.deckbuilder_total = meta.deck_size or #deck
+  self.deckbuilder_min = meta.min_size or 0
+  self.deckbuilder_max = meta.max_size or 0
+  self.deckbuilder_error = nil
+end
+
+function MenuState:_set_deck_count(card_id, value)
+  local count = math.floor(tonumber(value) or 0)
+  if count < 0 then count = 0 end
+
+  for _, entry in ipairs(self.deckbuilder_cards) do
+    if entry.card_id == card_id then
+      if count > entry.max_copies then
+        count = entry.max_copies
+      end
+      break
+    end
+  end
+
+  self.deckbuilder_counts[card_id] = count
+  local deck = deck_profiles.build_deck_from_counts(self.deckbuilder_faction, self.deckbuilder_counts)
+  local saved = deck_profiles.set_deck(self.deckbuilder_faction, deck)
+  if saved.ok then
+    self.deckbuilder_total = saved.meta and saved.meta.deck_size or #deck
+    self.deckbuilder_min = saved.meta and saved.meta.min_size or self.deckbuilder_min
+    self.deckbuilder_max = saved.meta and saved.meta.max_size or self.deckbuilder_max
+    self.deckbuilder_error = nil
+  else
+    self.deckbuilder_total = #deck
+    self.deckbuilder_error = saved.reason
+  end
+end
 
 function MenuState:draw_deckbuilder()
   local gw = love.graphics.getWidth()
@@ -289,20 +360,21 @@ function MenuState:draw_deckbuilder()
   local sub_font = util.get_font(14)
   love.graphics.setFont(sub_font)
   love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
-  love.graphics.printf("Choose your faction", 0, 70, gw, "center")
+  love.graphics.printf("Choose faction and tune card counts", 0, 70, gw, "center")
 
   -- Faction cards
-  local total_w = #DECK_FACTIONS * DECK_CARD_W + (#DECK_FACTIONS - 1) * DECK_CARD_GAP
+  local factions = supported_deck_factions()
+  local total_w = #factions * DECK_CARD_W + (#factions - 1) * DECK_CARD_GAP
   local start_x = (gw - total_w) / 2
   local card_y = 140
 
   local label_font = util.get_title_font(26)
   local detail_font = util.get_font(13)
 
-  for i, fname in ipairs(DECK_FACTIONS) do
+  for i, fname in ipairs(factions) do
     local fdata = factions_data[fname]
     local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
-    local selected = (settings.values.faction == fname)
+    local selected = (self.deckbuilder_faction == fname)
     local hovered = (self.deckbuilder_hover == i)
 
     -- Card background
@@ -345,6 +417,60 @@ function MenuState:draw_deckbuilder()
       love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], 0.9)
       love.graphics.printf("Selected", cx, card_y + DECK_CARD_H - 30, DECK_CARD_W, "center")
     end
+  end
+
+  local info_font = util.get_font(13)
+  local status_y = DECK_LIST_TOP - 26
+  local status_text = string.format(
+    "Deck Size: %d  (Min %d / Max %d)",
+    self.deckbuilder_total or 0,
+    self.deckbuilder_min or 0,
+    self.deckbuilder_max or 0
+  )
+  love.graphics.setFont(info_font)
+  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 0.95)
+  love.graphics.printf(status_text, DECK_LIST_X_PAD, status_y, gw - DECK_LIST_X_PAD * 2, "left")
+  if self.deckbuilder_error then
+    love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 0.95)
+    love.graphics.printf("Deck invalid: " .. tostring(self.deckbuilder_error), DECK_LIST_X_PAD, status_y + 16, gw - DECK_LIST_X_PAD * 2, "left")
+  end
+
+  local row_font = util.get_font(14)
+  local max_rows = 8
+  local visible = math.min(max_rows, #self.deckbuilder_cards)
+  for i = 1, visible do
+    local entry = self.deckbuilder_cards[i]
+    local y = DECK_LIST_TOP + (i - 1) * DECK_LIST_ROW_H
+    local row_x = DECK_LIST_X_PAD
+    local row_w = gw - DECK_LIST_X_PAD * 2
+
+    local row_hover = self.deckbuilder_hover == (100 + i)
+    love.graphics.setColor(0.14, 0.14, 0.22, row_hover and 0.92 or 0.72)
+    love.graphics.rectangle("fill", row_x, y, row_w, DECK_LIST_ROW_H - 4, 6, 6)
+    love.graphics.setColor(1, 1, 1, 0.08)
+    love.graphics.rectangle("line", row_x, y, row_w, DECK_LIST_ROW_H - 4, 6, 6)
+
+    local count = self.deckbuilder_counts[entry.card_id] or 0
+    local right_x = row_x + row_w - 90
+    local minus_r = { x = right_x, y = y + 5, w = 24, h = 20 }
+    local plus_r = { x = right_x + 62, y = y + 5, w = 24, h = 20 }
+    local minus_hover = self.deckbuilder_hover == (200 + i)
+    local plus_hover = self.deckbuilder_hover == (300 + i)
+
+    love.graphics.setColor(0.2, 0.2, 0.3, minus_hover and 1 or 0.8)
+    love.graphics.rectangle("fill", minus_r.x, minus_r.y, minus_r.w, minus_r.h, 4, 4)
+    love.graphics.setColor(0.2, 0.2, 0.3, plus_hover and 1 or 0.8)
+    love.graphics.rectangle("fill", plus_r.x, plus_r.y, plus_r.w, plus_r.h, 4, 4)
+
+    love.graphics.setFont(row_font)
+    love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+    love.graphics.print(entry.name, row_x + 10, y + 7)
+    love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
+    love.graphics.print(entry.card_id, row_x + 170, y + 7)
+    love.graphics.printf(string.format("%d / %d", count, entry.max_copies), right_x + 18, y + 7, 44, "center")
+    love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+    love.graphics.printf("-", minus_r.x, minus_r.y + 2, minus_r.w, "center")
+    love.graphics.printf("+", plus_r.x, plus_r.y + 2, plus_r.w, "center")
   end
 end
 
@@ -673,6 +799,7 @@ function MenuState:do_play_online()
     host_player = {
       name = self:get_player_name(),
       faction = settings.values.faction,
+      deck = deck_profiles.get_deck(settings.values.faction),
     },
   })
   self._relay:attach_service(self._relay_service)
@@ -693,6 +820,7 @@ function MenuState:do_browse_join(room_code)
     url = url,
     player_name = name,
     faction = settings.values.faction,
+    deck = deck_profiles.get_deck(settings.values.faction),
   })
 
   if not ok_call then
@@ -808,6 +936,7 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
           self:enter_browse()
         elseif i == 2 then
           self.screen = "deckbuilder"
+          self:refresh_deckbuilder_state()
           self.hover_button = nil
         elseif i == 3 then
           self.screen = "settings"
@@ -828,15 +957,34 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
     end
     -- Faction cards
     local gw = love.graphics.getWidth()
-    local total_w = #DECK_FACTIONS * DECK_CARD_W + (#DECK_FACTIONS - 1) * DECK_CARD_GAP
+    local factions = supported_deck_factions()
+    local total_w = #factions * DECK_CARD_W + (#factions - 1) * DECK_CARD_GAP
     local start_x = (gw - total_w) / 2
     local card_y = 140
-    for i, fname in ipairs(DECK_FACTIONS) do
+    for i, fname in ipairs(factions) do
       local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
       local r = { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }
       if point_in_rect(x, y, r) then
         settings.values.faction = fname
+        self.deckbuilder_faction = fname
+        self:refresh_deckbuilder_state()
         settings.save()
+        return
+      end
+    end
+
+    local list_x = DECK_LIST_X_PAD
+    local list_w = gw - DECK_LIST_X_PAD * 2
+    for i, entry in ipairs(self.deckbuilder_cards) do
+      local y = DECK_LIST_TOP + (i - 1) * DECK_LIST_ROW_H
+      local minus_r = { x = list_x + list_w - 90, y = y + 5, w = 24, h = 20 }
+      local plus_r = { x = list_x + list_w - 28, y = y + 5, w = 24, h = 20 }
+      if point_in_rect(x, y, minus_r) then
+        self:_set_deck_count(entry.card_id, (self.deckbuilder_counts[entry.card_id] or 0) - 1)
+        return
+      end
+      if point_in_rect(x, y, plus_r) then
+        self:_set_deck_count(entry.card_id, (self.deckbuilder_counts[entry.card_id] or 0) + 1)
         return
       end
     end
@@ -941,13 +1089,38 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
       return
     end
     local gw = love.graphics.getWidth()
-    local total_w = #DECK_FACTIONS * DECK_CARD_W + (#DECK_FACTIONS - 1) * DECK_CARD_GAP
+    local factions = supported_deck_factions()
+    local total_w = #factions * DECK_CARD_W + (#factions - 1) * DECK_CARD_GAP
     local start_x = (gw - total_w) / 2
     local card_y = 140
-    for i, fname in ipairs(DECK_FACTIONS) do
+    for i, _ in ipairs(factions) do
       local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
       if point_in_rect(x, y, { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }) then
         self.deckbuilder_hover = i
+        self.hover_button = -2
+        return
+      end
+    end
+
+    local list_x = DECK_LIST_X_PAD
+    local list_w = gw - DECK_LIST_X_PAD * 2
+    for i, _ in ipairs(self.deckbuilder_cards) do
+      local y = DECK_LIST_TOP + (i - 1) * DECK_LIST_ROW_H
+      local row_r = { x = list_x, y = y, w = list_w, h = DECK_LIST_ROW_H - 4 }
+      local minus_r = { x = list_x + list_w - 90, y = y + 5, w = 24, h = 20 }
+      local plus_r = { x = list_x + list_w - 28, y = y + 5, w = 24, h = 20 }
+      if point_in_rect(x, y, minus_r) then
+        self.deckbuilder_hover = 200 + i
+        self.hover_button = -2
+        return
+      end
+      if point_in_rect(x, y, plus_r) then
+        self.deckbuilder_hover = 300 + i
+        self.hover_button = -2
+        return
+      end
+      if point_in_rect(x, y, row_r) then
+        self.deckbuilder_hover = 100 + i
         self.hover_button = -2
         return
       end

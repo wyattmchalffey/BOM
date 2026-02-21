@@ -7,6 +7,7 @@ local actions = require("src.game.actions")
 local cards = require("src.game.cards")
 local abilities = require("src.game.abilities")
 local combat = require("src.game.combat")
+local game_state = require("src.game.state")
 
 local commands = {}
 
@@ -24,6 +25,38 @@ end
 
 local function ok(meta, events)
   return { ok = true, reason = "ok", meta = meta, events = events or {} }
+end
+
+local function finalize_terminal_state(g, events)
+  local terminal = game_state.compute_terminal_result(g)
+  if not terminal then
+    return
+  end
+
+  if not g.is_terminal then
+    game_state.set_terminal(g, terminal)
+    events[#events + 1] = {
+      type = "match_ended",
+      winner = g.winner,
+      reason = g.reason,
+      ended_at_turn = g.ended_at_turn,
+    }
+  end
+end
+
+local function succeed(g, meta, events)
+  local out_events = events or {}
+  finalize_terminal_state(g, out_events)
+
+  if g and g.is_terminal then
+    meta = meta or {}
+    meta.is_terminal = true
+    meta.winner = g.winner
+    meta.reason = g.reason
+    meta.ended_at_turn = g.ended_at_turn
+  end
+
+  return ok(meta, out_events)
 end
 
 local function has_subtype(card_def, subtype)
@@ -68,22 +101,35 @@ function commands.execute(g, command)
   if not command or not command.type then
     return fail("missing_command_type")
   end
+  if g and g.is_terminal then
+    return fail("game_over")
+  end
 
   if command.type == "START_TURN" then
-    if command.player_index ~= nil and command.player_index ~= g.activePlayer then
+    if type(command.player_index) ~= "number" then
+      return fail("missing_player_index")
+    end
+    if command.player_index ~= g.activePlayer then
       return fail("not_active_player")
     end
     actions.start_turn(g)
-    return ok(
+    return succeed(g,
       { active_player = g.activePlayer, turn_number = g.turnNumber },
       { { type = "turn_started", player_index = g.activePlayer, turn_number = g.turnNumber } }
     )
   end
 
   if command.type == "END_TURN" then
+    if type(command.player_index) ~= "number" then
+      return fail("missing_player_index")
+    end
+    if command.player_index ~= g.activePlayer then
+      return fail("not_active_player")
+    end
+
     local ending_player = g.activePlayer
     actions.end_turn(g)
-    return ok(
+    return succeed(g,
       { active_player = g.activePlayer, turn_number = g.turnNumber },
       { { type = "turn_ended", player_index = ending_player }, { type = "active_player_changed", player_index = g.activePlayer } }
     )
@@ -92,25 +138,25 @@ function commands.execute(g, command)
   if command.type == "DECLARE_ATTACKERS" then
     local ok_decl, reason = combat.declare_attackers(g, command.player_index, command.declarations)
     if not ok_decl then return fail(reason) end
-    return ok(nil, { { type = "attackers_declared", player_index = command.player_index } })
+    return succeed(g,nil, { { type = "attackers_declared", player_index = command.player_index } })
   end
 
   if command.type == "ASSIGN_BLOCKERS" then
     local ok_blk, reason = combat.assign_blockers(g, command.player_index, command.assignments)
     if not ok_blk then return fail(reason) end
-    return ok(nil, { { type = "blockers_assigned", player_index = command.player_index } })
+    return succeed(g,nil, { { type = "blockers_assigned", player_index = command.player_index } })
   end
 
   if command.type == "RESOLVE_COMBAT" then
     local ok_res, reason = combat.resolve(g)
     if not ok_res then return fail(reason) end
-    return ok(nil, { { type = "combat_resolved" } })
+    return succeed(g,nil, { { type = "combat_resolved" } })
   end
 
   if command.type == "ASSIGN_DAMAGE_ORDER" then
     local ok_ord, reason = combat.assign_damage_order(g, command.player_index, command.orders)
     if not ok_ord then return fail(reason) end
-    return ok(nil, { { type = "damage_order_assigned", player_index = command.player_index } })
+    return succeed(g,nil, { { type = "damage_order_assigned", player_index = command.player_index } })
   end
 
   if command.type == "DEBUG_ADD_RESOURCE" then
@@ -124,7 +170,7 @@ function commands.execute(g, command)
     if type(amount) ~= "number" or amount == 0 then return fail("invalid_amount") end
 
     p.resources[resource] = math.max(0, p.resources[resource] + amount)
-    return ok(
+    return succeed(g,
       { player_index = pi, resource = resource, amount = amount, total = p.resources[resource] },
       { { type = "resource_debug_added", player_index = pi, resource = resource, amount = amount } }
     )
@@ -140,7 +186,7 @@ function commands.execute(g, command)
     if actions.count_unassigned_workers(p) <= 0 then return fail("no_unassigned_workers") end
 
     actions.assign_worker_to_resource(g, pi, resource)
-    return ok(nil, { { type = "worker_assigned", player_index = pi, resource = resource } })
+    return succeed(g,nil, { { type = "worker_assigned", player_index = pi, resource = resource } })
   end
 
   if command.type == "UNASSIGN_WORKER" then
@@ -153,13 +199,13 @@ function commands.execute(g, command)
     if p.workersOn[resource] <= 0 then return fail("no_worker_on_resource") end
 
     actions.unassign_worker_from_resource(g, pi, resource)
-    return ok(nil, { { type = "worker_unassigned", player_index = pi, resource = resource } })
+    return succeed(g,nil, { { type = "worker_unassigned", player_index = pi, resource = resource } })
   end
 
   if command.type == "BUILD_STRUCTURE" then
     local built = actions.build_structure(g, command.player_index, command.card_id)
     if not built then return fail("build_not_allowed") end
-    return ok(
+    return succeed(g,
       { card_id = command.card_id },
       { { type = "structure_built", player_index = command.player_index, card_id = command.card_id } }
     )
@@ -193,8 +239,11 @@ function commands.execute(g, command)
       return fail("ability_not_activatable")
     end
 
-    actions.activate_ability(g, pi, card_def, source_key, ability_index)
-    return ok(
+    local activated, activate_reason = actions.activate_ability(g, pi, card_def, source_key, ability_index)
+    if not activated then
+      return fail(activate_reason or "activate_failed")
+    end
+    return succeed(g,
       { source_type = source.type, ability_index = ability_index },
       { { type = "ability_activated", player_index = pi, source_type = source.type, ability_index = ability_index } }
     )
@@ -246,8 +295,11 @@ function commands.execute(g, command)
     if not is_eligible then return fail("hand_card_not_eligible") end
 
     local card_id = p.hand[hand_index]
-    actions.play_unit_from_hand(g, pi, card_def, source_key, ability_index, hand_index)
-    return ok(
+    local played, play_reason = actions.play_unit_from_hand(g, pi, card_def, source_key, ability_index, hand_index)
+    if not played then
+      return fail(play_reason or "play_failed")
+    end
+    return succeed(g,
       { source_type = source.type, ability_index = ability_index, card_id = card_id, hand_index = hand_index },
       { { type = "unit_played_from_hand", player_index = pi, source_type = source.type, ability_index = ability_index, card_id = card_id } }
     )
@@ -257,18 +309,24 @@ function commands.execute(g, command)
     local pi = command.player_index
     local board_index = command.board_index
     if pi ~= g.activePlayer then return fail("not_active_player") end
-    local p = g.players[pi + 1]
-    if actions.count_unassigned_workers(p) <= 0 then return fail("no_unassigned_workers") end
-    actions.assign_worker_to_structure(g, pi, board_index)
-    return ok(nil, { { type = "structure_worker_assigned", player_index = pi, board_index = board_index } })
+    local assigned, assign_reason, assigned_board_index = actions.assign_worker_to_structure(g, pi, board_index)
+    if not assigned then
+      return fail(assign_reason or "assign_failed")
+    end
+    return succeed(g,nil, {
+      { type = "structure_worker_assigned", player_index = pi, board_index = assigned_board_index or board_index },
+    })
   end
 
   if command.type == "UNASSIGN_STRUCTURE_WORKER" then
     local pi = command.player_index
     local board_index = command.board_index
     if pi ~= g.activePlayer then return fail("not_active_player") end
-    actions.unassign_worker_from_structure(g, pi, board_index)
-    return ok(nil, { { type = "structure_worker_unassigned", player_index = pi, board_index = board_index } })
+    local unassigned, unassign_reason = actions.unassign_worker_from_structure(g, pi, board_index)
+    if not unassigned then
+      return fail(unassign_reason or "unassign_failed")
+    end
+    return succeed(g,nil, { { type = "structure_worker_unassigned", player_index = pi, board_index = board_index } })
   end
 
   if command.type == "DEPLOY_WORKER_TO_UNIT_ROW" then
@@ -278,7 +336,7 @@ function commands.execute(g, command)
     local deployed = actions.deploy_worker_to_unit_row(g, pi)
     if not deployed then return fail("deploy_worker_failed") end
 
-    return ok(nil, { { type = "worker_deployed_to_unit_row", player_index = pi } })
+    return succeed(g,nil, { { type = "worker_deployed_to_unit_row", player_index = pi } })
   end
 
   if command.type == "RECLAIM_WORKER_FROM_UNIT_ROW" then
@@ -290,7 +348,7 @@ function commands.execute(g, command)
     local reclaimed = actions.reclaim_worker_from_unit_row(g, pi, board_index)
     if not reclaimed then return fail("reclaim_worker_failed") end
 
-    return ok(nil, { { type = "worker_reclaimed_from_unit_row", player_index = pi, board_index = board_index } })
+    return succeed(g,nil, { { type = "worker_reclaimed_from_unit_row", player_index = pi, board_index = board_index } })
   end
 
 
@@ -320,7 +378,7 @@ function commands.execute(g, command)
 
     local played = actions.play_from_hand(g, pi, hand_index, sacrifice_targets)
     if not played then return fail("play_failed") end
-    return ok(
+    return succeed(g,
       { card_id = card_id },
       { { type = "card_played_from_hand", player_index = pi, card_id = card_id } }
     )
@@ -348,7 +406,7 @@ function commands.execute(g, command)
     if actions.count_unassigned_workers(p) < sacrifice_count then return fail("not_enough_workers") end
     local played = actions.play_from_hand(g, pi, hand_index)
     if not played then return fail("play_failed") end
-    return ok(
+    return succeed(g,
       { card_id = card_id },
       { { type = "card_played_from_hand", player_index = pi, card_id = card_id } }
     )
@@ -364,7 +422,7 @@ function commands.execute(g, command)
     if p.specialWorkers[sw_index].assigned_to ~= nil then return fail("sw_already_assigned") end
     local assigned = actions.assign_special_worker(g, pi, sw_index, target)
     if not assigned then return fail("assign_failed") end
-    return ok(nil, { { type = "special_worker_assigned", player_index = pi, sw_index = sw_index, target = target } })
+    return succeed(g,nil, { { type = "special_worker_assigned", player_index = pi, sw_index = sw_index, target = target } })
   end
 
   if command.type == "UNASSIGN_SPECIAL_WORKER" then
@@ -376,7 +434,7 @@ function commands.execute(g, command)
     if p.specialWorkers[sw_index].assigned_to == nil then return fail("sw_not_assigned") end
     local unassigned = actions.unassign_special_worker(g, pi, sw_index)
     if not unassigned then return fail("unassign_failed") end
-    return ok(nil, { { type = "special_worker_unassigned", player_index = pi, sw_index = sw_index } })
+    return succeed(g,nil, { { type = "special_worker_unassigned", player_index = pi, sw_index = sw_index } })
   end
 
   if command.type == "SACRIFICE_UPGRADE_PLAY" then
@@ -456,7 +514,10 @@ function commands.execute(g, command)
     if ok_apply then
       g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = true
       table.remove(p.hand, hand_index)
-      p.board[#p.board + 1] = { card_id = hand_id, state = {} }
+      p.board[#p.board + 1] = {
+        card_id = hand_id,
+        state = { rested = false, summoned_turn = g.turnNumber },
+      }
       actions.resolve_on_play_triggers(g, pi, hand_id)
     end
 
@@ -479,7 +540,7 @@ function commands.execute(g, command)
       return fail("upgrade_failed")
     end
 
-    return ok(
+    return succeed(g,
       { card_id = hand_id, source_type = source.type, ability_index = ability_index },
       { { type = "unit_played_from_sacrifice_upgrade", player_index = pi, card_id = hand_id } }
     )
@@ -530,8 +591,12 @@ function commands.execute(g, command)
       -- Sacrificing a worker token
       if p.totalWorkers <= 0 then return fail("no_workers") end
       local worker_extra = command.target_worker_extra
-      actions.sacrifice_worker(g, pi, card_def, source_key, ability_index, target_worker, worker_extra)
-      return ok(
+      local sacrificed, sacrifice_reason =
+        actions.sacrifice_worker(g, pi, card_def, source_key, ability_index, target_worker, worker_extra)
+      if not sacrificed then
+        return fail(sacrifice_reason or "sacrifice_failed")
+      end
+      return succeed(g,
         { source_type = source.type, ability_index = ability_index, target_worker = true },
         { { type = "worker_sacrificed", player_index = pi } }
       )
@@ -544,10 +609,14 @@ function commands.execute(g, command)
       end
       if not is_eligible then return fail("target_not_eligible") end
 
-      actions.sacrifice_unit(g, pi, card_def, source_key, ability_index, target_board_index)
       local sacrificed_entry = p.board[target_board_index]
       local sacrificed_id = sacrificed_entry and sacrificed_entry.card_id
-      return ok(
+      local sacrificed, sacrifice_reason =
+        actions.sacrifice_unit(g, pi, card_def, source_key, ability_index, target_board_index)
+      if not sacrificed then
+        return fail(sacrifice_reason or "sacrifice_failed")
+      end
+      return succeed(g,
         { source_type = source.type, ability_index = ability_index, target_board_index = target_board_index, card_id = sacrificed_id },
         { { type = "unit_sacrificed", player_index = pi, target_board_index = target_board_index } }
       )

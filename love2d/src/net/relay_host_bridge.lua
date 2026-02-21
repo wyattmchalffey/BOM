@@ -77,6 +77,30 @@ local function is_relay_control(frame)
   return false, nil
 end
 
+local function extract_player_index_from_host_response(frame)
+  local ok_dec, decoded = pcall(json.decode, frame)
+  if not ok_dec or type(decoded) ~= "table" or not decoded.ok then
+    return nil
+  end
+
+  local message = decoded.message
+  if type(message) ~= "table" or message.type ~= "command_ack" then
+    return nil
+  end
+
+  local payload = message.payload
+  if type(payload) ~= "table" then
+    return nil
+  end
+
+  local player_index = payload.player_index
+  if type(player_index) ~= "number" then
+    return nil
+  end
+
+  return player_index
+end
+
 function relay_host_bridge.connect(opts)
   opts = opts or {}
   assert(opts.relay_url, "relay_host_bridge requires relay_url")
@@ -123,6 +147,7 @@ function relay_host_bridge.connect(opts)
   local service = opts.service
   local connected = true
   local peer_joined = false
+  local peer_player_index = nil
 
   -- Non-blocking poll: check for incoming frames from relay
   local function step_fn()
@@ -148,12 +173,26 @@ function relay_host_bridge.connect(opts)
         local response = service:handle_frame(frame)
         if response and connected then
           pcall(conn.send, conn, response)
+          local assigned_player_index = extract_player_index_from_host_response(response)
+          if assigned_player_index ~= nil then
+            peer_player_index = assigned_player_index
+          end
         end
       end
     end
 
     -- Flush any pending state pushes (from host's own moves OR joiner frames)
-    local pushes = service:pop_pushes()
+    local pushes = {}
+    if type(service.pop_pushes) == "function" then
+      if type(peer_player_index) == "number" then
+        pushes = service:pop_pushes(peer_player_index) or {}
+        -- Relay has one remote route (the joiner). Drop pushes for any other
+        -- player index so they can't be forwarded to the wrong client.
+        service:pop_pushes()
+      else
+        pushes = service:pop_pushes() or {}
+      end
+    end
     for _, push in ipairs(pushes) do
       if connected then
         pcall(conn.send, conn, push)

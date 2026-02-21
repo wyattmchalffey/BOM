@@ -19,12 +19,12 @@ function transport:reconnect(reconnect_payload)
   return self.host:reconnect_message(reconnect_payload)
 end
 
-function transport:send_submit(player_index, envelope)
-  return self.host:submit_message(player_index, envelope)
+function transport:send_submit(envelope)
+  return self.host:submit_message(envelope)
 end
 
-function transport:request_snapshot()
-  return self.host:get_state_snapshot_message()
+function transport:request_snapshot(snapshot_payload)
+  return self.host:get_state_snapshot_message(snapshot_payload)
 end
 
 return transport

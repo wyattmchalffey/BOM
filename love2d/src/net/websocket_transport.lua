@@ -51,7 +51,7 @@ function transport:_error(match_id, reason, meta)
   return protocol.error_message(match_id, reason, meta or {})
 end
 
-function transport:_request(op, payload, player_index)
+function transport:_request(op, payload)
   local match_id = payload and payload.match_id
 
   if not self.client then
@@ -61,7 +61,6 @@ function transport:_request(op, payload, player_index)
   local request = {
     op = op,
     payload = payload,
-    player_index = player_index,
   }
 
   local encode_ok, framed = pcall(self.encode, request)
@@ -127,12 +126,12 @@ function transport:reconnect(reconnect_payload)
   return self:_request("reconnect", reconnect_payload)
 end
 
-function transport:send_submit(player_index, envelope)
-  return self:_request("submit", envelope, player_index)
+function transport:send_submit(envelope)
+  return self:_request("submit", envelope)
 end
 
-function transport:request_snapshot()
-  return self:_request("snapshot", nil)
+function transport:request_snapshot(snapshot_payload)
+  return self:_request("snapshot", snapshot_payload)
 end
 
 return transport

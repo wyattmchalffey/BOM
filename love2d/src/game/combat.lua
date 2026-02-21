@@ -222,6 +222,10 @@ function combat.declare_attackers(g, player_index, declarations)
     if has_keyword(card_def, "crew") and not estate.crewed then
       return false, "attacker_not_crewed"
     end
+    local has_immediate_attack = has_keyword(card_def, "rush") or has_keyword(card_def, "haste")
+    if estate.summoned_turn == g.turnNumber and not has_immediate_attack then
+      return false, "summoning_sickness"
+    end
 
     local target = decl.target
     if type(target) ~= "table" or (target.type ~= "base" and target.type ~= "board") then

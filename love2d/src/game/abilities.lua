@@ -50,13 +50,19 @@ end
 
 effect_handlers.play_unit = function(ability, player, g)
   local args = ability.effect_args or {}
+  local function summoned_state()
+    return {
+      rested = false,
+      summoned_turn = g and g.turnNumber or nil,
+    }
+  end
   -- If a specific hand index was provided (two-step selection flow), use it directly
   local hand_index = args._hand_index
   if hand_index then
     local card_id = player.hand[hand_index]
     if card_id then
       table.remove(player.hand, hand_index)
-      player.board[#player.board + 1] = { card_id = card_id }
+      player.board[#player.board + 1] = { card_id = card_id, state = summoned_state() }
     end
     return
   end
@@ -81,7 +87,7 @@ effect_handlers.play_unit = function(ability, player, g)
       end
       if match then
         table.remove(player.hand, i)
-        player.board[#player.board + 1] = { card_id = card_id }
+        player.board[#player.board + 1] = { card_id = card_id, state = summoned_state() }
         return
       end
     end

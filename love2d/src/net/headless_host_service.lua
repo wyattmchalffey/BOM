@@ -55,13 +55,25 @@ function service:handle_frame(frame)
     return safe_error("service_gateway_failure", { error_message = tostring(response) })
   end
 
-  -- Queue a state push after successful submit
+  -- Queue per-player state pushes after successful submit. The submitting player
+  -- receives state in the submit ACK payload; pushes are for everyone else.
   if response and response.ok and request.op == "submit" then
-    local push_msg = self._host:generate_state_push()
-    if push_msg then
-      local ok_push_encode, push_frame = pcall(json.encode, push_msg)
-      if ok_push_encode then
-        self._pending_pushes[#self._pending_pushes + 1] = push_frame
+    local submit_payload = request.payload or {}
+    local source_player_index = self._host:player_index_for_session_token(submit_payload.session_token)
+    local joined_players = self._host:get_joined_player_indices()
+
+    for _, target_player_index in ipairs(joined_players) do
+      if source_player_index == nil or target_player_index ~= source_player_index then
+        local push_msg = self._host:generate_state_push(target_player_index)
+        if push_msg then
+          local ok_push_encode, push_frame = pcall(json.encode, push_msg)
+          if ok_push_encode then
+            self._pending_pushes[#self._pending_pushes + 1] = {
+              player_index = target_player_index,
+              frame = push_frame,
+            }
+          end
+        end
       end
     end
   end
@@ -74,9 +86,32 @@ function service:handle_frame(frame)
   return out
 end
 
-function service:pop_pushes()
-  local pushes = self._pending_pushes
-  self._pending_pushes = {}
+function service:pop_pushes(player_index)
+  if player_index == nil then
+    local pushes = {}
+    for _, entry in ipairs(self._pending_pushes) do
+      if type(entry) == "table" then
+        pushes[#pushes + 1] = entry.frame
+      else
+        pushes[#pushes + 1] = entry
+      end
+    end
+    self._pending_pushes = {}
+    return pushes
+  end
+
+  local keep = {}
+  local pushes = {}
+  for _, entry in ipairs(self._pending_pushes) do
+    local target = type(entry) == "table" and entry.player_index or nil
+    local frame = type(entry) == "table" and entry.frame or entry
+    if target == player_index then
+      pushes[#pushes + 1] = frame
+    else
+      keep[#keep + 1] = entry
+    end
+  end
+  self._pending_pushes = keep
   return pushes
 end
 

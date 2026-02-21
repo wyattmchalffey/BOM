@@ -6,6 +6,7 @@ local checksum = {}
 
 local function collect_player_parts(p)
   local parts = {
+    tostring(p.life or 0),
     tostring(p.totalWorkers or 0),
     tostring(p.workersOn and p.workersOn.food or 0),
     tostring(p.workersOn and p.workersOn.wood or 0),
@@ -38,6 +39,10 @@ function checksum.game_state(g)
     tostring(g.turnNumber or 0),
     tostring(g.activePlayer or 0),
     tostring(g.phase or ""),
+    tostring(g.is_terminal == true),
+    tostring(g.winner),
+    tostring(g.reason or ""),
+    tostring(g.ended_at_turn or 0),
   }
 
   local p1_parts = collect_player_parts(p1)

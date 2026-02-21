@@ -188,6 +188,30 @@ local function is_relay_control(frame)
     return false, nil
 end
 
+local function extract_player_index_from_service_response(frame)
+    local ok_dec, decoded = pcall(json.decode, frame)
+    if not ok_dec or type(decoded) ~= "table" or not decoded.ok then
+        return nil
+    end
+
+    local message = decoded.message
+    if type(message) ~= "table" or message.type ~= "command_ack" then
+        return nil
+    end
+
+    local payload = message.payload
+    if type(payload) ~= "table" then
+        return nil
+    end
+
+    local player_index = payload.player_index
+    if type(player_index) ~= "number" then
+        return nil
+    end
+
+    return player_index
+end
+
 function threaded_relay.start(relay_url, host_name)
     local self = setmetatable({
         state = "connecting",   -- "connecting" | "connected" | "error"
@@ -201,6 +225,7 @@ function threaded_relay.start(relay_url, host_name)
         _outbox_ch = love.thread.getChannel("relay_outbox"),
         _quit_ch = love.thread.getChannel("relay_quit"),
         _service = nil,
+        _peer_player_index = nil,
     }, threaded_relay)
 
     -- Clear channels from any previous use
@@ -285,13 +310,29 @@ function threaded_relay:poll()
             local response = self._service:handle_frame(frame)
             if response then
                 self._outbox_ch:push(response)
+                local assigned_player_index = extract_player_index_from_service_response(response)
+                if assigned_player_index ~= nil then
+                    self._peer_player_index = assigned_player_index
+                end
             end
         end
     end
 
     -- Flush any pending state pushes (from host's own moves OR joiner frames)
     if self._service then
-        local pushes = self._service:pop_pushes()
+        local pushes = {}
+        if type(self._service.pop_pushes) == "function" then
+            if type(self._peer_player_index) == "number" then
+                pushes = self._service:pop_pushes(self._peer_player_index) or {}
+                -- Relay host thread has one remote route (the joiner). Drain
+                -- and discard pushes for other player indices.
+                self._service:pop_pushes()
+            else
+                -- Until joiner identity is known, drain queued pushes without
+                -- forwarding to avoid leaking the wrong player view.
+                self._service:pop_pushes()
+            end
+        end
         for _, push in ipairs(pushes) do
             self._outbox_ch:push(push)
         end

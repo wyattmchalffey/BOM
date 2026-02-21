@@ -3,8 +3,7 @@
 -- Request shape:
 --   {
 --     op = "connect" | "reconnect" | "submit" | "snapshot",
---     payload = <protocol payload>,
---     player_index = <number, only for submit>
+--     payload = <protocol payload>
 --   }
 --
 -- Response shape:
@@ -42,14 +41,11 @@ function gateway:handle(request)
   end
 
   if request.op == "submit" then
-    if type(request.player_index) ~= "number" then
-      return fail("missing_player_index")
-    end
-    return ok(self.host:submit_message(request.player_index, request.payload))
+    return ok(self.host:submit_message(request.payload))
   end
 
   if request.op == "snapshot" then
-    return ok(self.host:get_state_snapshot_message())
+    return ok(self.host:get_state_snapshot_message(request.payload))
   end
 
   return fail("unsupported_op", { op = request.op })

@@ -142,8 +142,8 @@ end
 
 -- Battlefield row rects.
 -- Panel 0 (you): front row (units) at top, back row (structures) below.
--- Panel 1 (opponent): back row at top, front row (units) below.
--- This places the two front rows facing each other across the center gap.
+-- Panel 1 (opponent): resources/base at top (their backline), then back row,
+-- then front row (closest to center).
 function board.front_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   local left_edge = panel_x + 20 + DECK_CARD_W + 16
   local right_edge = panel_x + panel_w - 20 - DECK_CARD_W - 16
@@ -151,7 +151,9 @@ function board.front_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   if panel_index == 0 then
     return left_edge, panel_y + 4, area_w, BFIELD_TILE_H
   else
-    return left_edge, panel_y + 4 + BFIELD_TILE_H + BFIELD_ROW_GAP, area_w, BFIELD_TILE_H
+    local opponent_back_y = panel_y + RESOURCE_NODE_H + 12
+    local opponent_front_y = opponent_back_y + BFIELD_TILE_H + BFIELD_ROW_GAP
+    return left_edge, opponent_front_y, area_w, BFIELD_TILE_H
   end
 end
 
@@ -162,30 +164,48 @@ function board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   if panel_index == 0 then
     return left_edge, panel_y + 4 + BFIELD_TILE_H + BFIELD_ROW_GAP, area_w, BFIELD_TILE_H
   else
-    return left_edge, panel_y + 4, area_w, BFIELD_TILE_H
+    local opponent_back_y = panel_y + RESOURCE_NODE_H + 12
+    return left_edge, opponent_back_y, area_w, BFIELD_TILE_H
   end
 end
 
--- Base: centered horizontally, at resource-node y level (close to the player)
+-- Base: centered horizontally, aligned with the resource-node row.
 function board.base_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   local x = panel_x + panel_w / 2 - BFIELD_TILE_W / 2
-  local res_y = panel_y + panel_h - RESOURCE_NODE_H - 8
+  local res_y
+  if panel_index == 0 then
+    res_y = panel_y + panel_h - RESOURCE_NODE_H - 8
+  else
+    res_y = panel_y + 8
+  end
   local y = res_y + (RESOURCE_NODE_H - BFIELD_TILE_H) / 2
   return x, y, BFIELD_TILE_W, BFIELD_TILE_H
 end
 
--- Resource nodes: always at the bottom edge of each panel.
+-- Resource nodes:
+-- panel 0 (you): bottom edge
+-- panel 1 (opponent): top edge (backline)
 function board.resource_left_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   local center_x = panel_x + panel_w * 0.25
   local x = center_x - RESOURCE_NODE_W / 2
-  local y = panel_y + panel_h - RESOURCE_NODE_H - 8
+  local y
+  if panel_index == 0 then
+    y = panel_y + panel_h - RESOURCE_NODE_H - 8
+  else
+    y = panel_y + 8
+  end
   return x, y, RESOURCE_NODE_W, RESOURCE_NODE_H
 end
 
 function board.resource_right_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   local center_x = panel_x + panel_w * 0.75
   local x = center_x - RESOURCE_NODE_W / 2
-  local y = panel_y + panel_h - RESOURCE_NODE_H - 8
+  local y
+  if panel_index == 0 then
+    y = panel_y + panel_h - RESOURCE_NODE_H - 8
+  else
+    y = panel_y + 8
+  end
   return x, y, RESOURCE_NODE_W, RESOURCE_NODE_H
 end
 
@@ -671,6 +691,9 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
   local scale = (group.scale == nil) and 1 or group.scale
   local tile_cx, tile_cy = tx + tw / 2, ty + th / 2
   local tile_hovered = hover and hover.kind == "structure" and hover.pi == pi and hover.idx == si
+  local entry = (not is_base and player.board and player.board[si]) and player.board[si] or nil
+  local st = entry and entry.state or nil
+  local tile_rested = (not is_base) and st and st.rested == true or false
 
   if scale ~= 1 then
     love.graphics.push()
@@ -805,6 +828,35 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.setColor(accent[1], accent[2], accent[3], is_active and 0.6 or 0.3)
     love.graphics.setFont(util.get_font(7))
     love.graphics.printf(has_non_activated_hint, tx + 4, ty + 38, tw - 8, "center")
+  end
+
+  if tile_rested then
+    -- Rested visual state: cool tint + subtle diagonal hatch + status tag.
+    love.graphics.setColor(0.04, 0.07, 0.12, 0.42)
+    love.graphics.rectangle("fill", tx, ty, tw, th, 5, 5)
+
+    love.graphics.setScissor(tx, ty, tw, th)
+    love.graphics.setColor(0.62, 0.76, 0.98, 0.22)
+    love.graphics.setLineWidth(1)
+    for stripe = -th, tw + th, 10 do
+      love.graphics.line(tx + stripe, ty + th, tx + stripe + th, ty)
+    end
+    love.graphics.setScissor()
+
+    love.graphics.setColor(0.70, 0.84, 1.0, is_active and 0.85 or 0.65)
+    love.graphics.setLineWidth(2)
+    love.graphics.rectangle("line", tx + 1, ty + 1, tw - 2, th - 2, 5, 5)
+    love.graphics.setLineWidth(1)
+
+    local tag_w, tag_h = 48, 14
+    local tag_x, tag_y = tx + 4, ty + 4
+    love.graphics.setColor(0.08, 0.14, 0.24, 0.92)
+    love.graphics.rectangle("fill", tag_x, tag_y, tag_w, tag_h, 3, 3)
+    love.graphics.setColor(0.60, 0.80, 1.0, 0.9)
+    love.graphics.rectangle("line", tag_x, tag_y, tag_w, tag_h, 3, 3)
+    love.graphics.setColor(0.90, 0.96, 1.0, 0.95)
+    love.graphics.setFont(util.get_font(8))
+    love.graphics.printf("RESTED", tag_x, tag_y + 2, tag_w, "center")
   end
 
   if group.count > 1 then

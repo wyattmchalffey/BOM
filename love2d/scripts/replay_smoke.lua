@@ -43,8 +43,8 @@ local log = replay.new_log({
 local sequence = {
   { type = "START_TURN", player_index = 0 },
   { type = "ASSIGN_WORKER", player_index = 0, resource = "wood" },
-  { type = "END_TURN" },
-  { type = "START_TURN" },
+  { type = "END_TURN", player_index = 0 },
+  { type = "START_TURN", player_index = 1 },
 }
 
 for _, cmd in ipairs(sequence) do

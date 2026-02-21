@@ -109,6 +109,17 @@ local function has_static_effect(card_def, effect_name)
   return false
 end
 
+local function entering_board_state(g, card_def, prior_state)
+  local st = copy_table(prior_state or {})
+  if st.rested == nil then st.rested = false end
+
+  if card_def and (card_def.kind == "Unit" or card_def.kind == "Worker") then
+    st.summoned_turn = g and g.turnNumber or st.summoned_turn
+  end
+
+  return st
+end
+
 local function should_skip_awaken(card_def)
   return has_static_effect(card_def, "cannot_awaken")
     or has_static_effect(card_def, "stay_rested")
@@ -354,11 +365,18 @@ function actions.unassign_worker_from_resource(g, player_index, resource)
 end
 
 function actions.assign_worker_to_structure(g, player_index, board_index)
+  if player_index ~= g.activePlayer then return false, "not_active_player" end
+  if type(board_index) ~= "number" then return false, "missing_board_index" end
+
   local p = g.players[player_index + 1]
+  if not p then return false, "invalid_player" end
+
   local entry = p.board[board_index]
-  if not entry then return g end
+  if not entry then return false, "invalid_board_index" end
   local ok, card_def = pcall(cards.get_card_def, entry.card_id)
-  if not ok or not card_def then return g end
+  if not ok or not card_def then return false, "invalid_structure_card" end
+  if card_def.kind ~= "Structure" then return false, "target_not_structure" end
+
   local max_w = 0
   if card_def.abilities then
     for _, ab in ipairs(card_def.abilities) do
@@ -367,8 +385,9 @@ function actions.assign_worker_to_structure(g, player_index, board_index)
       end
     end
   end
-  if max_w <= 0 then return g end
-  if actions.count_unassigned_workers(p) <= 0 then return g end
+  if max_w <= 0 then return false, "structure_not_worker_assignable" end
+  if actions.count_unassigned_workers(p) <= 0 then return false, "no_unassigned_workers" end
+
   -- Try the requested entry first; if full, find another copy of the same card
   local target = entry
   local target_idx = board_index
@@ -386,27 +405,36 @@ function actions.assign_worker_to_structure(g, player_index, board_index)
         end
       end
     end
-    if not found then return g end
+    if not found then return false, "structure_worker_capacity_reached" end
   end
+
   target.workers = target.workers + 1
-  return g
+  return true, nil, target_idx
 end
 
 function actions.unassign_worker_from_structure(g, player_index, board_index)
+  if player_index ~= g.activePlayer then return false, "not_active_player" end
+  if type(board_index) ~= "number" then return false, "missing_board_index" end
+
   local p = g.players[player_index + 1]
+  if not p then return false, "invalid_player" end
+
   local entry = p.board[board_index]
-  if not entry then return g end
+  if not entry then return false, "invalid_board_index" end
+
   entry.workers = entry.workers or 0
-  if entry.workers <= 0 then return g end
+  if entry.workers <= 0 then return false, "no_structure_worker_on_entry" end
+
   entry.workers = entry.workers - 1
-  return g
+  return true
 end
 
 -- Activate an ability on a card (base, structure, etc.)
 -- source_key: unique string like "base:1" or "board:3:2" for tracking once-per-turn
 -- ability_index: optional index into card_def.abilities (defaults to first activated)
 function actions.activate_ability(g, player_index, card_def, source_key, ability_index)
-  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
+  if g.phase ~= "MAIN" then return false, "wrong_phase" end
+  if player_index ~= g.activePlayer then return false, "not_active_player" end
   local p = g.players[player_index + 1]
 
   local ability
@@ -415,14 +443,14 @@ function actions.activate_ability(g, player_index, card_def, source_key, ability
   else
     ability = cards.get_activated_ability(card_def)
   end
-  if not ability or ability.type ~= "activated" then return g end
+  if not ability or ability.type ~= "activated" then return false, "invalid_ability" end
 
   local key = tostring(player_index) .. ":" .. source_key
-  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
-  if not abilities.can_pay_cost(p.resources, ability.cost) then return g end
+  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
+  if not abilities.can_pay_cost(p.resources, ability.cost) then return false, "insufficient_resources" end
 
   -- Pay cost
-  for _, c in ipairs(ability.cost) do
+  for _, c in ipairs(ability.cost or {}) do
     p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
   end
   g.activatedUsedThisTurn[key] = true
@@ -430,36 +458,39 @@ function actions.activate_ability(g, player_index, card_def, source_key, ability
   -- Resolve effect
   abilities.resolve(ability, p, g)
 
-  return g
+  return true
 end
 
 -- Play a specific unit card from hand via a play_unit ability (two-step selection flow).
 -- source_key: unique string like "board:3:2" for tracking once-per-turn
 function actions.play_unit_from_hand(g, player_index, card_def, source_key, ability_index, hand_index)
-  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
+  if g.phase ~= "MAIN" then return false, "wrong_phase" end
+  if player_index ~= g.activePlayer then return false, "not_active_player" end
   local p = g.players[player_index + 1]
 
   local ability
   if ability_index and card_def.abilities then
     ability = card_def.abilities[ability_index]
   end
-  if not ability or ability.type ~= "activated" or ability.effect ~= "play_unit" then return g end
+  if not ability or ability.type ~= "activated" or ability.effect ~= "play_unit" then
+    return false, "not_play_unit_ability"
+  end
 
   local key = tostring(player_index) .. ":" .. source_key
-  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
-  if not abilities.can_pay_cost(p.resources, ability.cost) then return g end
+  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
+  if not abilities.can_pay_cost(p.resources, ability.cost) then return false, "insufficient_resources" end
 
   -- Validate hand_index
-  if not hand_index or hand_index < 1 or hand_index > #p.hand then return g end
+  if not hand_index or hand_index < 1 or hand_index > #p.hand then return false, "invalid_hand_index" end
   local matching = abilities.find_matching_hand_indices(p, ability.effect_args)
   local is_eligible = false
   for _, idx in ipairs(matching) do
     if idx == hand_index then is_eligible = true; break end
   end
-  if not is_eligible then return g end
+  if not is_eligible then return false, "hand_card_not_eligible" end
 
   -- Pay cost
-  for _, c in ipairs(ability.cost) do
+  for _, c in ipairs(ability.cost or {}) do
     p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
   end
   g.activatedUsedThisTurn[key] = true
@@ -467,12 +498,20 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   -- Remove card from hand and place on board
   local card_id = p.hand[hand_index]
   table.remove(p.hand, hand_index)
-  p.board[#p.board + 1] = { card_id = card_id, state = { rested = false } }
+  local played_def = nil
+  local ok_played, maybe_played = pcall(cards.get_card_def, card_id)
+  if ok_played then
+    played_def = maybe_played
+  end
+  p.board[#p.board + 1] = {
+    card_id = card_id,
+    state = entering_board_state(g, played_def, {}),
+  }
 
   -- Fire on_play triggered abilities
   fire_on_play_triggers(p, g, card_id)
 
-  return g
+  return true
 end
 
 
@@ -492,8 +531,7 @@ function actions.deploy_worker_to_unit_row(g, player_index)
   if #p.workerStatePool > 0 then
     restored_state = table.remove(p.workerStatePool)
   end
-  local final_state = restored_state or {}
-  if final_state.rested == nil then final_state.rested = false end
+  local final_state = entering_board_state(g, worker_def, restored_state or {})
   p.board[#p.board + 1] = { card_id = worker_def.id, state = final_state }
   return true
 end
@@ -583,19 +621,24 @@ end
 -- worker_kind: "worker_unassigned", "worker_left", "worker_right", "structure_worker", "unassigned_pool"
 -- worker_extra: board_index for structure_worker, nil otherwise
 function actions.sacrifice_worker(g, player_index, card_def, source_key, ability_index, worker_kind, worker_extra)
-  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
+  if g.phase ~= "MAIN" then return false, "wrong_phase" end
+  if player_index ~= g.activePlayer then return false, "not_active_player" end
   local p = g.players[player_index + 1]
 
   local ability
   if ability_index and card_def.abilities then
     ability = card_def.abilities[ability_index]
   end
-  if not ability or ability.type ~= "activated" or ability.effect ~= "sacrifice_produce" then return g end
+  if not ability or ability.type ~= "activated" or ability.effect ~= "sacrifice_produce" then
+    return false, "not_sacrifice_ability"
+  end
 
   local key = tostring(player_index) .. ":" .. source_key
-  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
+  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
 
-  if not consume_worker_target(p, worker_kind, worker_extra) then return g end
+  if not consume_worker_target(p, worker_kind, worker_extra) then
+    return false, "invalid_sacrifice_worker_target"
+  end
 
   local worker_def = get_faction_worker_def(p.faction)
   if worker_def then
@@ -610,7 +653,7 @@ function actions.sacrifice_worker(g, player_index, card_def, source_key, ability
   end
 
   g.activatedUsedThisTurn[key] = true
-  return g
+  return true
 end
 
 function actions.sacrifice_board_entry(g, player_index, target_board_index)
@@ -621,20 +664,23 @@ end
 
 -- Sacrifice a board entry to produce a resource
 function actions.sacrifice_unit(g, player_index, card_def, source_key, ability_index, target_board_index)
-  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return g end
+  if g.phase ~= "MAIN" then return false, "wrong_phase" end
+  if player_index ~= g.activePlayer then return false, "not_active_player" end
   local p = g.players[player_index + 1]
 
   local ability
   if ability_index and card_def.abilities then
     ability = card_def.abilities[ability_index]
   end
-  if not ability or ability.type ~= "activated" or ability.effect ~= "sacrifice_produce" then return g end
+  if not ability or ability.type ~= "activated" or ability.effect ~= "sacrifice_produce" then
+    return false, "not_sacrifice_ability"
+  end
 
   local key = tostring(player_index) .. ":" .. source_key
-  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return g end
+  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
 
   local removed = actions.sacrifice_board_entry(g, player_index, target_board_index)
-  if not removed then return g end
+  if not removed then return false, "invalid_sacrifice_target" end
 
   -- Produce the resource
   local args = ability.effect_args or {}
@@ -645,7 +691,7 @@ function actions.sacrifice_unit(g, player_index, card_def, source_key, ability_i
   end
 
   g.activatedUsedThisTurn[key] = true
-  return g
+  return true
 end
 
 -- Convenience: activate the base ability for a player
@@ -811,8 +857,12 @@ function actions.assign_special_worker(g, player_index, sw_index, target)
     sw.assigned_to = target_bi
     return true
   elseif type(target) == "table" and target.type == "field" then
-    local field_state = copy_table(sw.state or {})
-    if field_state.rested == nil then field_state.rested = false end
+    local sw_def = nil
+    local ok_sw, maybe_sw = pcall(cards.get_card_def, sw.card_id)
+    if ok_sw then
+      sw_def = maybe_sw
+    end
+    local field_state = entering_board_state(g, sw_def, sw.state or {})
     p.board[#p.board + 1] = { card_id = sw.card_id, special_worker_index = sw_index, state = field_state }
     sw.assigned_to = { type = "field", board_index = #p.board }
     return true

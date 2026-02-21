@@ -11,12 +11,45 @@
 local host_service = {}
 host_service.__index = host_service
 
+local ok_json, json_codec = pcall(require, "src.net.json_codec")
+if not ok_json then
+  json_codec = nil
+end
+
 local function fail(reason, meta)
   return { ok = false, reason = reason, meta = meta or {} }
 end
 
 local function ok(meta)
   return { ok = true, reason = "ok", meta = meta or {} }
+end
+
+local function extract_player_index_from_response(response_frame)
+  if not json_codec or type(response_frame) ~= "string" then
+    return nil
+  end
+
+  local ok_decode, decoded = pcall(json_codec.decode, response_frame)
+  if not ok_decode or type(decoded) ~= "table" or not decoded.ok then
+    return nil
+  end
+
+  local message = decoded.message
+  if type(message) ~= "table" or message.type ~= "command_ack" then
+    return nil
+  end
+
+  local payload = message.payload
+  if type(payload) ~= "table" then
+    return nil
+  end
+
+  local player_index = payload.player_index
+  if type(player_index) ~= "number" then
+    return nil
+  end
+
+  return player_index
 end
 
 function host_service.new(opts)
@@ -79,12 +112,17 @@ function host_service:step(timeout_ms)
         if c.close then pcall(c.close, c) end
         table.remove(self.connections, i)
       else
-        -- Send any queued state pushes to all OTHER connections
+        local assigned_player_index = extract_player_index_from_response(response)
+        if assigned_player_index ~= nil then
+          c.player_index = assigned_player_index
+        end
+
+        -- Send any queued state pushes to all OTHER authenticated connections.
         if self.push_source then
-          local pushes = self.push_source:pop_pushes()
-          for _, push in ipairs(pushes) do
-            for j, other in ipairs(self.connections) do
-              if j ~= i then
+          for j, other in ipairs(self.connections) do
+            if j ~= i and type(other.player_index) == "number" then
+              local pushes = self.push_source:pop_pushes(other.player_index)
+              for _, push in ipairs(pushes) do
                 pcall(other.send_text, other, push)
               end
             end
@@ -99,12 +137,15 @@ function host_service:step(timeout_ms)
     end
   end
 
-  -- Flush any pending state pushes (e.g. from host's own moves) to ALL connections
+  -- Flush any pending state pushes (e.g. from host's own moves) to authenticated
+  -- connections by player identity.
   if self.push_source and #self.connections > 0 then
-    local pushes = self.push_source:pop_pushes()
-    for _, push in ipairs(pushes) do
-      for _, c in ipairs(self.connections) do
-        pcall(c.send_text, c, push)
+    for _, c in ipairs(self.connections) do
+      if type(c.player_index) == "number" then
+        local pushes = self.push_source:pop_pushes(c.player_index)
+        for _, push in ipairs(pushes) do
+          pcall(c.send_text, c, push)
+        end
       end
     end
   end
