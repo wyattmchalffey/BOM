@@ -35,12 +35,23 @@ local PASS_BTN_W = 90
 local PASS_BTN_H = 32
 local END_TURN_BTN_W = 100
 local END_TURN_BTN_H = 32
+local BTN_SIDE_PAD = 20
+local BTN_BOTTOM_PAD = 12
+local BTN_STACK_GAP = 8
 local STRUCT_TILE_W = 90
 local STRUCT_TILE_H_BASE = 50
 local STRUCT_TILE_AB_H = 26
 local STRUCT_TILE_GAP = 8
 local BASE_CARD_H = 170
-local RESOURCE_BAR_H = 26
+local RESOURCE_BAR_H = 34
+local RESOURCE_BAR_LEFT_PAD = 10
+local RESOURCE_BAR_MAX_COLS = 4
+local RESOURCE_BAR_INNER_PAD_X = 8
+local RESOURCE_BAR_INNER_PAD_Y = 6
+local RESOURCE_BADGE_W = 48
+local RESOURCE_BADGE_H = 24
+local RESOURCE_BADGE_GAP_X = 6
+local RESOURCE_BADGE_GAP_Y = 6
 
 -- Battlefield layout: two-row system (structures in back, units in front)
 local BFIELD_TILE_W = 85
@@ -210,8 +221,14 @@ function board.resource_right_rect(panel_x, panel_y, panel_w, panel_h, panel_ind
 end
 
 function board.blueprint_slot_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
-  local _, back_y = board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index or 0)
-  return panel_x + 20, back_y, DECK_CARD_W, DECK_CARD_H
+  local panel = panel_index or 0
+  local by
+  if panel == 0 then
+    by = panel_y + 8
+  else
+    by = panel_y + panel_h - DECK_CARD_H - 8
+  end
+  return panel_x + 20, by, DECK_CARD_W, DECK_CARD_H
 end
 
 function board.worker_slot_rect(panel_x, panel_y, panel_w, panel_h)
@@ -221,6 +238,27 @@ end
 function board.unit_slot_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
   local _, back_y = board.back_row_rect(panel_x, panel_y, panel_w, panel_h, panel_index or 0)
   return panel_x + panel_w - 20 - DECK_CARD_W, back_y, DECK_CARD_W, DECK_CARD_H
+end
+
+-- Graveyard zone: mirrored by panel (local above deck, opponent below deck).
+local GRAVEYARD_SLOT_H = 30
+function board.graveyard_slot_rect(panel_x, panel_y, panel_w, panel_h, panel_index)
+  local panel = panel_index or 0
+  local udx, udy, udw, udh = board.unit_slot_rect(panel_x, panel_y, panel_w, panel_h, panel)
+  local gy
+  if panel == 0 then
+    gy = udy - GRAVEYARD_SLOT_H - 8
+    if gy < panel_y + 4 then
+      gy = panel_y + 4
+    end
+  else
+    gy = udy + udh + 8
+    local max_gy = panel_y + panel_h - GRAVEYARD_SLOT_H - 4
+    if gy > max_gy then
+      gy = max_gy
+    end
+  end
+  return udx, gy, udw, GRAVEYARD_SLOT_H
 end
 
 -- Backwards-compat wrapper: returns the back row rect
@@ -243,36 +281,69 @@ function board.structure_tile_rect(panel_x, panel_y, panel_w, panel_h, tile_inde
   return tx, ay, BFIELD_TILE_W, BFIELD_TILE_H
 end
 
--- Resource bar: above buttons for local player, bottom of panel for opponent
+-- Resource bar: local panel anchored at resource row; opponent panel anchored top-left.
 function board.resource_bar_rect(panel_index)
   local px, py, pw, ph = board.panel_rect(panel_index)
+  local bar_x = px + RESOURCE_BAR_LEFT_PAD
+  local bar_w = pw - (RESOURCE_BAR_LEFT_PAD + 20)
+  local min_w = RESOURCE_BADGE_W + RESOURCE_BAR_INNER_PAD_X * 2
+  if bar_w < min_w then bar_w = min_w end
+
   if panel_index == 0 then
-    local btn_y = py + ph - PASS_BTN_H - 12
-    return px + 20, btn_y - RESOURCE_BAR_H - 4, pw - 40, RESOURCE_BAR_H
-  else
-    return px + 20, py + ph - RESOURCE_BAR_H - 8, pw - 40, RESOURCE_BAR_H
+    local bar_bottom = py + ph - 8
+    local ebx = board.end_turn_button_rect(px, py, pw, ph)
+    bar_w = math.min(bar_w, ebx - bar_x - 12)
+    local _, ry, _, rh = board.resource_left_rect(px, py, pw, ph, panel_index)
+    -- Match visual bottoms: resource nodes render with a small +3 shadow.
+    bar_bottom = ry + rh + 3
+    return bar_x, bar_bottom - RESOURCE_BAR_H, bar_w, RESOURCE_BAR_H
   end
+
+  return bar_x, py + 8, bar_w, RESOURCE_BAR_H
 end
 
--- Pass button: bottom left of each player's panel (for priority passing)
+-- Pass button: stacked above End Turn on the local player's panel
 function board.pass_button_rect(panel_x, panel_y, panel_w, panel_h)
-  return panel_x + 20, panel_y + panel_h - PASS_BTN_H - 12, PASS_BTN_W, PASS_BTN_H
+  local etx, ety, etw = board.end_turn_button_rect(panel_x, panel_y, panel_w, panel_h)
+  local pass_x = etx + math.floor((etw - PASS_BTN_W) / 2)
+  return pass_x, ety - PASS_BTN_H - BTN_STACK_GAP, PASS_BTN_W, PASS_BTN_H
 end
 
 -- End turn button: bottom right of each player's panel
 function board.end_turn_button_rect(panel_x, panel_y, panel_w, panel_h)
-  return panel_x + panel_w - END_TURN_BTN_W - 20, panel_y + panel_h - END_TURN_BTN_H - 12, END_TURN_BTN_W, END_TURN_BTN_H
+  return panel_x + panel_w - END_TURN_BTN_W - BTN_SIDE_PAD, panel_y + panel_h - END_TURN_BTN_H - BTN_BOTTOM_PAD, END_TURN_BTN_W, END_TURN_BTN_H
 end
 
--- Unassigned workers pool: bottom left, to the right of the Pass button (small fixed width)
+-- Unassigned workers pool: adjacent to the base (prefers right side, falls back left).
 local UNASSIGNED_POOL_W = 100
 local UNASSIGNED_POOL_H = 36
 
-function board.unassigned_pool_rect(panel_x, panel_y, panel_w, panel_h, player)
-  local pass_x, pass_y, pass_w, pass_h = board.pass_button_rect(panel_x, panel_y, panel_w, panel_h)
+function board.unassigned_pool_rect(panel_x, panel_y, panel_w, panel_h, player, panel_index)
+  local panel = panel_index or 0
   local gap = 8
-  local pool_x = panel_x + 20 + PASS_BTN_W + gap
-  local pool_y = pass_y + pass_h / 2 - UNASSIGNED_POOL_H / 2
+  local bx, by, bw, bh = board.base_rect(panel_x, panel_y, panel_w, panel_h, panel)
+  local rlx, _, rlw = board.resource_left_rect(panel_x, panel_y, panel_w, panel_h, panel)
+  local rrx = board.resource_right_rect(panel_x, panel_y, panel_w, panel_h, panel)
+
+  local left_bound = rlx + rlw + gap
+  local right_bound = rrx - gap - UNASSIGNED_POOL_W
+  local preferred_right_x = bx + bw + gap
+  local preferred_left_x = bx - gap - UNASSIGNED_POOL_W
+
+  local pool_x
+  if preferred_right_x <= right_bound then
+    pool_x = preferred_right_x
+  elseif preferred_left_x >= left_bound then
+    pool_x = preferred_left_x
+  else
+    pool_x = math.max(left_bound, math.min(preferred_right_x, right_bound))
+  end
+
+  local panel_min_x = panel_x + 20
+  local panel_max_x = panel_x + panel_w - 20 - UNASSIGNED_POOL_W
+  pool_x = math.max(panel_min_x, math.min(pool_x, panel_max_x))
+
+  local pool_y = by + bh / 2 - UNASSIGNED_POOL_H / 2
   return pool_x, pool_y, UNASSIGNED_POOL_W, UNASSIGNED_POOL_H
 end
 
@@ -334,8 +405,8 @@ end
 -- Helper: draw a colored resource badge with PNG icon
 local function draw_resource_badge(x, y, res_type, letter, count, r, g, b, display_val, pending_upkeep)
   local icon_size = 18
-  local badge_w = 50
-  local badge_h = 22
+  local badge_w = RESOURCE_BADGE_W
+  local badge_h = RESOURCE_BADGE_H
   local show = display_val or count
   local rolling = display_val and math.abs(display_val - count) > 0.5
   -- Beveled pill background
@@ -352,22 +423,22 @@ local function draw_resource_badge(x, y, res_type, letter, count, r, g, b, displ
   love.graphics.rectangle("line", x, y, badge_w, badge_h, 5, 5)
   -- PNG icon (centered vertically in badge)
   local icon_y = y + (badge_h - icon_size) / 2
-  res_icons.draw(res_type, x + 2, icon_y, icon_size)
+  res_icons.draw(res_type, x + 3, icon_y, icon_size)
   -- Number text
   love.graphics.setFont(util.get_font(13))
   love.graphics.setColor(r, g, b, 1.0)
-  love.graphics.print(tostring(math.floor(show + 0.5)), x + icon_size + 5, y + 3)
+  love.graphics.print(tostring(math.floor(show + 0.5)), x + icon_size + 6, y + 4)
 
-  -- Static upcoming upkeep indicator (shown above current value).
+  -- Static upcoming upkeep indicator (inside the badge to avoid overlap when wrapped).
   if pending_upkeep and pending_upkeep > 0 then
     local up_text = "-" .. tostring(pending_upkeep)
-    local up_font = util.get_font(9)
+    local up_font = util.get_font(8)
     love.graphics.setFont(up_font)
     love.graphics.setColor(0.95, 0.45, 0.45, 0.95)
     local tw = up_font:getWidth(up_text)
-    love.graphics.print(up_text, x + badge_w - tw - 4, y - 8)
+    love.graphics.print(up_text, x + badge_w - tw - 3, y + 1)
   end
-  return badge_w + 4
+  return badge_w + RESOURCE_BADGE_GAP_X
 end
 
 -- Helper: draw a worker count badge with icon
@@ -401,6 +472,40 @@ local function draw_drop_zone_glow(x, y, w, h, t)
   love.graphics.setLineWidth(2)
   love.graphics.rectangle("line", x - 3, y - 3, w + 6, h + 6, 6, 6)
   love.graphics.setLineWidth(1)
+end
+
+local function draw_turn_ownership_badges(px, py, pw, panel, is_active, accent, t)
+  local turn_label
+  if panel == 0 then
+    turn_label = is_active and "YOUR TURN" or "WAITING"
+  else
+    turn_label = is_active and "OPPONENT TURN" or "WAITING"
+  end
+
+  local turn_font = util.get_title_font(12)
+  local turn_w = turn_font:getWidth(turn_label) + 20
+  local turn_h = turn_font:getHeight() + 8
+  local turn_x = px + pw - turn_w - 8
+  local turn_y = py + 6
+
+  if is_active then
+    love.graphics.setColor(accent[1], accent[2], accent[3], 0.34)
+    love.graphics.rectangle("fill", turn_x - 2, turn_y - 2, turn_w + 4, turn_h + 4, 7, 7)
+    love.graphics.setColor(0.08, 0.11, 0.16, 0.92)
+    love.graphics.rectangle("fill", turn_x, turn_y, turn_w, turn_h, 6, 6)
+    love.graphics.setColor(accent[1], accent[2], accent[3], 0.82)
+    love.graphics.setLineWidth(2)
+    love.graphics.rectangle("line", turn_x, turn_y, turn_w, turn_h, 6, 6)
+    love.graphics.setLineWidth(1)
+  else
+    love.graphics.setColor(0.06, 0.08, 0.12, 0.82)
+    love.graphics.rectangle("fill", turn_x, turn_y, turn_w, turn_h, 6, 6)
+    love.graphics.setColor(0.45, 0.5, 0.62, 0.45)
+    love.graphics.rectangle("line", turn_x, turn_y, turn_w, turn_h, 6, 6)
+  end
+  love.graphics.setFont(turn_font)
+  love.graphics.setColor(0.90, 0.93, 0.98, is_active and 1.0 or 0.75)
+  love.graphics.printf(turn_label, turn_x, turn_y + 4, turn_w, "center")
 end
 
 -- Draw worker token with 3D sphere shading, shadow, optional glow
@@ -1010,14 +1115,22 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
 
     -- Active panel: colored left+right accent border
     if is_active then
+      love.graphics.setColor(accent[1], accent[2], accent[3], 0.16)
+      love.graphics.rectangle("fill", px - 4, py - 4, pw + 8, ph + 8, 10, 10)
       love.graphics.setColor(accent[1], accent[2], accent[3], 0.7)
       love.graphics.rectangle("fill", px, py + 4, 3, ph - 8)
       love.graphics.rectangle("fill", px + pw - 3, py + 4, 3, ph - 8)
+      love.graphics.setColor(accent[1], accent[2], accent[3], 0.68)
+      love.graphics.setLineWidth(2.5)
+      love.graphics.rectangle("line", px - 2, py - 2, pw + 4, ph + 4, 9, 9)
+      love.graphics.setLineWidth(1)
     end
 
     -- Accent line at top of panel
     love.graphics.setColor(accent[1], accent[2], accent[3], 0.5)
     love.graphics.rectangle("fill", px + 4, py + 1, pw - 8, 1)
+
+    draw_turn_ownership_badges(px, py, pw, panel, is_active, accent, t)
 
     -- Shared variables for resource bar (drawn later)
     local max_workers = player.maxWorkers or 8
@@ -1041,6 +1154,25 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     draw_deck_card(bx, by, bw, bh, "Blueprint\nDeck", deck_assets.get_blueprint_back())
     local ux, uy, uw, uh = board.unit_slot_rect(px, py, pw, ph, panel)
     draw_deck_card(ux, uy, uw, uh, "Unit\nDeck", deck_assets.get_unit_back())
+    local gx, gy, gwz, ghz = board.graveyard_slot_rect(px, py, pw, ph, panel)
+    local gy_hover = is_hovered(hover, "graveyard", pi)
+    love.graphics.setColor(0.09, 0.10, 0.14, gy_hover and 0.96 or 0.88)
+    love.graphics.rectangle("fill", gx, gy, gwz, ghz, 5, 5)
+    if gy_hover then
+      love.graphics.setColor(accent[1], accent[2], accent[3], 0.65)
+      love.graphics.setLineWidth(2)
+      love.graphics.rectangle("line", gx - 1, gy - 1, gwz + 2, ghz + 2, 6, 6)
+      love.graphics.setLineWidth(1)
+    else
+      love.graphics.setColor(0.25, 0.27, 0.33, 0.9)
+      love.graphics.rectangle("line", gx, gy, gwz, ghz, 5, 5)
+    end
+    love.graphics.setColor(0.55, 0.58, 0.68, 0.9)
+    love.graphics.setFont(util.get_font(9))
+    love.graphics.printf("Graveyard", gx, gy + 4, gwz, "center")
+    love.graphics.setColor(0.9, 0.92, 0.98, 1.0)
+    love.graphics.setFont(util.get_title_font(11))
+    love.graphics.printf(tostring(#(player.graveyard or {})), gx, gy + 15, gwz, "center")
 
     -- ── Battlefield: two-row layout ──
     -- Back row: base tile + structures.  Front row: units.
@@ -1115,7 +1247,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       end
       -- Highlight all worker locations (any workers can be sacrificed)
       local sac_pulse = 0.3 + 0.2 * math.sin(t * 4)
-      local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
+      local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
       local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player) - count_field_worker_cards(player)
       if unassigned > 0 then
         love.graphics.setColor(0.9, 0.2, 0.2, sac_pulse)
@@ -1193,8 +1325,8 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       draw_special_worker_circle(wcx, wcy, is_active, is_active)
     end
 
-    -- Unassigned workers pool (centered); hide one if we're dragging from this pool
-    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
+    -- Unassigned workers pool (next to base); hide one if we're dragging from this pool
+    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
 
     -- Drop zone glow on unassigned pool when dragging from a resource
     if drag and drag.player_index == pi and drag.from ~= "unassigned" then
@@ -1271,41 +1403,67 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     -- Resource bar (both panels — dynamically sized, left-justified)
     do
       local pending_upkeep = pending_upkeep_by_resource(player)
-      local rbx, rby, _, rbh = board.resource_bar_rect(panel)
-      -- First pass: measure how wide the content is
-      local content_w = 8  -- left padding
+      local entries = {}
       for _, key in ipairs(config.resource_types) do
         local count = player.resources[key] or 0
         local display_val = dr and dr[key]
-        if count > 0 or (display_val and display_val > 0.5) or (pending_upkeep[key] or 0) > 0 then
-          content_w = content_w + 54  -- badge_w (50) + gap (4)
+        local upkeep_due = pending_upkeep[key] or 0
+        local rdef = res_registry[key]
+        if rdef and (count > 0 or (display_val and display_val > 0.5) or upkeep_due > 0) then
+          table.insert(entries, {
+            key = key,
+            rdef = rdef,
+            count = count,
+            display_val = display_val,
+            upkeep_due = upkeep_due,
+          })
         end
       end
-      -- Only draw if there are resources to show
-      if content_w > 8 then
-        local rbw = content_w + 4  -- right padding
+
+      if #entries > 0 then
+        local rbx, rby, max_rbw, min_h = board.resource_bar_rect(panel)
+        local desired_cols = math.min(RESOURCE_BAR_MAX_COLS, #entries)
+        local desired_w = RESOURCE_BAR_INNER_PAD_X * 2
+          + desired_cols * RESOURCE_BADGE_W
+          + (desired_cols - 1) * RESOURCE_BADGE_GAP_X
+        local rbw = math.min(max_rbw, desired_w)
+        local usable_w = math.max(RESOURCE_BADGE_W, rbw - RESOURCE_BAR_INNER_PAD_X * 2)
+        local badges_per_row = math.max(1, math.min(
+          RESOURCE_BAR_MAX_COLS,
+          math.floor((usable_w + RESOURCE_BADGE_GAP_X) / (RESOURCE_BADGE_W + RESOURCE_BADGE_GAP_X))
+        ))
+        local row_count = math.ceil(#entries / badges_per_row)
+        local content_h = row_count * RESOURCE_BADGE_H + (row_count - 1) * RESOURCE_BADGE_GAP_Y
+        local bar_h = math.max(min_h, content_h + RESOURCE_BAR_INNER_PAD_Y * 2)
+
+        if panel == 0 then
+          -- Local panel: keep bottom anchored and grow upward as rows are added.
+          rby = rby + (min_h - bar_h)
+        end
+
         -- Background
         love.graphics.setColor(0.06, 0.07, 0.10, 0.92)
-        love.graphics.rectangle("fill", rbx, rby, rbw, rbh, 5, 5)
+        love.graphics.rectangle("fill", rbx, rby, rbw, bar_h, 6, 6)
         -- Accent line at top
         love.graphics.setColor(accent[1], accent[2], accent[3], 0.4)
         love.graphics.rectangle("fill", rbx + 4, rby, rbw - 8, 1)
         -- Subtle border
         love.graphics.setColor(0.18, 0.20, 0.25, 0.6)
-        love.graphics.rectangle("line", rbx, rby, rbw, rbh, 5, 5)
-        -- Resource badges
-        local badge_x = rbx + 8
-        local badge_cy = rby + (rbh - 22) / 2
-        for _, key in ipairs(config.resource_types) do
-          local count = player.resources[key] or 0
-          local display_val = dr and dr[key]
-          if count > 0 or (display_val and display_val > 0.5) or (pending_upkeep[key] or 0) > 0 then
-            local rdef = res_registry[key]
-            if rdef then
-              local rc, gc, bc = rdef.color[1], rdef.color[2], rdef.color[3]
-              badge_x = badge_x + draw_resource_badge(badge_x, badge_cy, key, rdef.letter, count, rc, gc, bc, display_val, pending_upkeep[key])
-            end
+        love.graphics.rectangle("line", rbx, rby, rbw, bar_h, 6, 6)
+
+        for i, entry in ipairs(entries) do
+          local col = (i - 1) % badges_per_row
+          local row
+          if panel == 0 then
+            local row_from_bottom = math.floor((i - 1) / badges_per_row)
+            row = (row_count - 1) - row_from_bottom
+          else
+            row = math.floor((i - 1) / badges_per_row)
           end
+          local badge_x = rbx + RESOURCE_BAR_INNER_PAD_X + col * (RESOURCE_BADGE_W + RESOURCE_BADGE_GAP_X)
+          local badge_y = rby + RESOURCE_BAR_INNER_PAD_Y + row * (RESOURCE_BADGE_H + RESOURCE_BADGE_GAP_Y)
+          local rc, gc, bc = entry.rdef.color[1], entry.rdef.color[2], entry.rdef.color[3]
+          draw_resource_badge(badge_x, badge_y, entry.key, entry.rdef.letter, entry.count, rc, gc, bc, entry.display_val, entry.upkeep_due)
         end
       end
     end
@@ -1475,7 +1633,8 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
   end
 end
 
--- Hit test: return "activate_base" | "blueprint" | "worker_*" | "resource_*" | "unassigned_pool" | "pass" | "end_turn" | "hand_card" | nil
+-- Hit test: return "activate_base" | "blueprint" | "graveyard" | "worker_*"
+-- | "resource_*" | "unassigned_pool" | "pass" | "end_turn" | "hand_card" | nil
 function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, combat_ui)
   local_player_index = local_player_index or 0
   -- Check hand cards first (drawn on top of everything; local player only)
@@ -1635,12 +1794,17 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
       return "blueprint", pi
     end
 
+    local gyx, gyy, gyw, gyh = board.graveyard_slot_rect(px, py, pw, ph, panel)
+    if util.point_in_rect(mx, my, gyx, gyy, gyw, gyh) then
+      return "graveyard", pi
+    end
+
     local udx, udy, udw, udh = board.unit_slot_rect(px, py, pw, ph, panel)
     if util.point_in_rect(mx, my, udx, udy, udw, udh) then
       return "unit_deck", pi
     end
 
-    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
+    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
     if util.point_in_rect(mx, my, uax, uay, uaw, uah) then
       local unassigned = player.totalWorkers - player.workersOn.food - player.workersOn.wood - player.workersOn.stone - count_structure_workers(player) - count_field_worker_cards(player)
       -- Count unassigned special workers

@@ -223,6 +223,50 @@ local function terminal_title_for_player(g, local_player_index)
   return "Defeat"
 end
 
+local function graveyard_cards_for_player(player)
+  local out = {}
+  if not player or type(player.graveyard) ~= "table" then
+    return out
+  end
+
+  -- Show newest cards first.
+  for i = #player.graveyard, 1, -1 do
+    local entry = player.graveyard[i]
+    local card_id = (type(entry) == "table") and entry.card_id or entry
+    if type(card_id) == "string" and card_id ~= "" then
+      local ok_def, def = pcall(cards.get_card_def, card_id)
+      if ok_def and def then
+        out[#out + 1] = def
+      end
+    end
+  end
+
+  return out
+end
+
+function GameState:open_graveyard_view(player_index)
+  local player = self.game_state.players[player_index + 1]
+  if not player then
+    return
+  end
+
+  local faction_info = factions_data[player.faction]
+  local accent = faction_info and faction_info.color or { 0.5, 0.5, 0.7 }
+  local is_local = player_index == self.local_player_index
+
+  deck_viewer.open({
+    title = is_local and "Your Graveyard" or "Opponent Graveyard",
+    hint = "Newest first",
+    cards = graveyard_cards_for_player(player),
+    accent = accent,
+    filters = { "All", "Unit", "Worker", "Structure", "Spell", "Technology", "Item", "Artifact" },
+    filter_fn = function(def, filter_name)
+      return def.kind == filter_name
+    end,
+  })
+  self.show_blueprint_for_player = nil
+end
+
 function GameState:_sync_terminal_state()
   local g = self.game_state
   local is_terminal = g and g.is_terminal == true
@@ -396,7 +440,7 @@ function GameState:update(dt)
     if k == "blueprint" or k == "end_turn" or k == "pass" or k == "activate_base"
        or k == "activate_ability" or k == "ability_hover"
        or k == "worker_unassigned" or k == "worker_left" or k == "worker_right"
-       or k == "structure" or k == "structure_worker" or k == "hand_card" or k == "unit_deck" or k == "unit_row"
+       or k == "structure" or k == "structure_worker" or k == "hand_card" or k == "unit_deck" or k == "graveyard" or k == "unit_row"
        or k == "special_worker_unassigned" or k == "special_worker_resource" or k == "special_worker_structure" then
       want_hand = true
     end
@@ -412,8 +456,8 @@ function GameState:update(dt)
     self._current_cursor = desired
   end
 
-  -- Feature 5: Tooltip hover delay (structures + unit deck + ability buttons + workers)
-  if self.hover and (self.hover.kind == "structure" or self.hover.kind == "unit_deck"
+  -- Feature 5: Tooltip hover delay (structures + deck/graveyard + ability buttons + workers)
+  if self.hover and (self.hover.kind == "structure" or self.hover.kind == "unit_deck" or self.hover.kind == "graveyard"
       or self.hover.kind == "ability_hover" or self.hover.kind == "activate_ability"
       or self.hover.kind == "special_worker_unassigned" or self.hover.kind == "special_worker_resource"
       or self.hover.kind == "special_worker_structure"
@@ -1032,15 +1076,23 @@ function GameState:draw()
       end
     end
 
-    -- Unit deck tooltip (shows deck count on hover)
-    if self.hover and self.hover.kind == "unit_deck" and self.tooltip_timer >= 0.3 then
+    -- Unit deck / graveyard tooltip (shows zone count on hover)
+    if self.hover and (self.hover.kind == "unit_deck" or self.hover.kind == "graveyard") and self.tooltip_timer >= 0.3 then
       local pi = self.hover.pi
       local player = self.game_state.players[pi + 1]
       if player then
-        local deck_count = #(player.deck or {})
+        local zone_label
+        local zone_count
+        if self.hover.kind == "graveyard" then
+          zone_label = "Cards in graveyard: "
+          zone_count = #(player.graveyard or {})
+        else
+          zone_label = "Cards in deck: "
+          zone_count = #(player.deck or {})
+        end
         local mx, my = love.mouse.getPosition()
         local gw, gh = love.graphics.getDimensions()
-        local label = "Cards in deck: " .. tostring(deck_count)
+        local label = zone_label .. tostring(zone_count)
         local font = util.get_font(11)
         local text_w = font:getWidth(label)
         local pad_x, pad_y = 12, 8
@@ -1143,11 +1195,13 @@ function GameState:draw()
     local pad_x, pad_y = 10, 6
     local box_w = math.min(420, text_w + pad_x * 2)
     local box_h = status_font:getHeight() + pad_y * 2
+    local box_x = 12
+    local box_y = love.graphics.getHeight() - box_h - 12
     love.graphics.setColor(0.08, 0.09, 0.13, 0.7)
-    love.graphics.rectangle("fill", 12, 12, box_w, box_h, 6, 6)
+    love.graphics.rectangle("fill", box_x, box_y, box_w, box_h, 6, 6)
     love.graphics.setColor(1, 1, 1, 0.92)
     love.graphics.setFont(status_font)
-    love.graphics.printf(status_text, 12 + pad_x, 12 + pad_y, box_w - pad_x * 2, "left")
+    love.graphics.printf(status_text, box_x + pad_x, box_y + pad_y, box_w - pad_x * 2, "left")
   end
 
   -- Vignette: drawn last, on top of everything
@@ -1989,6 +2043,12 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
+  if kind == "graveyard" then
+    sound.play("click")
+    self:open_graveyard_view(pi)
+    return
+  end
+
   -- Only local player can initiate drag interactions.
   if self.authoritative_adapter and pi ~= self.local_player_index then return end
 
@@ -2056,7 +2116,7 @@ function GameState:_get_worker_origin(pi, from)
   local px, py, pw, ph = board.panel_rect(panel)
   local player = self.game_state.players[pi + 1]
   if from == "unassigned" then
-    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
+    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
     return uax + uaw / 2, uay + uah / 2
   elseif from == "left" then
     local count = player.workersOn[(player.faction == "Human") and "wood" or "food"]
@@ -2072,7 +2132,7 @@ function GameState:_get_worker_origin(pi, from)
     return sax + 45, say + 30
   elseif from == "special" then
     -- Snap back to unassigned pool center
-    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player)
+    local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
     return uax + uaw / 2, uay + uah / 2
   elseif from == "unit_worker_card" then
     local fax, fay, faw = board.front_row_rect(px, py, pw, ph, panel)

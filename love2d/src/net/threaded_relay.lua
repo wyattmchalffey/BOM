@@ -136,17 +136,28 @@ while true do
 
     if use_select then
         -- Check if data available on socket (non-blocking)
-        local readable, _, sel_err = socket.select({raw_sock}, nil, 0.05)
-        if readable and #readable > 0 then
-            local ok_recv, frame_or_err, opcode = pcall(function() return conn:receive() end)
-            if ok_recv and frame_or_err then
-                inbox_ch:push(frame_or_err)
-            elseif not ok_recv then
-                result_ch:push("error:receive failed: " .. tostring(frame_or_err))
-                return
+        local ok_sel, readable_or_err = pcall(function()
+            return socket.select({raw_sock}, nil, 0.05)
+        end)
+        if not ok_sel then
+            -- The raw socket can become invalid over time; fall back to
+            -- timeout-based receive instead of crashing the thread.
+            use_select = false
+        else
+            local readable = readable_or_err
+            if readable and #readable > 0 then
+                local ok_recv, frame_or_err = pcall(function() return conn:receive() end)
+                if ok_recv and frame_or_err then
+                    inbox_ch:push(frame_or_err)
+                elseif not ok_recv then
+                    result_ch:push("error:receive failed: " .. tostring(frame_or_err))
+                    return
+                end
             end
         end
-    else
+    end
+
+    if not use_select then
         -- Fallback: brief sleep then try non-blocking receive via settimeout
         if conn.sock and conn.sock.settimeout then
             conn.sock:settimeout(0.05)
