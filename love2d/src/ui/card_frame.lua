@@ -281,7 +281,21 @@ local function passive_ability_text(ab)
     elseif e == "buff_ally_attacker" then
       return prefix .. "+" .. (args.attack or 0) .. " ATK to ally"
     elseif e == "conditional_damage" then
-      return prefix .. "Deal " .. (args.damage or 0) .. " dmg"
+      local body = "Deal " .. (args.damage or 0) .. " dmg"
+      if args.target == "unit" then
+        body = body .. " to target unit"
+      end
+      if args.condition == "allied_mounted_attacking" then
+        body = "If another Mounted unit attacks, " .. body
+      end
+      return prefix .. body
+    elseif e == "deal_damage_to_target_unit" then
+      local amount = args.amount or args.damage or 0
+      local body = "Deal " .. amount .. " dmg to target unit"
+      if args.requires_another_attacker_subtype then
+        body = "If another " .. tostring(args.requires_another_attacker_subtype) .. " unit attacks, " .. body
+      end
+      return prefix .. body
     elseif e == "buff_warriors_per_scholar" then
       return prefix .. "Buff warriors per scholar"
     elseif e == "grant_keyword" or e == "gain_keyword" then

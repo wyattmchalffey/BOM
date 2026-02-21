@@ -2,6 +2,7 @@
 -- Internal state machine: "main", "browse", "connecting"
 
 local util = require("src.ui.util")
+local card_frame = require("src.ui.card_frame")
 local runtime_multiplayer = require("src.net.runtime_multiplayer")
 local threaded_relay = require("src.net.threaded_relay")
 local headless_host_service = require("src.net.headless_host_service")
@@ -14,6 +15,7 @@ local room_list_fetcher = require("src.net.room_list_fetcher")
 local sound = require("src.fx.sound")
 local settings = require("src.settings")
 local factions_data = require("src.data.factions")
+local cards = require("src.game.cards")
 local game_state = require("src.game.state")
 local deck_validation = require("src.game.deck_validation")
 local deck_profiles = require("src.game.deck_profiles")
@@ -60,9 +62,11 @@ function MenuState.new(callbacks)
     deckbuilder_faction = nil,
     deckbuilder_cards = {},
     deckbuilder_counts = {},
+    deckbuilder_tab = "main",
+    deckbuilder_scroll = 0,
     deckbuilder_total = 0,
     deckbuilder_min = 0,
-    deckbuilder_max = 0,
+    deckbuilder_max = nil,
     deckbuilder_error = nil,
 
     -- Connection state
@@ -284,12 +288,35 @@ function MenuState:draw_settings()
 end
 
 -- Deck builder constants
-local DECK_CARD_W = 260
-local DECK_CARD_H = 160
-local DECK_CARD_GAP = 40
+local DECK_CARD_W = 200
+local DECK_CARD_H = 118
+local DECK_CARD_GAP = 22
+local DECK_CARD_Y = 108
 local DECK_LIST_X_PAD = 120
-local DECK_LIST_ROW_H = 34
 local DECK_LIST_TOP = 340
+local DECK_TAB_TOP = DECK_LIST_TOP - 58
+local DECK_TAB_H = 26
+local DECK_TAB_GAP = 8
+local DECK_TAB_WIDTH = 140
+local DECK_TAB_DEFS = {
+  { id = "main", label = "Main Deck" },
+  { id = "blueprints", label = "Blueprints" },
+}
+local DECK_FACTION_TILES = {
+  { id = "Human", label = "Human" },
+  { id = "Orc", label = "Orc" },
+  { id = "Elf", label = "Elves", coming_soon = true },
+  { id = "Gnome", label = "Gnomes", coming_soon = true },
+}
+local DECK_SELECTOR_CARD_W = card_frame.CARD_W
+local DECK_SELECTOR_CARD_H = card_frame.CARD_H
+local DECK_SELECTOR_COL_GAP = 14
+local DECK_SELECTOR_ROW_GAP = 18
+local DECK_SELECTOR_COUNT_Y_GAP = 6
+local DECK_SELECTOR_COUNT_H = 24
+local DECK_SELECTOR_BTN_W = 28
+local DECK_SELECTOR_BTN_H = 22
+local DECK_SELECTOR_CELL_H = DECK_SELECTOR_CARD_H + DECK_SELECTOR_COUNT_Y_GAP + DECK_SELECTOR_COUNT_H
 
 local function supported_deck_factions()
   local out = game_state.supported_player_factions()
@@ -297,6 +324,151 @@ local function supported_deck_factions()
     out = { settings.values.faction or "Human" }
   end
   return out
+end
+
+local function deckbuilder_faction_tiles()
+  local supported = game_state.supported_player_faction_set()
+  local tiles = {}
+  local seen = {}
+  for _, spec in ipairs(DECK_FACTION_TILES) do
+    local fdata = factions_data[spec.id]
+    if fdata then
+      local coming_soon = spec.coming_soon == true
+      tiles[#tiles + 1] = {
+        id = spec.id,
+        label = spec.label or spec.id,
+        coming_soon = coming_soon,
+        selectable = (not coming_soon) and (supported[spec.id] == true),
+      }
+      seen[spec.id] = true
+    end
+  end
+
+  -- Keep any additional supported factions visible if they are added later.
+  for _, faction in ipairs(supported_deck_factions()) do
+    if not seen[faction] then
+      tiles[#tiles + 1] = {
+        id = faction,
+        label = faction,
+        coming_soon = false,
+        selectable = true,
+      }
+    end
+  end
+
+  return tiles
+end
+
+local function deckbuilder_faction_layout(gw)
+  local tiles = deckbuilder_faction_tiles()
+  local total_w = #tiles * DECK_CARD_W + (#tiles - 1) * DECK_CARD_GAP
+  local start_x = (gw - total_w) / 2
+  return tiles, start_x, DECK_CARD_Y
+end
+
+local function safe_card_def(card_id)
+  local ok, def = pcall(cards.get_card_def, card_id)
+  if ok and type(def) == "table" then
+    return def
+  end
+  return nil
+end
+
+local function is_blueprint_entry(entry)
+  return entry and entry.kind == "Structure"
+end
+
+function MenuState:deckbuilder_visible_cards()
+  local visible = {}
+  local want_blueprints = (self.deckbuilder_tab == "blueprints")
+  for _, entry in ipairs(self.deckbuilder_cards or {}) do
+    local is_blueprint = is_blueprint_entry(entry)
+    if (want_blueprints and is_blueprint) or ((not want_blueprints) and (not is_blueprint)) then
+      visible[#visible + 1] = entry
+    end
+  end
+  return visible
+end
+
+function MenuState:deckbuilder_selector_layout(card_count)
+  local gw, gh = love.graphics.getDimensions()
+  local list_x = DECK_LIST_X_PAD
+  local list_w = gw - DECK_LIST_X_PAD * 2
+  local list_top = DECK_LIST_TOP
+  local list_bottom = gh - 24
+  local list_h = list_bottom - list_top
+
+  local cols = math.max(1, math.floor((list_w + DECK_SELECTOR_COL_GAP) / (DECK_SELECTOR_CARD_W + DECK_SELECTOR_COL_GAP)))
+  local grid_w = cols * DECK_SELECTOR_CARD_W + (cols - 1) * DECK_SELECTOR_COL_GAP
+  local grid_x = list_x + math.floor((list_w - grid_w) / 2)
+
+  local rows = math.ceil((card_count or 0) / cols)
+  local total_h = 0
+  if rows > 0 then
+    total_h = rows * DECK_SELECTOR_CELL_H + (rows - 1) * DECK_SELECTOR_ROW_GAP
+  end
+  local max_scroll = math.max(0, total_h - list_h)
+  self.deckbuilder_scroll = math.max(0, math.min(self.deckbuilder_scroll or 0, max_scroll))
+
+  return {
+    list_x = list_x,
+    list_w = list_w,
+    list_top = list_top,
+    list_bottom = list_bottom,
+    list_h = list_h,
+    cols = cols,
+    grid_x = grid_x,
+    total_h = total_h,
+    max_scroll = max_scroll,
+  }
+end
+
+function MenuState:deckbuilder_selector_items(visible_cards)
+  local layout = self:deckbuilder_selector_layout(#visible_cards)
+  local items = {}
+  for i, entry in ipairs(visible_cards) do
+    local col = (i - 1) % layout.cols
+    local row = math.floor((i - 1) / layout.cols)
+    local card_x = layout.grid_x + col * (DECK_SELECTOR_CARD_W + DECK_SELECTOR_COL_GAP)
+    local card_y = layout.list_top + row * (DECK_SELECTOR_CELL_H + DECK_SELECTOR_ROW_GAP) - self.deckbuilder_scroll
+    local controls_y = card_y + DECK_SELECTOR_CARD_H + DECK_SELECTOR_COUNT_Y_GAP
+    local btn_y = controls_y + math.floor((DECK_SELECTOR_COUNT_H - DECK_SELECTOR_BTN_H) / 2)
+    local minus_r = { x = card_x + 12, y = btn_y, w = DECK_SELECTOR_BTN_W, h = DECK_SELECTOR_BTN_H }
+    local plus_r = { x = card_x + DECK_SELECTOR_CARD_W - 12 - DECK_SELECTOR_BTN_W, y = btn_y, w = DECK_SELECTOR_BTN_W, h = DECK_SELECTOR_BTN_H }
+    local count_r = {
+      x = minus_r.x + minus_r.w + 8,
+      y = controls_y,
+      w = plus_r.x - (minus_r.x + minus_r.w) - 8,
+      h = DECK_SELECTOR_COUNT_H,
+    }
+    items[#items + 1] = {
+      index = i,
+      entry = entry,
+      card_r = { x = card_x, y = card_y, w = DECK_SELECTOR_CARD_W, h = DECK_SELECTOR_CARD_H },
+      cell_r = { x = card_x, y = card_y, w = DECK_SELECTOR_CARD_W, h = DECK_SELECTOR_CELL_H },
+      minus_r = minus_r,
+      plus_r = plus_r,
+      count_r = count_r,
+    }
+  end
+  return layout, items
+end
+
+local function deckbuilder_tab_rects()
+  local rects = {}
+  local x = DECK_LIST_X_PAD
+  for i, tab in ipairs(DECK_TAB_DEFS) do
+    rects[i] = {
+      id = tab.id,
+      label = tab.label,
+      x = x,
+      y = DECK_TAB_TOP,
+      w = DECK_TAB_WIDTH,
+      h = DECK_TAB_H,
+    }
+    x = x + DECK_TAB_WIDTH + DECK_TAB_GAP
+  end
+  return rects
 end
 
 function MenuState:refresh_deckbuilder_state()
@@ -311,11 +483,15 @@ function MenuState:refresh_deckbuilder_state()
   self.deckbuilder_cards = deck_validation.deck_entries_for_faction(faction)
   local deck = deck_profiles.get_deck(faction) or {}
   self.deckbuilder_counts = deck_profiles.build_counts(faction, deck)
+  if self.deckbuilder_tab ~= "main" and self.deckbuilder_tab ~= "blueprints" then
+    self.deckbuilder_tab = "main"
+  end
   local validated = deck_validation.validate_decklist(faction, deck)
   local meta = validated.meta or {}
   self.deckbuilder_total = meta.deck_size or #deck
   self.deckbuilder_min = meta.min_size or 0
-  self.deckbuilder_max = meta.max_size or 0
+  self.deckbuilder_max = meta.max_size
+  self.deckbuilder_scroll = 0
   self.deckbuilder_error = nil
 end
 
@@ -325,7 +501,7 @@ function MenuState:_set_deck_count(card_id, value)
 
   for _, entry in ipairs(self.deckbuilder_cards) do
     if entry.card_id == card_id then
-      if count > entry.max_copies then
+      if entry.max_copies and count > entry.max_copies then
         count = entry.max_copies
       end
       break
@@ -338,7 +514,7 @@ function MenuState:_set_deck_count(card_id, value)
   if saved.ok then
     self.deckbuilder_total = saved.meta and saved.meta.deck_size or #deck
     self.deckbuilder_min = saved.meta and saved.meta.min_size or self.deckbuilder_min
-    self.deckbuilder_max = saved.meta and saved.meta.max_size or self.deckbuilder_max
+    self.deckbuilder_max = saved.meta and saved.meta.max_size
     self.deckbuilder_error = nil
   else
     self.deckbuilder_total = #deck
@@ -363,23 +539,23 @@ function MenuState:draw_deckbuilder()
   love.graphics.printf("Choose faction and tune card counts", 0, 70, gw, "center")
 
   -- Faction cards
-  local factions = supported_deck_factions()
-  local total_w = #factions * DECK_CARD_W + (#factions - 1) * DECK_CARD_GAP
-  local start_x = (gw - total_w) / 2
-  local card_y = 140
-
-  local label_font = util.get_title_font(26)
+  local faction_tiles, start_x, card_y = deckbuilder_faction_layout(gw)
+  local label_font = util.get_title_font(21)
   local detail_font = util.get_font(13)
+  local soon_font = util.get_title_font(16)
 
-  for i, fname in ipairs(factions) do
-    local fdata = factions_data[fname]
+  for i, tile in ipairs(faction_tiles) do
+    local fdata = factions_data[tile.id]
     local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
-    local selected = (self.deckbuilder_faction == fname)
+    local selected = tile.selectable and (self.deckbuilder_faction == tile.id)
     local hovered = (self.deckbuilder_hover == i)
+    local faded = tile.coming_soon
 
     -- Card background
     if selected then
       love.graphics.setColor(fdata.color[1] * 0.35, fdata.color[2] * 0.35, fdata.color[3] * 0.35, 1)
+    elseif faded then
+      love.graphics.setColor(0.12, 0.12, 0.16, hovered and 0.94 or 0.85)
     elseif hovered then
       love.graphics.setColor(0.18, 0.18, 0.28, 0.9)
     else
@@ -391,6 +567,9 @@ function MenuState:draw_deckbuilder()
     if selected then
       love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], 0.9)
       love.graphics.setLineWidth(3)
+    elseif faded then
+      love.graphics.setColor(1, 1, 1, 0.08)
+      love.graphics.setLineWidth(2)
     else
       love.graphics.setColor(1, 1, 1, hovered and 0.25 or 0.1)
       love.graphics.setLineWidth(2)
@@ -400,33 +579,58 @@ function MenuState:draw_deckbuilder()
 
     -- Faction name
     love.graphics.setFont(label_font)
-    love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], 1)
-    love.graphics.printf(fname, cx, card_y + 30, DECK_CARD_W, "center")
+    love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], faded and 0.72 or 1)
+    love.graphics.printf(tile.label, cx, card_y + 16, DECK_CARD_W, "center")
 
     -- Stats
     love.graphics.setFont(detail_font)
-    love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
-    love.graphics.printf(
-      "Workers: " .. (fdata.default_starting_workers or 2) .. "/" .. (fdata.default_max_workers or 8),
-      cx, card_y + 75, DECK_CARD_W, "center"
-    )
+    love.graphics.setColor(DIM[1], DIM[2], DIM[3], faded and 0.82 or 1)
+    love.graphics.printf("Max Workers: " .. (fdata.default_max_workers or 8), cx, card_y + 49, DECK_CARD_W, "center")
 
     -- Selected indicator
     if selected then
       love.graphics.setFont(detail_font)
       love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], 0.9)
-      love.graphics.printf("Selected", cx, card_y + DECK_CARD_H - 30, DECK_CARD_W, "center")
+      love.graphics.printf("Selected", cx, card_y + DECK_CARD_H - 24, DECK_CARD_W, "center")
+    elseif tile.coming_soon then
+      local badge_w = DECK_CARD_W - 26
+      local badge_h = 24
+      local badge_x = cx + (DECK_CARD_W - badge_w) / 2
+      local badge_y = card_y + DECK_CARD_H - badge_h - 14
+      love.graphics.setColor(0.08, 0.08, 0.12, 0.92)
+      love.graphics.rectangle("fill", badge_x, badge_y, badge_w, badge_h, 6, 6)
+      love.graphics.setColor(0.95, 0.74, 0.36, 0.95)
+      love.graphics.rectangle("line", badge_x, badge_y, badge_w, badge_h, 6, 6)
+      love.graphics.setFont(soon_font)
+      love.graphics.setColor(1, 0.9, 0.78, 1)
+      love.graphics.printf("Coming Soon", badge_x, badge_y + 3, badge_w, "center")
     end
+  end
+
+  local tab_rects = deckbuilder_tab_rects()
+  local tab_font = util.get_font(12)
+  for i, tab in ipairs(tab_rects) do
+    local selected = (self.deckbuilder_tab == tab.id)
+    local hovered = (self.deckbuilder_hover == (400 + i))
+    if selected then
+      love.graphics.setColor(0.2, 0.28, 0.42, 0.95)
+    elseif hovered then
+      love.graphics.setColor(0.18, 0.2, 0.28, 0.9)
+    else
+      love.graphics.setColor(0.14, 0.15, 0.22, 0.78)
+    end
+    love.graphics.rectangle("fill", tab.x, tab.y, tab.w, tab.h, 6, 6)
+    love.graphics.setColor(selected and 0.5 or 0.25, selected and 0.62 or 0.3, selected and 0.85 or 0.4, selected and 0.9 or 0.5)
+    love.graphics.rectangle("line", tab.x, tab.y, tab.w, tab.h, 6, 6)
+    love.graphics.setFont(tab_font)
+    love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], selected and 1 or 0.85)
+    love.graphics.printf(tab.label, tab.x, tab.y + 5, tab.w, "center")
   end
 
   local info_font = util.get_font(13)
   local status_y = DECK_LIST_TOP - 26
-  local status_text = string.format(
-    "Deck Size: %d  (Min %d / Max %d)",
-    self.deckbuilder_total or 0,
-    self.deckbuilder_min or 0,
-    self.deckbuilder_max or 0
-  )
+  local tab_label = (self.deckbuilder_tab == "blueprints") and "Blueprints" or "Main Deck"
+  local status_text = string.format("Deck Size: %d  |  Viewing: %s", self.deckbuilder_total or 0, tab_label)
   love.graphics.setFont(info_font)
   love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 0.95)
   love.graphics.printf(status_text, DECK_LIST_X_PAD, status_y, gw - DECK_LIST_X_PAD * 2, "left")
@@ -435,43 +639,85 @@ function MenuState:draw_deckbuilder()
     love.graphics.printf("Deck invalid: " .. tostring(self.deckbuilder_error), DECK_LIST_X_PAD, status_y + 16, gw - DECK_LIST_X_PAD * 2, "left")
   end
 
-  local row_font = util.get_font(14)
-  local max_rows = 8
-  local visible = math.min(max_rows, #self.deckbuilder_cards)
-  for i = 1, visible do
-    local entry = self.deckbuilder_cards[i]
-    local y = DECK_LIST_TOP + (i - 1) * DECK_LIST_ROW_H
-    local row_x = DECK_LIST_X_PAD
-    local row_w = gw - DECK_LIST_X_PAD * 2
+  local visible_cards = self:deckbuilder_visible_cards()
+  local selector_layout, selector_items = self:deckbuilder_selector_items(visible_cards)
+  local count_font = util.get_font(13)
+  local btn_font = util.get_title_font(16)
 
-    local row_hover = self.deckbuilder_hover == (100 + i)
-    love.graphics.setColor(0.14, 0.14, 0.22, row_hover and 0.92 or 0.72)
-    love.graphics.rectangle("fill", row_x, y, row_w, DECK_LIST_ROW_H - 4, 6, 6)
-    love.graphics.setColor(1, 1, 1, 0.08)
-    love.graphics.rectangle("line", row_x, y, row_w, DECK_LIST_ROW_H - 4, 6, 6)
+  love.graphics.setScissor(
+    selector_layout.list_x,
+    selector_layout.list_top,
+    selector_layout.list_w,
+    selector_layout.list_h
+  )
+  for _, item in ipairs(selector_items) do
+    local cell = item.cell_r
+    if cell.y + cell.h >= selector_layout.list_top and cell.y <= selector_layout.list_bottom then
+      local entry = item.entry
+      local def = safe_card_def(entry.card_id)
+      if def then
+        card_frame.draw(item.card_r.x, item.card_r.y, {
+          w = item.card_r.w,
+          h = item.card_r.h,
+          title = def.name or entry.name,
+          faction = def.faction,
+          kind = def.kind,
+          typeLine = (def.faction or "") .. " - " .. (def.kind or ""),
+          text = def.text,
+          costs = def.costs,
+          upkeep = def.upkeep,
+          attack = def.attack,
+          health = def.health,
+          tier = def.tier,
+          abilities_list = def.abilities,
+          show_ability_text = true,
+        })
+      else
+        love.graphics.setColor(0.12, 0.12, 0.18, 0.95)
+        love.graphics.rectangle("fill", item.card_r.x, item.card_r.y, item.card_r.w, item.card_r.h, 6, 6)
+        love.graphics.setColor(1, 1, 1, 0.2)
+        love.graphics.rectangle("line", item.card_r.x, item.card_r.y, item.card_r.w, item.card_r.h, 6, 6)
+        love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+        love.graphics.setFont(count_font)
+        love.graphics.printf(entry.name or entry.card_id, item.card_r.x + 8, item.card_r.y + 10, item.card_r.w - 16, "center")
+      end
 
-    local count = self.deckbuilder_counts[entry.card_id] or 0
-    local right_x = row_x + row_w - 90
-    local minus_r = { x = right_x, y = y + 5, w = 24, h = 20 }
-    local plus_r = { x = right_x + 62, y = y + 5, w = 24, h = 20 }
-    local minus_hover = self.deckbuilder_hover == (200 + i)
-    local plus_hover = self.deckbuilder_hover == (300 + i)
+      if self.deckbuilder_hover == (100 + item.index) then
+        love.graphics.setColor(0.25, 0.72, 0.98, 0.55)
+        love.graphics.setLineWidth(3)
+        love.graphics.rectangle("line", item.card_r.x - 2, item.card_r.y - 2, item.card_r.w + 4, item.card_r.h + 4, 7, 7)
+        love.graphics.setLineWidth(1)
+      end
 
-    love.graphics.setColor(0.2, 0.2, 0.3, minus_hover and 1 or 0.8)
-    love.graphics.rectangle("fill", minus_r.x, minus_r.y, minus_r.w, minus_r.h, 4, 4)
-    love.graphics.setColor(0.2, 0.2, 0.3, plus_hover and 1 or 0.8)
-    love.graphics.rectangle("fill", plus_r.x, plus_r.y, plus_r.w, plus_r.h, 4, 4)
+      local count = self.deckbuilder_counts[entry.card_id] or 0
+      local limit_label = entry.max_copies and tostring(entry.max_copies) or "inf"
 
-    love.graphics.setFont(row_font)
-    love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
-    love.graphics.print(entry.name, row_x + 10, y + 7)
-    love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
-    love.graphics.print(entry.card_id, row_x + 170, y + 7)
-    love.graphics.printf(string.format("%d / %d", count, entry.max_copies), right_x + 18, y + 7, 44, "center")
-    love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
-    love.graphics.printf("-", minus_r.x, minus_r.y + 2, minus_r.w, "center")
-    love.graphics.printf("+", plus_r.x, plus_r.y + 2, plus_r.w, "center")
+      love.graphics.setColor(0.09, 0.1, 0.15, 0.9)
+      love.graphics.rectangle("fill", item.count_r.x, item.count_r.y, item.count_r.w, item.count_r.h, 5, 5)
+      love.graphics.setColor(1, 1, 1, 0.14)
+      love.graphics.rectangle("line", item.count_r.x, item.count_r.y, item.count_r.w, item.count_r.h, 5, 5)
+
+      local minus_hover = self.deckbuilder_hover == (200 + item.index)
+      local plus_hover = self.deckbuilder_hover == (300 + item.index)
+      love.graphics.setColor(0.2, 0.22, 0.32, minus_hover and 1 or 0.85)
+      love.graphics.rectangle("fill", item.minus_r.x, item.minus_r.y, item.minus_r.w, item.minus_r.h, 4, 4)
+      love.graphics.setColor(0.2, 0.22, 0.32, plus_hover and 1 or 0.85)
+      love.graphics.rectangle("fill", item.plus_r.x, item.plus_r.y, item.plus_r.w, item.plus_r.h, 4, 4)
+      love.graphics.setColor(1, 1, 1, 0.12)
+      love.graphics.rectangle("line", item.minus_r.x, item.minus_r.y, item.minus_r.w, item.minus_r.h, 4, 4)
+      love.graphics.rectangle("line", item.plus_r.x, item.plus_r.y, item.plus_r.w, item.plus_r.h, 4, 4)
+
+      love.graphics.setFont(btn_font)
+      love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 0.95)
+      love.graphics.printf("-", item.minus_r.x, item.minus_r.y + 1, item.minus_r.w, "center")
+      love.graphics.printf("+", item.plus_r.x, item.plus_r.y + 1, item.plus_r.w, "center")
+
+      love.graphics.setFont(count_font)
+      love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+      love.graphics.printf(tostring(count) .. " / " .. limit_label, item.count_r.x, item.count_r.y + 4, item.count_r.w, "center")
+    end
   end
+  love.graphics.setScissor()
 end
 
 -- Screen drawing
@@ -957,35 +1203,45 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
     end
     -- Faction cards
     local gw = love.graphics.getWidth()
-    local factions = supported_deck_factions()
-    local total_w = #factions * DECK_CARD_W + (#factions - 1) * DECK_CARD_GAP
-    local start_x = (gw - total_w) / 2
-    local card_y = 140
-    for i, fname in ipairs(factions) do
+    local faction_tiles, start_x, card_y = deckbuilder_faction_layout(gw)
+    for i, tile in ipairs(faction_tiles) do
       local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
       local r = { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }
       if point_in_rect(x, y, r) then
-        settings.values.faction = fname
-        self.deckbuilder_faction = fname
-        self:refresh_deckbuilder_state()
-        settings.save()
+        if tile.selectable then
+          settings.values.faction = tile.id
+          self.deckbuilder_faction = tile.id
+          self:refresh_deckbuilder_state()
+          settings.save()
+        end
         return
       end
     end
 
-    local list_x = DECK_LIST_X_PAD
-    local list_w = gw - DECK_LIST_X_PAD * 2
-    for i, entry in ipairs(self.deckbuilder_cards) do
-      local y = DECK_LIST_TOP + (i - 1) * DECK_LIST_ROW_H
-      local minus_r = { x = list_x + list_w - 90, y = y + 5, w = 24, h = 20 }
-      local plus_r = { x = list_x + list_w - 28, y = y + 5, w = 24, h = 20 }
-      if point_in_rect(x, y, minus_r) then
-        self:_set_deck_count(entry.card_id, (self.deckbuilder_counts[entry.card_id] or 0) - 1)
+    -- Deck tabs
+    for _, tab in ipairs(deckbuilder_tab_rects()) do
+      if point_in_rect(x, y, tab) then
+        self.deckbuilder_tab = tab.id
+        self.deckbuilder_scroll = 0
         return
       end
-      if point_in_rect(x, y, plus_r) then
-        self:_set_deck_count(entry.card_id, (self.deckbuilder_counts[entry.card_id] or 0) + 1)
-        return
+    end
+
+    local visible_cards = self:deckbuilder_visible_cards()
+    local selector_layout, selector_items = self:deckbuilder_selector_items(visible_cards)
+    for _, item in ipairs(selector_items) do
+      local cell = item.cell_r
+      if cell.y + cell.h >= selector_layout.list_top and cell.y <= selector_layout.list_bottom then
+        if point_in_rect(x, y, item.minus_r) then
+          local entry = item.entry
+          self:_set_deck_count(entry.card_id, (self.deckbuilder_counts[entry.card_id] or 0) - 1)
+          return
+        end
+        if point_in_rect(x, y, item.plus_r) then
+          local entry = item.entry
+          self:_set_deck_count(entry.card_id, (self.deckbuilder_counts[entry.card_id] or 0) + 1)
+          return
+        end
       end
     end
 
@@ -1089,40 +1345,46 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
       return
     end
     local gw = love.graphics.getWidth()
-    local factions = supported_deck_factions()
-    local total_w = #factions * DECK_CARD_W + (#factions - 1) * DECK_CARD_GAP
-    local start_x = (gw - total_w) / 2
-    local card_y = 140
-    for i, _ in ipairs(factions) do
+    local faction_tiles, start_x, card_y = deckbuilder_faction_layout(gw)
+    for i, tile in ipairs(faction_tiles) do
       local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
       if point_in_rect(x, y, { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }) then
         self.deckbuilder_hover = i
+        if tile.selectable then
+          self.hover_button = -2
+        end
+        return
+      end
+    end
+
+    for i, tab in ipairs(deckbuilder_tab_rects()) do
+      if point_in_rect(x, y, tab) then
+        self.deckbuilder_hover = 400 + i
         self.hover_button = -2
         return
       end
     end
 
-    local list_x = DECK_LIST_X_PAD
-    local list_w = gw - DECK_LIST_X_PAD * 2
-    for i, _ in ipairs(self.deckbuilder_cards) do
-      local y = DECK_LIST_TOP + (i - 1) * DECK_LIST_ROW_H
-      local row_r = { x = list_x, y = y, w = list_w, h = DECK_LIST_ROW_H - 4 }
-      local minus_r = { x = list_x + list_w - 90, y = y + 5, w = 24, h = 20 }
-      local plus_r = { x = list_x + list_w - 28, y = y + 5, w = 24, h = 20 }
-      if point_in_rect(x, y, minus_r) then
-        self.deckbuilder_hover = 200 + i
-        self.hover_button = -2
-        return
-      end
-      if point_in_rect(x, y, plus_r) then
-        self.deckbuilder_hover = 300 + i
-        self.hover_button = -2
-        return
-      end
-      if point_in_rect(x, y, row_r) then
-        self.deckbuilder_hover = 100 + i
-        self.hover_button = -2
-        return
+    local visible_cards = self:deckbuilder_visible_cards()
+    local selector_layout, selector_items = self:deckbuilder_selector_items(visible_cards)
+    for _, item in ipairs(selector_items) do
+      local cell = item.cell_r
+      if cell.y + cell.h >= selector_layout.list_top and cell.y <= selector_layout.list_bottom then
+        if point_in_rect(x, y, item.minus_r) then
+          self.deckbuilder_hover = 200 + item.index
+          self.hover_button = -2
+          return
+        end
+        if point_in_rect(x, y, item.plus_r) then
+          self.deckbuilder_hover = 300 + item.index
+          self.hover_button = -2
+          return
+        end
+        if point_in_rect(x, y, item.card_r) then
+          self.deckbuilder_hover = 100 + item.index
+          self.hover_button = -2
+          return
+        end
       end
     end
 
@@ -1219,6 +1481,13 @@ function MenuState:wheelmoved(x, y)
   if self.screen == "browse" then
     self.browse_scroll = self.browse_scroll - y * 30
     if self.browse_scroll < 0 then self.browse_scroll = 0 end
+  elseif self.screen == "deckbuilder" then
+    local visible_cards = self:deckbuilder_visible_cards()
+    local selector_layout = self:deckbuilder_selector_layout(#visible_cards)
+    local max_scroll = selector_layout.max_scroll
+    self.deckbuilder_scroll = (self.deckbuilder_scroll or 0) - y * 30
+    if self.deckbuilder_scroll < 0 then self.deckbuilder_scroll = 0 end
+    if self.deckbuilder_scroll > max_scroll then self.deckbuilder_scroll = max_scroll end
   end
 end
 

@@ -141,6 +141,12 @@ function commands.execute(g, command)
     return succeed(g,nil, { { type = "attackers_declared", player_index = command.player_index } })
   end
 
+  if command.type == "ASSIGN_ATTACK_TRIGGER_TARGETS" then
+    local ok_targets, reason = combat.assign_attack_trigger_targets(g, command.player_index, command.targets)
+    if not ok_targets then return fail(reason) end
+    return succeed(g,nil, { { type = "attack_trigger_targets_assigned", player_index = command.player_index } })
+  end
+
   if command.type == "ASSIGN_BLOCKERS" then
     local ok_blk, reason = combat.assign_blockers(g, command.player_index, command.assignments)
     if not ok_blk then return fail(reason) end

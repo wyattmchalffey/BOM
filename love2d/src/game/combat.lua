@@ -12,12 +12,25 @@ local function has_keyword(card_def, needle)
   return false
 end
 
+local function has_subtype(card_def, needle)
+  if not card_def or not card_def.subtypes then return false end
+  for _, st in ipairs(card_def.subtypes) do
+    if st == needle then return true end
+  end
+  return false
+end
+
 local function has_static_effect(card_def, effect_name)
   if not card_def or not card_def.abilities then return false end
   for _, ab in ipairs(card_def.abilities) do
     if ab.type == "static" and ab.effect == effect_name then return true end
   end
   return false
+end
+
+local function can_attack_multiple_times(card_def)
+  return has_static_effect(card_def, "can_attack_multiple_times")
+    or has_static_effect(card_def, "can_attack_twice")
 end
 
 local function ensure_state(entry)
@@ -36,11 +49,7 @@ local function copy_table(t)
 end
 
 local function is_undead(card_def)
-  if not card_def or not card_def.subtypes then return false end
-  for _, st in ipairs(card_def.subtypes) do
-    if st == "Undead" then return true end
-  end
-  return false
+  return has_subtype(card_def, "Undead")
 end
 
 local function fire_on_ally_death_triggers(player, g, dead_card_def)
@@ -182,6 +191,140 @@ local function build_first_strike_flags(player)
   return flags
 end
 
+local function has_other_attacking_unit_with_subtype(combat_state, atk_player, source_board_index, subtype)
+  if type(subtype) ~= "string" or subtype == "" then
+    return true
+  end
+  for _, other in ipairs(combat_state.attackers or {}) do
+    if other.board_index ~= source_board_index and not other.invalidated then
+      local other_entry = atk_player.board[other.board_index]
+      if other_entry then
+        local ok_other, other_def = pcall(cards.get_card_def, other_entry.card_id)
+        if ok_other and other_def and other_def.kind == "Unit" and has_subtype(other_def, subtype) then
+          local other_state = ensure_state(other_entry)
+          if not (has_keyword(other_def, "crew") and not other_state.crewed) then
+            return true
+          end
+        end
+      end
+    end
+  end
+  return false
+end
+
+local function attack_trigger_condition_met(combat_state, atk_player, source_board_index, effect_args)
+  local args = effect_args or {}
+  local need_subtype = args.requires_another_attacker_subtype
+  if not need_subtype and args.condition == "allied_mounted_attacking" then
+    need_subtype = "Mounted"
+  end
+  return has_other_attacking_unit_with_subtype(combat_state, atk_player, source_board_index, need_subtype)
+end
+
+local function is_manual_on_attack_target_ability(ab)
+  if not ab or ab.type ~= "triggered" or ab.trigger ~= "on_attack" then return false end
+  local args = ab.effect_args or {}
+  local amount = args.damage or args.amount or 0
+  if amount <= 0 then return false end
+  if ab.effect == "deal_damage_to_target_unit" then
+    return true
+  end
+  if ab.effect == "conditional_damage" then
+    return args.target == "unit" or args.target == "unit_row"
+  end
+  return false
+end
+
+local function build_attack_trigger_queue(pending, atk_player)
+  local out = {}
+  for _, attacker in ipairs(pending.attackers or {}) do
+    local entry = atk_player.board[attacker.board_index]
+    if entry then
+      local ok_def, def = pcall(cards.get_card_def, entry.card_id)
+      if ok_def and def and def.abilities then
+        for ai, ab in ipairs(def.abilities) do
+          if is_manual_on_attack_target_ability(ab) then
+            local effect_args = copy_table(ab.effect_args or {})
+            if attack_trigger_condition_met(pending, atk_player, attacker.board_index, effect_args) then
+              out[#out + 1] = {
+                attacker_board_index = attacker.board_index,
+                ability_index = ai,
+                effect = ab.effect,
+                effect_args = effect_args,
+                source_card_id = entry.card_id,
+                target_board_index = nil,
+                resolved = false,
+                applied = false,
+              }
+            end
+          end
+        end
+      end
+    end
+  end
+  return out
+end
+
+local function collect_attack_trigger_unit_targets(def_player)
+  local out = {}
+  for i, entry in ipairs(def_player.board or {}) do
+    local ok_def, def = pcall(cards.get_card_def, entry.card_id)
+    -- Unit row only: units/workers on the battlefield front row.
+    if ok_def and def and def.kind ~= "Structure" then
+      out[#out + 1] = i
+    end
+  end
+  return out
+end
+
+local function is_valid_attack_trigger_target(def_player, board_index)
+  if type(board_index) ~= "number" then return false end
+  local entry = def_player.board and def_player.board[board_index]
+  if not entry then return false end
+  local ok_def, def = pcall(cards.get_card_def, entry.card_id)
+  return ok_def and def and def.kind ~= "Structure"
+end
+
+local function attacker_target_key(attacker_board_index, ability_index)
+  return tostring(attacker_board_index) .. ":" .. tostring(ability_index)
+end
+
+local function condition_met_for_attack_trigger(combat_state, atk_player, trigger)
+  return attack_trigger_condition_met(combat_state, atk_player, trigger.attacker_board_index, trigger.effect_args)
+end
+
+local function shift_defender_indices_after_destroy(combat_state, removed_index)
+  for _, attacker in ipairs(combat_state.attackers or {}) do
+    if attacker.target and attacker.target.type == "board" and type(attacker.target.index) == "number" then
+      if attacker.target.index == removed_index then
+        attacker.target.index = -1
+      elseif attacker.target.index > removed_index then
+        attacker.target.index = attacker.target.index - 1
+      end
+    end
+  end
+
+  for _, trigger in ipairs(combat_state.attack_triggers or {}) do
+    local idx = trigger.target_board_index
+    if type(idx) == "number" and idx > 0 then
+      if idx == removed_index then
+        trigger.target_board_index = -1
+      elseif idx > removed_index then
+        trigger.target_board_index = idx - 1
+      end
+    end
+  end
+
+  for i = #(combat_state.blockers or {}), 1, -1 do
+    local blk = combat_state.blockers[i]
+    if blk.blocker_board_index == removed_index then
+      table.remove(combat_state.blockers, i)
+    elseif blk.blocker_board_index > removed_index then
+      blk.blocker_board_index = blk.blocker_board_index - 1
+    end
+  end
+end
+
 function combat.declare_attackers(g, player_index, declarations)
   if g.phase ~= "MAIN" then return false, "wrong_phase" end
   if player_index ~= g.activePlayer then return false, "not_active_player" end
@@ -198,6 +341,7 @@ function combat.declare_attackers(g, player_index, declarations)
     attackers = {},
     blockers = {},
     stage = "DECLARED",
+    attack_triggers = {},
   }
 
   local seen = {}
@@ -219,6 +363,9 @@ function combat.declare_attackers(g, player_index, declarations)
 
     local estate = ensure_state(entry)
     if estate.rested then return false, "attacker_rested" end
+    if estate.attacked_turn == g.turnNumber and not can_attack_multiple_times(card_def) then
+      return false, "attacker_already_attacked"
+    end
     if has_keyword(card_def, "crew") and not estate.crewed then
       return false, "attacker_not_crewed"
     end
@@ -253,6 +400,7 @@ function combat.declare_attackers(g, player_index, declarations)
     if not has_keyword(card_def, "vigilance") then
       estate.rested = true
     end
+    estate.attacked_turn = g.turnNumber
 
     pending.attackers[#pending.attackers + 1] = {
       board_index = bi,
@@ -262,7 +410,107 @@ function combat.declare_attackers(g, player_index, declarations)
     }
   end
 
+  pending.attack_triggers = build_attack_trigger_queue(pending, atk_player)
+  if #pending.attack_triggers > 0 then
+    pending.stage = "AWAITING_ATTACK_TARGETS"
+  end
+
   g.pendingCombat = pending
+  return true, "ok"
+end
+
+function combat.assign_attack_trigger_targets(g, player_index, targets)
+  local c = g.pendingCombat
+  if not c or c.stage ~= "AWAITING_ATTACK_TARGETS" then return false, "no_pending_attack_targets" end
+  if player_index ~= c.attacker then return false, "not_attacker" end
+  if type(targets) ~= "table" then return false, "invalid_attack_trigger_targets" end
+
+  local atk_player = g.players[c.attacker + 1]
+  local def_player = g.players[c.defender + 1]
+  if not atk_player or not def_player then return false, "invalid_combat_state" end
+
+  local selected = {}
+  for _, item in ipairs(targets) do
+    if type(item) ~= "table" then
+      return false, "invalid_attack_trigger_targets"
+    end
+    local attacker_board_index = item.attacker_board_index
+    local ability_index = item.ability_index
+    local target_board_index = item.target_board_index
+    if type(attacker_board_index) ~= "number"
+      or type(ability_index) ~= "number"
+      or type(target_board_index) ~= "number" then
+      return false, "invalid_attack_trigger_targets"
+    end
+    selected[attacker_target_key(attacker_board_index, ability_index)] = target_board_index
+  end
+
+  for _, trigger in ipairs(c.attack_triggers or {}) do
+    if not trigger.resolved then
+      local src_entry = atk_player.board[trigger.attacker_board_index]
+      if not src_entry or not condition_met_for_attack_trigger(c, atk_player, trigger) then
+        trigger.resolved = true
+        trigger.target_board_index = nil
+      else
+        local legal_targets = collect_attack_trigger_unit_targets(def_player)
+        if #legal_targets == 0 then
+          trigger.resolved = true
+          trigger.target_board_index = nil
+        else
+          local key = attacker_target_key(trigger.attacker_board_index, trigger.ability_index)
+          local chosen = selected[key]
+          if type(chosen) ~= "number" then
+            return false, "missing_attack_trigger_target"
+          end
+          if not is_valid_attack_trigger_target(def_player, chosen) then
+            return false, "invalid_attack_trigger_target"
+          end
+          trigger.target_board_index = chosen
+          trigger.resolved = true
+        end
+      end
+    end
+  end
+
+  -- Resolve trigger effects immediately, before blockers are declared.
+  for _, trigger in ipairs(c.attack_triggers or {}) do
+    if trigger.resolved and not trigger.applied then
+      local args = trigger.effect_args or {}
+      local amount = args.damage or args.amount or 0
+      if amount > 0 and trigger.target_board_index and trigger.target_board_index > 0 then
+        local src_entry = atk_player.board[trigger.attacker_board_index]
+        local src_ok, src_def = false, nil
+        if src_entry then
+          src_ok, src_def = pcall(cards.get_card_def, src_entry.card_id)
+        end
+        if src_ok and src_def and condition_met_for_attack_trigger(c, atk_player, trigger) then
+          local target_entry = def_player.board[trigger.target_board_index]
+          if target_entry then
+            local st = ensure_state(target_entry)
+            st.damage = (st.damage or 0) + amount
+          end
+        end
+      end
+      trigger.applied = true
+    end
+  end
+
+  local dead_def = {}
+  for i, entry in ipairs(def_player.board) do
+    local def = cards.get_card_def(entry.card_id)
+    local st = ensure_state(entry)
+    local lethal_by_damage = (def.health ~= nil) and ((def.health or 0) - (st.damage or 0) <= 0)
+    if st.marked_for_death or lethal_by_damage then
+      dead_def[#dead_def + 1] = i
+    end
+  end
+  for i = #dead_def, 1, -1 do
+    local removed_index = dead_def[i]
+    destroy_board_entry(def_player, g, removed_index)
+    shift_defender_indices_after_destroy(c, removed_index)
+  end
+
+  c.stage = "DECLARED"
   return true, "ok"
 end
 

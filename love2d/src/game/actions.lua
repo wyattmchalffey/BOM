@@ -115,6 +115,8 @@ local function entering_board_state(g, card_def, prior_state)
 
   if card_def and (card_def.kind == "Unit" or card_def.kind == "Worker") then
     st.summoned_turn = g and g.turnNumber or st.summoned_turn
+    -- Entering the battlefield creates a fresh combat object for turn-based attack limits.
+    st.attacked_turn = nil
   end
 
   return st
@@ -579,11 +581,30 @@ function actions.build_structure(g, player_index, card_id)
   if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
   local p = g.players[player_index + 1]
 
+  if type(p.blueprintDeck) ~= "table" then
+    p.blueprintDeck = {}
+    for _, def in ipairs(cards.structures_for_faction(p.faction)) do
+      local copies = def.population or 1
+      for _ = 1, copies do
+        p.blueprintDeck[#p.blueprintDeck + 1] = def.id
+      end
+    end
+  end
+
   -- Validate card exists and is a Structure of the player's faction
   local ok, card_def = pcall(cards.get_card_def, card_id)
   if not ok or not card_def then return false end
   if card_def.kind ~= "Structure" then return false end
   if card_def.faction ~= p.faction then return false end
+
+  local blueprint_index = nil
+  for i, blueprint_id in ipairs(p.blueprintDeck) do
+    if blueprint_id == card_id then
+      blueprint_index = i
+      break
+    end
+  end
+  if not blueprint_index then return false end
 
   -- Check affordability
   if not abilities.can_pay_cost(p.resources, card_def.costs) then return false end
@@ -601,6 +622,9 @@ function actions.build_structure(g, player_index, card_id)
   for _, c in ipairs(card_def.costs) do
     p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
   end
+
+  -- Consume one copy from blueprint deck.
+  table.remove(p.blueprintDeck, blueprint_index)
 
   -- Place on board
   p.board[#p.board + 1] = { card_id = card_id, workers = 0, state = { rested = false } }

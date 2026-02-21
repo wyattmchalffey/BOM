@@ -768,6 +768,12 @@ local function build_forced_singletons(pi, game_state, combat_ui, local_player_i
           forced[a.target.index] = true
         end
       end
+      -- During attack-trigger targeting, keep selected targets split from stacks.
+      for _, trigger in ipairs(c.attack_triggers or {}) do
+        if trigger and trigger.target_board_index and trigger.target_board_index > 0 then
+          forced[trigger.target_board_index] = true
+        end
+      end
     end
   end
 
@@ -784,6 +790,11 @@ local function build_forced_singletons(pi, game_state, combat_ui, local_player_i
     for _, a in ipairs(combat_ui.pending_attack_declarations or {}) do
       if a and a.target and a.target.type == "board" and a.target.index then
         forced[a.target.index] = true
+      end
+    end
+    for _, item in ipairs(combat_ui.pending_attack_trigger_targets or {}) do
+      if item and item.target_board_index and item.target_board_index > 0 then
+        forced[item.target_board_index] = true
       end
     end
   end

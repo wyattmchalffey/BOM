@@ -114,7 +114,10 @@ function deck_profiles.build_deck_from_counts(faction, counts)
   local entries = deck_validation.deck_entries_for_faction(faction)
   for _, entry in ipairs(entries) do
     local requested = type(counts) == "table" and tonumber(counts[entry.card_id]) or 0
-    local amount = math.floor(math.max(0, math.min(entry.max_copies, requested or 0)))
+    local amount = math.floor(math.max(0, requested or 0))
+    if entry.max_copies and amount > entry.max_copies then
+      amount = entry.max_copies
+    end
     for _ = 1, amount do
       deck[#deck + 1] = entry.card_id
     end

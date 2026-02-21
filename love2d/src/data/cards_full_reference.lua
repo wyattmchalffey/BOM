@@ -26,7 +26,8 @@
 --   effect         (string)  Effect key: "summon_worker", "produce", "draw_cards", etc.
 --   effect_args    (table?)  Extra data for the effect
 --   once_per_turn  (bool?)   Defaults to false
---   trigger        (string?) For triggered: "on_play", "on_destroyed", "start_of_turn", "end_of_turn"
+--   trigger        (string?) For triggered: "on_play", "on_destroyed", "start_of_turn",
+--                           "end_of_turn", "on_attack", ...
 
 return {
 
@@ -677,10 +678,10 @@ return {
     population = 8,
     tier = 2,
     attack = 4,
-    health = 3,
-    text = "Vigilance. On Attack: If attacking with another Mounted Unit, deal 2 damage to target Unit.",
+    health = 5,
+    text = "Vigilance. On Attack: If attacking with another Mounted Unit, deal 2 Damage to Target Unit.",
     costs = {},
-    upkeep = {},
+    upkeep = { { type = "food", amount = 1 } },
     subtypes = { "Warrior", "Mounted" },
     keywords = { "vigilance" },
     abilities = {

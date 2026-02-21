@@ -52,16 +52,29 @@ local function shuffle(t)
   return t
 end
 
--- Build a draw deck for a faction: collect all matching cards, each appearing `population` times
+local function is_main_deck_card(def)
+  return (def and def.faction and (DECK_KINDS[def.kind] or def.deckable)) and true or false
+end
+
+local function is_blueprint_card(def)
+  return def and def.kind == "Structure"
+end
+
+-- Build a draw deck for a faction.
+-- If explicit_deck is provided (including empty), only main-deck cards from it are used.
 function state.build_deck(faction, explicit_deck)
   local deck = {}
-  if type(explicit_deck) == "table" and #explicit_deck > 0 then
+  if type(explicit_deck) == "table" then
     for i = 1, #explicit_deck do
-      deck[#deck + 1] = explicit_deck[i]
+      local card_id = explicit_deck[i]
+      local ok, def = pcall(cards.get_card_def, card_id)
+      if ok and def and def.faction == faction and is_main_deck_card(def) then
+        deck[#deck + 1] = card_id
+      end
     end
   else
     for _, def in ipairs(cards.CARD_DEFS) do
-      if def.faction == faction and (DECK_KINDS[def.kind] or def.deckable) then
+      if def.faction == faction and is_main_deck_card(def) then
         local copies = def.population or 1
         for _ = 1, copies do
           deck[#deck + 1] = def.id
@@ -70,6 +83,32 @@ function state.build_deck(faction, explicit_deck)
     end
   end
   shuffle(deck)
+  return deck
+end
+
+-- Build a blueprint deck for a faction.
+-- If explicit_deck is provided (including empty), only structures from it are used.
+function state.build_blueprint_deck(faction, explicit_deck)
+  local deck = {}
+  if type(explicit_deck) == "table" then
+    for i = 1, #explicit_deck do
+      local card_id = explicit_deck[i]
+      local ok, def = pcall(cards.get_card_def, card_id)
+      if ok and def and def.faction == faction and is_blueprint_card(def) then
+        deck[#deck + 1] = card_id
+      end
+    end
+    return deck
+  end
+
+  for _, def in ipairs(cards.CARD_DEFS) do
+    if def.faction == faction and is_blueprint_card(def) then
+      local copies = def.population or 1
+      for _ = 1, copies do
+        deck[#deck + 1] = def.id
+      end
+    end
+  end
   return deck
 end
 
@@ -158,8 +197,9 @@ function state.create_player_state(index, opts)
     end
   end
 
-  -- Build the draw deck and draw a starting hand
+  -- Build the draw + blueprint decks and draw a starting hand
   local deck = state.build_deck(faction, explicit_deck)
+  local blueprint_deck = state.build_blueprint_deck(faction, explicit_deck)
   local p = {
     faction = faction,
     baseId = base_id,
@@ -169,6 +209,7 @@ function state.create_player_state(index, opts)
     maxWorkers = max_workers,
     workersOn = { food = 0, wood = 0, stone = 0 },
     deck = deck,
+    blueprintDeck = blueprint_deck,
     hand = {},
     board = {},
     graveyard = {},

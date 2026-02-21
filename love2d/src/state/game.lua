@@ -83,6 +83,7 @@ function GameState.new(opts)
     reconnect_attempts = 0,
     reconnect_timer = 0,
     pending_attack_declarations = {}, -- { { attacker_board_index, target={type="base"|"board", index?} } }
+    pending_attack_trigger_targets = {}, -- { { attacker_board_index, ability_index, target_board_index } }
     pending_block_assignments = {}, -- { { blocker_board_index, attacker_board_index } }
     pending_damage_orders = {}, -- map attacker_board_index -> ordered blocker board indices
     sync_poll_timer = 0,
@@ -288,6 +289,7 @@ function GameState:_sync_terminal_state()
   self.pending_upgrade = nil
   self.pending_hand_sacrifice = nil
   self:_clear_pending_attack_declarations()
+  self.pending_attack_trigger_targets = {}
   self.pending_block_assignments = {}
   self.pending_damage_orders = {}
 
@@ -340,6 +342,9 @@ function GameState:dispatch_command(command)
 
   if command and command.type ~= "DECLARE_ATTACKERS" and #self.pending_attack_declarations > 0 then
     self:_clear_pending_attack_declarations()
+  end
+  if command and command.type ~= "ASSIGN_ATTACK_TRIGGER_TARGETS" and #self.pending_attack_trigger_targets > 0 then
+    self.pending_attack_trigger_targets = {}
   end
 
   self:_sync_terminal_state()
@@ -527,6 +532,12 @@ function GameState:update(dt)
 
   self:_sync_terminal_state()
 
+  local c = self.game_state and self.game_state.pendingCombat
+  local in_target_step = c and c.stage == "AWAITING_ATTACK_TARGETS" and c.attacker == self.local_player_index
+  if not in_target_step and #self.pending_attack_trigger_targets > 0 then
+    self:_clear_pending_attack_trigger_targets()
+  end
+
   -- Disconnect countdown: show message then return to menu
   if self._disconnect_timer then
     self._disconnect_timer = self._disconnect_timer - dt
@@ -556,6 +567,16 @@ end
 
 
 
+local function can_attack_multiple_times(card_def)
+  if not card_def or not card_def.abilities then return false end
+  for _, ab in ipairs(card_def.abilities) do
+    if ab.type == "static" and (ab.effect == "can_attack_multiple_times" or ab.effect == "can_attack_twice") then
+      return true
+    end
+  end
+  return false
+end
+
 function GameState:_set_pending_attack(attacker_board_index, target)
   local local_player = self.game_state.players[self.local_player_index + 1]
   local attacker_entry = local_player and local_player.board and local_player.board[attacker_board_index]
@@ -568,6 +589,9 @@ function GameState:_set_pending_attack(attacker_board_index, target)
 
   local ast = attacker_entry.state or {}
   if ast.rested then return end
+  if ast.attacked_turn == self.game_state.turnNumber and not can_attack_multiple_times(attacker_def) then
+    return
+  end
 
   local replaced = false
   for _, decl in ipairs(self.pending_attack_declarations) do
@@ -592,6 +616,93 @@ function GameState:_clear_pending_attack_declarations()
   self.pending_attack_declarations = {}
 end
 
+function GameState:_clear_pending_attack_trigger_targets()
+  self.pending_attack_trigger_targets = {}
+end
+
+function GameState:_get_pending_attack_trigger_target(attacker_board_index, ability_index)
+  for _, item in ipairs(self.pending_attack_trigger_targets or {}) do
+    if item.attacker_board_index == attacker_board_index and item.ability_index == ability_index then
+      return item.target_board_index
+    end
+  end
+  return nil
+end
+
+function GameState:_set_pending_attack_trigger_target(attacker_board_index, ability_index, target_board_index)
+  for _, item in ipairs(self.pending_attack_trigger_targets or {}) do
+    if item.attacker_board_index == attacker_board_index and item.ability_index == ability_index then
+      item.target_board_index = target_board_index
+      return
+    end
+  end
+  self.pending_attack_trigger_targets[#self.pending_attack_trigger_targets + 1] = {
+    attacker_board_index = attacker_board_index,
+    ability_index = ability_index,
+    target_board_index = target_board_index,
+  }
+end
+
+function GameState:_is_pending_attack_trigger_target_legal(defender_pi, board_index)
+  local player = self.game_state.players[defender_pi + 1]
+  local entry = player and player.board and player.board[board_index]
+  if not entry then return false end
+  local ok_def, def = pcall(cards.get_card_def, entry.card_id)
+  return ok_def and def and def.kind ~= "Structure"
+end
+
+function GameState:_attack_trigger_legal_targets(combat_state)
+  local out = {}
+  if not combat_state then return out end
+  local defender = combat_state.defender
+  local player = self.game_state.players[defender + 1]
+  if not player then return out end
+  for i, entry in ipairs(player.board or {}) do
+    local ok_def, def = pcall(cards.get_card_def, entry.card_id)
+    if ok_def and def and def.kind ~= "Structure" then
+      out[#out + 1] = i
+    end
+  end
+  return out
+end
+
+function GameState:_active_attack_trigger_for_targeting(combat_state)
+  if not combat_state or type(combat_state.attack_triggers) ~= "table" then
+    return nil
+  end
+
+  for _, trigger in ipairs(combat_state.attack_triggers) do
+    if not trigger.resolved then
+      local selected = self:_get_pending_attack_trigger_target(trigger.attacker_board_index, trigger.ability_index)
+      if selected == nil then
+        return trigger
+      end
+    end
+  end
+
+  return nil
+end
+
+function GameState:_build_attack_trigger_target_payload(combat_state)
+  local payload = {}
+  if not combat_state or type(combat_state.attack_triggers) ~= "table" then
+    return payload
+  end
+  for _, trigger in ipairs(combat_state.attack_triggers) do
+    if not trigger.resolved then
+      local selected = self:_get_pending_attack_trigger_target(trigger.attacker_board_index, trigger.ability_index)
+      if selected ~= nil then
+        payload[#payload + 1] = {
+          attacker_board_index = trigger.attacker_board_index,
+          ability_index = trigger.ability_index,
+          target_board_index = selected,
+        }
+      end
+    end
+  end
+  return payload
+end
+
 function GameState:_prune_invalid_pending_attacks()
   local player = self.game_state.players[self.local_player_index + 1]
   if not player then
@@ -605,7 +716,8 @@ function GameState:_prune_invalid_pending_attacks()
     if entry then
       local ok_def, def = pcall(cards.get_card_def, entry.card_id)
       local st = entry.state or {}
-      if ok_def and def and (def.kind == "Unit" or def.kind == "Worker") and (def.attack or 0) > 0 and not st.rested then
+      local already_attacked = (st.attacked_turn == self.game_state.turnNumber) and (not can_attack_multiple_times(def))
+      if ok_def and def and (def.kind == "Unit" or def.kind == "Worker") and (def.attack or 0) > 0 and not st.rested and not already_attacked then
         kept[#kept + 1] = decl
       end
     end
@@ -681,15 +793,20 @@ end
 function GameState:_draw_attack_declaration_arrows()
   local local_attacker = self.local_player_index
   local local_defender = 1 - local_attacker
+  local combat_ui = {
+    pending_attack_declarations = self.pending_attack_declarations,
+    pending_block_assignments = self.pending_block_assignments,
+    pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+  }
 
   -- Local staged declarations (before submit)
   for _, decl in ipairs(self.pending_attack_declarations or {}) do
-    local ax, ay = board.board_entry_center(self.game_state, local_attacker, decl.attacker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+    local ax, ay = board.board_entry_center(self.game_state, local_attacker, decl.attacker_board_index, self.local_player_index, combat_ui)
     local tx, ty
     if decl.target and decl.target.type == "base" then
       tx, ty = board.base_center_for_player(local_defender, self.local_player_index)
     elseif decl.target and decl.target.type == "board" then
-      tx, ty = board.board_entry_center(self.game_state, local_defender, decl.target.index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+      tx, ty = board.board_entry_center(self.game_state, local_defender, decl.target.index, self.local_player_index, combat_ui)
     end
     if ax and ay and tx and ty then
       self:_draw_arrow(ax, ay, tx, ty, { 1.0, 0.3, 0.3, 0.9 })
@@ -701,12 +818,12 @@ function GameState:_draw_attack_declaration_arrows()
   local committed = c and c.attackers or nil
   if committed then
     for _, decl in ipairs(committed) do
-      local ax, ay = board.board_entry_center(self.game_state, c.attacker, decl.board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+      local ax, ay = board.board_entry_center(self.game_state, c.attacker, decl.board_index, self.local_player_index, combat_ui)
       local tx, ty
       if decl.target and decl.target.type == "base" then
         tx, ty = board.base_center_for_player(c.defender, self.local_player_index)
       elseif decl.target and decl.target.type == "board" then
-        tx, ty = board.board_entry_center(self.game_state, c.defender, decl.target.index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+        tx, ty = board.board_entry_center(self.game_state, c.defender, decl.target.index, self.local_player_index, combat_ui)
       end
       if ax and ay and tx and ty then
         self:_draw_arrow(ax, ay, tx, ty, { 1.0, 0.45, 0.45, 0.7 })
@@ -718,8 +835,8 @@ function GameState:_draw_attack_declaration_arrows()
     local defender_pi = self.local_player_index
     local attacker_pi2 = c.attacker
     for _, blk in ipairs(self.pending_block_assignments or {}) do
-      local bx, by = board.board_entry_center(self.game_state, defender_pi, blk.blocker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
-      local ax, ay = board.board_entry_center(self.game_state, attacker_pi2, blk.attacker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+      local bx, by = board.board_entry_center(self.game_state, defender_pi, blk.blocker_board_index, self.local_player_index, combat_ui)
+      local ax, ay = board.board_entry_center(self.game_state, attacker_pi2, blk.attacker_board_index, self.local_player_index, combat_ui)
       if bx and by and ax and ay then
         self:_draw_arrow(bx, by, ax, ay, { 0.35, 0.75, 1.0, 0.9 })
       end
@@ -728,8 +845,8 @@ function GameState:_draw_attack_declaration_arrows()
 
   if c and c.blockers and #c.blockers > 0 then
     for _, blk in ipairs(c.blockers) do
-      local bx, by = board.board_entry_center(self.game_state, c.defender, blk.blocker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
-      local ax, ay = board.board_entry_center(self.game_state, c.attacker, blk.attacker_board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+      local bx, by = board.board_entry_center(self.game_state, c.defender, blk.blocker_board_index, self.local_player_index, combat_ui)
+      local ax, ay = board.board_entry_center(self.game_state, c.attacker, blk.attacker_board_index, self.local_player_index, combat_ui)
       if bx and by and ax and ay then
         self:_draw_arrow(bx, by, ax, ay, { 0.2, 0.65, 0.95, 0.7 })
       end
@@ -737,23 +854,187 @@ function GameState:_draw_attack_declaration_arrows()
   end
 
   if self.drag and self.drag.from == "attack_unit" and self.drag.player_index == self.local_player_index then
-    local ax, ay = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+    local ax, ay = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index, combat_ui)
     if ax and ay then
       self:_draw_arrow(ax, ay, self.drag.display_x, self.drag.display_y, { 1.0, 0.8, 0.2, 0.85 })
     end
   end
   if self.drag and self.drag.from == "block_unit" and self.drag.player_index == self.local_player_index then
-    local bx, by = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+    local bx, by = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index, combat_ui)
     if bx and by then
       self:_draw_arrow(bx, by, self.drag.display_x, self.drag.display_y, { 0.35, 0.75, 1.0, 0.85 })
     end
   end
   if self.drag and self.drag.from == "order_attacker" and self.drag.player_index == self.local_player_index then
-    local ax, ay = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+    local ax, ay = board.board_entry_center(self.game_state, self.drag.player_index, self.drag.board_index, self.local_player_index, combat_ui)
     if ax and ay then
       self:_draw_arrow(ax, ay, self.drag.display_x, self.drag.display_y, { 1.0, 0.95, 0.45, 0.85 })
     end
   end
+end
+
+function GameState:_draw_top_combat_prompt(prompt_text, border_color, text_color)
+  if type(prompt_text) ~= "string" or prompt_text == "" then
+    return
+  end
+
+  local gw = love.graphics.getWidth()
+  local prompt_font = util.get_font(14)
+  local prompt_w = prompt_font:getWidth(prompt_text) + 28
+  local prompt_h = prompt_font:getHeight() + 12
+  local prompt_x = (gw - prompt_w) / 2
+  local prompt_y = 8
+
+  border_color = border_color or { 0.65, 0.72, 0.9, 0.75 }
+  text_color = text_color or { 0.86, 0.9, 1.0, 1.0 }
+
+  love.graphics.setColor(0.07, 0.08, 0.12, 0.9)
+  love.graphics.rectangle("fill", prompt_x, prompt_y, prompt_w, prompt_h, 7, 7)
+  love.graphics.setColor(border_color[1], border_color[2], border_color[3], border_color[4] or 0.75)
+  love.graphics.rectangle("line", prompt_x, prompt_y, prompt_w, prompt_h, 7, 7)
+  love.graphics.setFont(prompt_font)
+  love.graphics.setColor(text_color[1], text_color[2], text_color[3], text_color[4] or 1.0)
+  love.graphics.printf(prompt_text, prompt_x, prompt_y + 6, prompt_w, "center")
+end
+
+function GameState:_draw_attack_trigger_targeting_overlay()
+  local c = self.game_state and self.game_state.pendingCombat
+  if not c or c.stage ~= "AWAITING_ATTACK_TARGETS" then
+    return
+  end
+
+  local t = love.timer.getTime()
+
+  if c.attacker == self.local_player_index then
+    local combat_ui = {
+      pending_attack_declarations = self.pending_attack_declarations,
+      pending_block_assignments = self.pending_block_assignments,
+      pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+    }
+    local active_trigger = self:_active_attack_trigger_for_targeting(c)
+    local legal_targets = self:_attack_trigger_legal_targets(c)
+
+    for _, target_index in ipairs(legal_targets) do
+      local tx, ty = board.board_entry_center(self.game_state, c.defender, target_index, self.local_player_index, combat_ui)
+      if tx and ty then
+        local glow = 0.5 + 0.25 * math.sin(t * 4)
+        local rw = board.BFIELD_TILE_W + 8
+        local rh = board.BFIELD_TILE_H + 8
+        local rx = tx - rw / 2
+        local ry = ty - rh / 2
+        love.graphics.setColor(0.22, 0.8, 1.0, glow * 0.55)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", rx, ry, rw, rh, 7, 7)
+        love.graphics.setLineWidth(1)
+      end
+    end
+
+    for _, trigger in ipairs(c.attack_triggers or {}) do
+      if not trigger.resolved then
+        local selected = self:_get_pending_attack_trigger_target(trigger.attacker_board_index, trigger.ability_index)
+        if selected then
+          local sx, sy = board.board_entry_center(self.game_state, c.attacker, trigger.attacker_board_index, self.local_player_index, combat_ui)
+          local tx, ty = board.board_entry_center(self.game_state, c.defender, selected, self.local_player_index, combat_ui)
+          if sx and sy and tx and ty then
+            self:_draw_arrow(sx, sy, tx, ty, { 1.0, 0.85, 0.35, 0.9 })
+          end
+        end
+      end
+    end
+
+    local prompt_text = "Targets selected. Press Pass to continue"
+    if active_trigger then
+      local attacker_name = "Attacker"
+      local atk_player = self.game_state.players[c.attacker + 1]
+      local atk_entry = atk_player and atk_player.board and atk_player.board[active_trigger.attacker_board_index]
+      if atk_entry then
+        local ok_def, def = pcall(cards.get_card_def, atk_entry.card_id)
+        if ok_def and def and def.name then
+          attacker_name = def.name
+        end
+      end
+
+      if #legal_targets > 0 then
+        prompt_text = attacker_name .. ": select a unit-row target, then Pass"
+      else
+        prompt_text = attacker_name .. ": no valid unit-row targets. Press Pass"
+      end
+
+      local sx, sy = board.board_entry_center(self.game_state, c.attacker, active_trigger.attacker_board_index, self.local_player_index, combat_ui)
+      if sx and sy then
+        local glow = 0.55 + 0.3 * math.sin(t * 4)
+        local rw = board.BFIELD_TILE_W + 10
+        local rh = board.BFIELD_TILE_H + 10
+        local rx = sx - rw / 2
+        local ry = sy - rh / 2
+        love.graphics.setColor(1.0, 0.75, 0.25, glow * 0.35)
+        love.graphics.rectangle("fill", rx, ry, rw, rh, 8, 8)
+        love.graphics.setColor(1.0, 0.78, 0.32, glow)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", rx, ry, rw, rh, 8, 8)
+        love.graphics.setLineWidth(1)
+      end
+    end
+
+    self:_draw_top_combat_prompt(prompt_text, { 1.0, 0.78, 0.32, 0.85 }, { 0.96, 0.9, 0.8, 1.0 })
+  elseif c.defender == self.local_player_index then
+    self:_draw_top_combat_prompt("Waiting for opponent to declare On Attack targets...", { 0.65, 0.72, 0.9, 0.75 }, { 0.86, 0.9, 1.0, 1.0 })
+  end
+end
+
+function GameState:_draw_combat_priority_overlay()
+  local c = self.game_state and self.game_state.pendingCombat
+  if not c or c.stage == "AWAITING_ATTACK_TARGETS" then
+    return
+  end
+
+  local local_pi = self.local_player_index
+  local prompt_text = nil
+  local border_color = { 0.65, 0.72, 0.9, 0.75 }
+  local text_color = { 0.86, 0.9, 1.0, 1.0 }
+
+  if c.stage == "DECLARED" then
+    if c.defender == local_pi then
+      if #(self.pending_block_assignments or {}) > 0 then
+        prompt_text = "Blockers selected. Press Pass to continue"
+      else
+        prompt_text = "Declare blockers, then Pass"
+      end
+      border_color = { 0.35, 0.75, 1.0, 0.85 }
+      text_color = { 0.86, 0.94, 1.0, 1.0 }
+    elseif c.attacker == local_pi then
+      prompt_text = "Waiting for opponent to declare blockers..."
+    end
+  elseif c.stage == "AWAITING_DAMAGE_ORDER" then
+    if c.attacker == local_pi then
+      local has_custom_order = false
+      for _, order in pairs(self.pending_damage_orders or {}) do
+        if type(order) == "table" and #order > 0 then
+          has_custom_order = true
+          break
+        end
+      end
+      if has_custom_order then
+        prompt_text = "Damage order set. Press Pass to continue"
+      else
+        prompt_text = "Set blocker damage order (optional), then Pass"
+      end
+      border_color = { 1.0, 0.82, 0.35, 0.85 }
+      text_color = { 0.98, 0.92, 0.78, 1.0 }
+    elseif c.defender == local_pi then
+      prompt_text = "Waiting for opponent to set damage order..."
+    end
+  elseif c.stage == "BLOCKERS_ASSIGNED" then
+    if c.attacker == local_pi then
+      prompt_text = "Press Pass to resolve combat"
+      border_color = { 0.92, 0.65, 0.3, 0.85 }
+      text_color = { 0.98, 0.9, 0.8, 1.0 }
+    elseif c.defender == local_pi then
+      prompt_text = "Waiting for attacker to resolve combat..."
+    end
+  end
+
+  self:_draw_top_combat_prompt(prompt_text, border_color, text_color)
 end
 
 function GameState:draw()
@@ -770,9 +1051,12 @@ function GameState:draw()
     sacrifice_eligible_indices = (self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices) or (self.pending_upgrade and self.pending_upgrade.eligible_board_indices) or (self.pending_hand_sacrifice and {}) or nil,
     pending_attack_declarations = self.pending_attack_declarations,
     pending_block_assignments = self.pending_block_assignments,
+    pending_attack_trigger_targets = self.pending_attack_trigger_targets,
   }
   board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
   self:_draw_attack_declaration_arrows()
+  self:_draw_attack_trigger_targeting_overlay()
+  self:_draw_combat_priority_overlay()
 
   -- Ambient particles (drawn on top of panels but below UI overlays)
   local active_player = self.game_state.players[self.game_state.activePlayer + 1]
@@ -1235,7 +1519,8 @@ local function is_attack_unit_board_entry(game_state, pi, board_index, require_a
       end
     end
     local summoning_sickness = (st.summoned_turn == game_state.turnNumber) and not immediate_attack
-    return (def.attack or 0) > 0 and not st.rested and not summoning_sickness
+    local already_attacked = (st.attacked_turn == game_state.turnNumber) and (not can_attack_multiple_times(def))
+    return (def.attack or 0) > 0 and not st.rested and not summoning_sickness and not already_attacked
   end
   return true
 end
@@ -1263,6 +1548,9 @@ local function can_stage_attack_target(game_state, attacker_pi, attacker_board_i
   if (atk_def.attack or 0) <= 0 then return false end
   local atk_state = atk_entry.state or {}
   if atk_state.rested then return false end
+  if atk_state.attacked_turn == game_state.turnNumber and not can_attack_multiple_times(atk_def) then
+    return false
+  end
   local immediate_attack = false
   for _, kw in ipairs(atk_def.keywords or {}) do
     local low = string.lower(kw)
@@ -1397,8 +1685,32 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+  local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, {
+    pending_attack_declarations = self.pending_attack_declarations,
+    pending_block_assignments = self.pending_block_assignments,
+    pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+  })
   local idx = extra  -- backwards compat: numeric index for hand_card, structure, etc.
+
+  local combat_state = self.game_state.pendingCombat
+  if combat_state and combat_state.stage == "AWAITING_ATTACK_TARGETS" then
+    if kind ~= "pass" then
+      if combat_state.attacker == self.local_player_index then
+        local active_trigger = self:_active_attack_trigger_for_targeting(combat_state)
+        if active_trigger
+          and kind == "structure"
+          and pi == combat_state.defender
+          and idx and idx > 0
+          and self:_is_pending_attack_trigger_target_legal(combat_state.defender, idx) then
+          self:_set_pending_attack_trigger_target(active_trigger.attacker_board_index, active_trigger.ability_index, idx)
+          sound.play("click")
+        else
+          sound.play("error")
+        end
+      end
+      return
+    end
+  end
 
   -- If attack declarations are staged and player performs another action, clear staged attack arrows.
   if #self.pending_attack_declarations > 0 and kind and kind ~= "pass" and kind ~= "structure" then
@@ -1775,6 +2087,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     self.pending_sacrifice = nil
     self.pending_upgrade = nil
     self:_clear_pending_attack_declarations()
+    self:_clear_pending_attack_trigger_targets()
     self.pending_block_assignments = {}
     self.pending_damage_orders = {}
     -- Show turn banner
@@ -1795,8 +2108,25 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       })
       if result.ok then
         self:_clear_pending_attack_declarations()
+        self:_clear_pending_attack_trigger_targets()
         self.pending_block_assignments = {}
         self.pending_damage_orders = {}
+        sound.play("whoosh")
+      else
+        sound.play("error")
+      end
+      return
+    end
+
+    if c and c.stage == "AWAITING_ATTACK_TARGETS" and c.attacker == self.local_player_index then
+      local target_payload = self:_build_attack_trigger_target_payload(c)
+      local result = self:dispatch_command({
+        type = "ASSIGN_ATTACK_TRIGGER_TARGETS",
+        player_index = self.local_player_index,
+        targets = target_payload,
+      })
+      if result.ok then
+        self:_clear_pending_attack_trigger_targets()
         sound.play("whoosh")
       else
         sound.play("error")
@@ -1811,6 +2141,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         assignments = self.pending_block_assignments,
       })
       if result.ok then
+        self:_clear_pending_attack_trigger_targets()
         self.pending_block_assignments = {}
         self.pending_damage_orders = {}
         local pending = self.game_state.pendingCombat
@@ -2170,7 +2501,11 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   if deck_viewer.is_open() then return end
 
   if not self.drag then return end
-  local kind, pi, drop_extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+  local kind, pi, drop_extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, {
+    pending_attack_declarations = self.pending_attack_declarations,
+    pending_block_assignments = self.pending_block_assignments,
+    pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+  })
 
   -- Feature 2: Invalid drop zone -> snap back
   local allow_opponent_drop = (
@@ -2465,7 +2800,11 @@ end
 
 function GameState:mousemoved(x, y, dx, dy, istouch)
   -- Update hover state for UI highlights
-  local kind, pi, idx = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, { pending_attack_declarations = self.pending_attack_declarations, pending_block_assignments = self.pending_block_assignments })
+  local kind, pi, idx = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, {
+    pending_attack_declarations = self.pending_attack_declarations,
+    pending_block_assignments = self.pending_block_assignments,
+    pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+  })
   if kind then
     self.hover = { kind = kind, pi = pi, idx = idx }
   else
@@ -2534,6 +2873,11 @@ function GameState:keypressed(key, scancode, isrepeat)
     end
     if self.pending_hand_sacrifice then
       self.pending_hand_sacrifice = nil
+      sound.play("click")
+      return
+    end
+    if #self.pending_attack_trigger_targets > 0 then
+      self:_clear_pending_attack_trigger_targets()
       sound.play("click")
       return
     end

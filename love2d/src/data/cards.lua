@@ -26,7 +26,8 @@
 --   effect         (string)  Effect key: "summon_worker", "produce", "draw_cards", etc.
 --   effect_args    (table?)  Extra data for the effect
 --   once_per_turn  (bool?)   Defaults to false
---   trigger        (string?) For triggered: "on_play", "on_destroyed", "start_of_turn", "end_of_turn"
+--   trigger        (string?) For triggered: "on_play", "on_destroyed", "start_of_turn",
+--                           "end_of_turn", "on_attack", ...
 
 return {
 
@@ -176,6 +177,23 @@ return {
       },
     },
   },
+  {
+    id = "HUMAN_STRUCTURE_SMELTERY",
+    name = "Smeltery",
+    faction = "Human",
+    kind = "Structure",
+    population = 1,
+    text = "1 Stone, 1 Wood: Create 1 Metal.",
+    costs = { { type = "stone", amount = 1 }, { type = "wood", amount = 1 } },
+    abilities = {
+      {
+        type = "activated",
+        cost = { { type = "stone", amount = 1 }, { type = "wood", amount = 1 } },
+        effect = "convert_resource",
+        effect_args = { output = "metal", amount = 1 },
+      },
+    },
+  },
 
   ---------------------------------------------------------
   -- HUMAN WORKERS
@@ -236,6 +254,29 @@ return {
     upkeep = {},
     subtypes = { "Warrior" },
     abilities = {},
+  },
+  {
+    id = "HUMAN_UNIT_LANCER",
+    name = "Lancer",
+    faction = "Human",
+    kind = "Unit",
+    population = 8,
+    tier = 2,
+    attack = 4,
+    health = 5,
+    text = "Vigilance. On Attack: If attacking with another Mounted Unit, deal 2 Damage to Target Unit.",
+    costs = {},
+    upkeep = { { type = "food", amount = 1 } },
+    subtypes = { "Warrior", "Mounted" },
+    keywords = { "vigilance" },
+    abilities = {
+      {
+        type = "triggered",
+        trigger = "on_attack",
+        effect = "conditional_damage",
+        effect_args = { condition = "allied_mounted_attacking", damage = 2, target = "unit" },
+      },
+    },
   },
 
   ---------------------------------------------------------

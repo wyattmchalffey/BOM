@@ -4,23 +4,30 @@
 -- submitted decklists, and provides default decks for first-time profiles.
 
 local cards = require("src.game.cards")
-local config = require("src.data.config")
 
 local deck_validation = {}
 
-local DECK_KINDS = {
-  Unit = true,
-  Spell = true,
-  Technology = true,
-  Item = true,
-  Artifact = true,
-}
-
-local function is_main_deck_card(def, faction)
+local function is_pool_card(def, faction)
   if not def or def.faction ~= faction then
     return false
   end
-  return DECK_KINDS[def.kind] or def.deckable == true
+  -- Bases are selected separately; all other faction cards are deckbuilder-eligible.
+  if def.kind == "Base" then
+    return false
+  end
+  -- Token workers (e.g., Peasant/Grunt) are not deckbuilder cards.
+  if def.kind == "Worker" and def.deckable ~= true then
+    return false
+  end
+  return true
+end
+
+local function max_copies_for_card(def)
+  -- Unit, Structure, and deckable Worker population constrain copies.
+  if def.kind == "Unit" or def.kind == "Structure" or def.kind == "Worker" then
+    return def.population or 1
+  end
+  return nil
 end
 
 local function copy_array(values)
@@ -34,11 +41,11 @@ end
 function deck_validation.deck_entries_for_faction(faction)
   local entries = {}
   for _, def in ipairs(cards.CARD_DEFS) do
-    if is_main_deck_card(def, faction) then
+    if is_pool_card(def, faction) then
       entries[#entries + 1] = {
         card_id = def.id,
         name = def.name,
-        max_copies = def.population or 1,
+        max_copies = max_copies_for_card(def),
         tier = def.tier,
         kind = def.kind,
       }
@@ -66,7 +73,8 @@ function deck_validation.default_deck_for_faction(faction)
   local deck = {}
   local entries = deck_validation.deck_entries_for_faction(faction)
   for _, entry in ipairs(entries) do
-    for _ = 1, entry.max_copies do
+    local copies = entry.max_copies or 1
+    for _ = 1, copies do
       deck[#deck + 1] = entry.card_id
     end
   end
@@ -74,16 +82,8 @@ function deck_validation.default_deck_for_faction(faction)
 end
 
 function deck_validation.deck_size_bounds(faction)
-  local entries = deck_validation.deck_entries_for_faction(faction)
-  local max_size = 0
-  for _, entry in ipairs(entries) do
-    max_size = max_size + (entry.max_copies or 0)
-  end
-
-  local configured_min = tonumber(config.deck_min_cards) or 8
-  local min_size = math.min(configured_min, max_size)
-  if min_size < 0 then min_size = 0 end
-  return min_size, max_size
+  local _ = faction
+  return 0, nil
 end
 
 function deck_validation.normalize_deck_payload(deck_payload)
@@ -101,9 +101,6 @@ function deck_validation.normalize_deck_payload(deck_payload)
 
   local out = {}
   local n = #cards_list
-  if n <= 0 then
-    return nil, "empty_deck"
-  end
 
   for i = 1, n do
     local card_id = cards_list[i]
@@ -138,22 +135,7 @@ function deck_validation.validate_decklist(faction, deck_payload)
     return { ok = false, reason = normalize_reason, meta = { faction = faction } }
   end
 
-  local min_size, max_size = deck_validation.deck_size_bounds(faction)
   local deck_size = #deck
-  if deck_size < min_size then
-    return {
-      ok = false,
-      reason = "deck_too_small",
-      meta = { faction = faction, deck_size = deck_size, min_size = min_size, max_size = max_size },
-    }
-  end
-  if deck_size > max_size then
-    return {
-      ok = false,
-      reason = "deck_too_large",
-      meta = { faction = faction, deck_size = deck_size, min_size = min_size, max_size = max_size },
-    }
-  end
 
   local counts = {}
   for _, card_id in ipairs(deck) do
@@ -167,7 +149,7 @@ function deck_validation.validate_decklist(faction, deck_payload)
     end
 
     counts[card_id] = (counts[card_id] or 0) + 1
-    if counts[card_id] > entry.max_copies then
+    if entry.max_copies and counts[card_id] > entry.max_copies then
       return {
         ok = false,
         reason = "deck_card_limit_exceeded",
@@ -180,7 +162,7 @@ function deck_validation.validate_decklist(faction, deck_payload)
     ok = true,
     reason = "ok",
     deck = copy_array(deck),
-    meta = { faction = faction, deck_size = deck_size, min_size = min_size, max_size = max_size },
+    meta = { faction = faction, deck_size = deck_size, min_size = 0, max_size = nil },
   }
 end
 
