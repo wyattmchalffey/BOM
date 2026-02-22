@@ -646,6 +646,36 @@ function commands.execute(g, command)
     end
   end
 
+  if command.type == "PLAY_MONUMENT_FROM_HAND" then
+    local pi = command.player_index
+    local hand_index = command.hand_index
+    local monument_board_index = command.monument_board_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    local p = g.players[pi + 1]
+    if not hand_index or hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
+    if not monument_board_index then return fail("missing_monument_board_index") end
+
+    local card_id = p.hand[hand_index]
+    local card_ok, card_def = pcall(cards.get_card_def, card_id)
+    if not card_ok or not card_def then return fail("invalid_card") end
+
+    local mon_ab = nil
+    if card_def.abilities then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "static" and ab.effect == "monument_cost" then mon_ab = ab; break end
+      end
+    end
+    if not mon_ab then return fail("card_not_monument_playable") end
+
+    local played = actions.play_monument_card(g, pi, hand_index, monument_board_index)
+    if not played then return fail("play_monument_failed") end
+    return succeed(g,
+      { card_id = card_id },
+      { { type = "monument_card_played", player_index = pi, card_id = card_id } }
+    )
+  end
+
   return fail("unknown_command")
 end
 

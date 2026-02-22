@@ -293,6 +293,15 @@ local function clear_end_of_turn_modifiers(player)
   end
 end
 
+-- Get the monument_cost ability from a card def (returns ability or nil)
+local function get_monument_cost_ability(card_def)
+  if not card_def or not card_def.abilities then return nil end
+  for _, ab in ipairs(card_def.abilities) do
+    if ab.type == "static" and ab.effect == "monument_cost" then return ab end
+  end
+  return nil
+end
+
 -- Get the play_cost_sacrifice ability from a card def (returns ability or nil)
 local function get_sacrifice_ability(card_def)
   if not card_def or not card_def.abilities then return nil end
@@ -985,6 +994,59 @@ function actions.assign_special_worker(g, player_index, sw_index, target)
     return true
   end
   return false
+end
+
+-- Find board indices of monuments on player's board with at least min_counters wonder counters
+function actions.find_valid_monuments(p, min_counters)
+  local result = {}
+  for i, entry in ipairs(p.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and has_keyword(card_def, "monument") then
+      local count = unit_stats.counter_count(entry.state or {}, "wonder")
+      if count >= min_counters then
+        result[#result + 1] = i
+      end
+    end
+  end
+  return result
+end
+
+-- Play a card from hand via the monument mechanic.
+-- Removes 1 wonder counter from the monument at monument_board_index, then places card on board.
+function actions.play_monument_card(g, player_index, hand_index, monument_board_index)
+  if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
+  local p = g.players[player_index + 1]
+  if hand_index < 1 or hand_index > #p.hand then return false end
+
+  local card_id = p.hand[hand_index]
+  local ok, card_def = pcall(cards.get_card_def, card_id)
+  if not ok or not card_def then return false end
+
+  local mon_ab = get_monument_cost_ability(card_def)
+  if not mon_ab then return false end
+  local min_counters = mon_ab.effect_args and mon_ab.effect_args.min_counters or 1
+
+  local monument_entry = p.board[monument_board_index]
+  if not monument_entry then return false end
+  local ok_mon, mon_def = pcall(cards.get_card_def, monument_entry.card_id)
+  if not ok_mon or not mon_def then return false end
+  if not has_keyword(mon_def, "monument") then return false end
+
+  monument_entry.state = monument_entry.state or {}
+  if unit_stats.counter_count(monument_entry.state, "wonder") < min_counters then return false end
+
+  -- Remove 1 wonder counter from the monument
+  unit_stats.remove_counter(monument_entry.state, "wonder", 1)
+
+  -- Remove from hand and place on board
+  table.remove(p.hand, hand_index)
+  p.board[#p.board + 1] = {
+    card_id = card_id,
+    state = entering_board_state(g, card_def, {}),
+  }
+  fire_on_play_triggers(p, g, card_id)
+
+  return true
 end
 
 -- Unassign a special worker (set assigned_to = nil)

@@ -1376,6 +1376,41 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       love.graphics.printf("Select an ally to sacrifice", px, front_ay - 20, pw, "center")
     end
 
+    -- Monument selection overlay: highlight eligible monuments in gold, dim others
+    local mon_indices = hand_state and hand_state.monument_eligible_indices
+    if mon_indices and panel == 0 then
+      local function is_mon_eligible(si)
+        for _, ei in ipairs(mon_indices) do
+          if ei == si then return true end
+        end
+        return false
+      end
+      -- Dim units
+      for gi, group in ipairs(unit_groups) do
+        local tile_x = unit_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        love.graphics.setColor(0, 0, 0, 0.5)
+        love.graphics.rectangle("fill", tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+      end
+      -- Highlight eligible monuments, dim ineligible structures
+      for gi, group in ipairs(struct_groups) do
+        local tile_x = struct_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if is_mon_eligible(group.first_si) then
+          local pulse = 0.3 + 0.2 * math.sin(t * 4)
+          love.graphics.setColor(0.95, 0.78, 0.2, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, back_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+        end
+      end
+      -- Prompt
+      love.graphics.setFont(util.get_font(12))
+      love.graphics.setColor(0.95, 0.78, 0.2, 0.7 + 0.2 * math.sin(t * 3))
+      love.graphics.printf("Select a Monument", px, back_ay - 20, pw, "center")
+    end
+
     -- Resource nodes: title + placeholder only, centered in panel
     local res_left_title = (player.faction == "Human") and "Wood" or "Food"
     local res_left_resource = (player.faction == "Human") and "wood" or "food"

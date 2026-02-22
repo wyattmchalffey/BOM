@@ -66,6 +66,7 @@ function GameState.new(opts)
     pending_play_unit = nil,      -- { source, ability_index, effect_args, eligible_indices }
     pending_sacrifice = nil,      -- { source, ability_index, effect_args, eligible_board_indices }
     pending_hand_sacrifice = nil, -- { hand_index, required_count, selected_targets }
+    pending_monument = nil,        -- { hand_index, min_counters, eligible_indices }
     pending_upgrade = nil, -- { source, ability_index, stage, sacrifice_target, eligible_hand_indices, eligible_board_indices, eligible_worker_sacrifice }
     hand_y_offsets = {},          -- per-card animated y offset (negative = raised)
     command_log = replay.new_log({
@@ -331,6 +332,7 @@ function GameState:_sync_terminal_state()
   self.pending_sacrifice = nil
   self.pending_upgrade = nil
   self.pending_hand_sacrifice = nil
+  self.pending_monument = nil
   self:_clear_pending_attack_declarations()
   self.pending_attack_trigger_targets = {}
   self.pending_block_assignments = {}
@@ -1214,6 +1216,24 @@ function GameState:_draw_pending_hand_sacrifice_overlay()
   self:_draw_top_combat_prompt(prompt_text, { 0.95, 0.78, 0.35, 0.85 }, { 0.98, 0.92, 0.8, 1.0 })
 end
 
+function GameState:_draw_pending_monument_overlay()
+  local pending = self.pending_monument
+  if not pending then return end
+
+  local local_p = self.game_state and self.game_state.players and self.game_state.players[self.local_player_index + 1]
+  local card_name = "Card"
+  if local_p and local_p.hand and pending.hand_index then
+    local card_id = local_p.hand[pending.hand_index]
+    if card_id then
+      local ok_def, def = pcall(cards.get_card_def, card_id)
+      if ok_def and def and def.name then card_name = def.name end
+    end
+  end
+
+  local prompt_text = card_name .. ": select a Monument with " .. pending.min_counters .. "+ Wonder counters"
+  self:_draw_top_combat_prompt(prompt_text, { 0.6, 0.5, 0.1, 0.85 }, { 0.98, 0.92, 0.6, 1.0 })
+end
+
 function GameState:draw()
   shake.apply()
 
@@ -1236,6 +1256,7 @@ function GameState:draw()
     eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or (pending_upgrade_hand and pending_upgrade_hand.eligible_hand_indices) or nil,
     sacrifice_eligible_indices = (self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices) or (pending_upgrade_sacrifice and pending_upgrade_sacrifice.eligible_board_indices) or (self.pending_hand_sacrifice and {}) or nil,
     sacrifice_allow_workers = sacrifice_allow_workers,
+    monument_eligible_indices = self.pending_monument and self.pending_monument.eligible_indices or nil,
     pending_attack_declarations = self.pending_attack_declarations,
     pending_block_assignments = self.pending_block_assignments,
     pending_attack_trigger_targets = self.pending_attack_trigger_targets,
@@ -1245,6 +1266,7 @@ function GameState:draw()
   self:_draw_attack_trigger_targeting_overlay()
   self:_draw_combat_priority_overlay()
   self:_draw_pending_hand_sacrifice_overlay()
+  self:_draw_pending_monument_overlay()
 
   -- Ambient particles (drawn on top of panels but below UI overlays)
   local active_player = self.game_state.players[self.game_state.activePlayer + 1]
@@ -2036,6 +2058,11 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       sound.play("click")
       return
     end
+    if self.pending_monument then
+      self.pending_monument = nil
+      sound.play("click")
+      return
+    end
     if self.hand_selected_index then
       self.hand_selected_index = nil
       sound.play("click")
@@ -2149,6 +2176,47 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       end
       popup.create("Worker sacrificed!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.3, 0.3 })
       self.pending_sacrifice = nil
+    else
+      sound.play("error")
+    end
+    return
+  end
+
+  -- Board tile click during pending monument selection
+  if kind == "structure" and self.pending_monument then
+    local pending = self.pending_monument
+    local target_si = idx
+    local is_eligible = false
+    for _, ei in ipairs(pending.eligible_indices) do
+      if ei == target_si then is_eligible = true; break end
+    end
+    if is_eligible then
+      local p = self.game_state.players[self.local_player_index + 1]
+      local hand_card_id = p.hand[pending.hand_index]
+      local card_name = "Card"
+      if hand_card_id then
+        local ok_c, cdef = pcall(cards.get_card_def, hand_card_id)
+        if ok_c and cdef then card_name = cdef.name end
+      end
+      local result = self:dispatch_command({
+        type = "PLAY_MONUMENT_FROM_HAND",
+        player_index = self.local_player_index,
+        hand_index = pending.hand_index,
+        monument_board_index = target_si,
+      })
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        popup.create(card_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.95, 0.78, 0.2 })
+        self.pending_monument = nil
+        self.hand_selected_index = nil
+        while #self.hand_y_offsets > #p.hand do
+          table.remove(self.hand_y_offsets)
+        end
+      else
+        sound.play("error")
+      end
     else
       sound.play("error")
     end
@@ -2369,6 +2437,38 @@ function GameState:mousepressed(x, y, button, istouch, presses)
               return
             end
           end
+          -- Check for monument cost ability
+          local mon_ab = nil
+          if card_def.abilities then
+            for _, ab in ipairs(card_def.abilities) do
+              if ab.type == "static" and ab.effect == "monument_cost" then mon_ab = ab; break end
+            end
+          end
+          if mon_ab then
+            local min_counters = mon_ab.effect_args and mon_ab.effect_args.min_counters or 1
+            local eligible = {}
+            for i, entry in ipairs(local_p.board) do
+              local ok_m, mon_def = pcall(cards.get_card_def, entry.card_id)
+              if ok_m and mon_def and mon_def.keywords then
+                local is_monument = false
+                for _, kw in ipairs(mon_def.keywords) do
+                  if kw == "monument" then is_monument = true; break end
+                end
+                if is_monument and unit_stats.counter_count(entry.state or {}, "wonder") >= min_counters then
+                  eligible[#eligible + 1] = i
+                end
+              end
+            end
+            if #eligible > 0 then
+              self.pending_monument = {
+                hand_index = idx,
+                min_counters = min_counters,
+                eligible_indices = eligible,
+              }
+              sound.play("click")
+              return
+            end
+          end
         end
       end
       -- Deselect if not playable
@@ -2443,6 +2543,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     self.pending_play_unit = nil
     self.pending_sacrifice = nil
     self.pending_upgrade = nil
+    self.pending_monument = nil
     self:_clear_pending_attack_declarations()
     self:_clear_pending_attack_trigger_targets()
     self.pending_block_assignments = {}
@@ -3228,6 +3329,11 @@ function GameState:keypressed(key, scancode, isrepeat)
     end
     if self.pending_hand_sacrifice then
       self.pending_hand_sacrifice = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_monument then
+      self.pending_monument = nil
       sound.play("click")
       return
     end
