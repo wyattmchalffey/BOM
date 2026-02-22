@@ -135,6 +135,44 @@ effect_handlers.skip_draw = function(ability, player, g)
   -- Handled as a flag check during draw phase
 end
 
+effect_handlers.buff_ally_attacker = function(ability, player, g, context)
+  -- Primary resolution is handled inline by combat.assign_attack_trigger_targets.
+  -- This stub exists for completeness.
+end
+
+effect_handlers.gain_keyword = function(ability, player, g, context)
+  local args = ability.effect_args or {}
+  local source_entry = context and context.source_entry
+  if type(source_entry) ~= "table" then return end
+
+  local keyword = args.keyword
+  if type(keyword) ~= "string" or keyword == "" then return end
+
+  source_entry.state = source_entry.state or {}
+  local st = source_entry.state
+
+  if args.duration == "end_of_turn" then
+    st.temp_keywords = st.temp_keywords or {}
+    st.temp_keywords[string.lower(keyword)] = true
+  else
+    -- Permanent grant — check card_def keywords
+    local ok, card_def = pcall(cards.get_card_def, source_entry.card_id)
+    if ok and card_def then
+      card_def.keywords = card_def.keywords or {}
+      local have = false
+      for _, kw in ipairs(card_def.keywords) do
+        if string.lower(kw) == string.lower(keyword) then
+          have = true
+          break
+        end
+      end
+      if not have then
+        card_def.keywords[#card_def.keywords + 1] = keyword
+      end
+    end
+  end
+end
+
 effect_handlers.buff_self = function(ability, player, g, context)
   local args = ability.effect_args or {}
   local source_entry = context and context.source_entry

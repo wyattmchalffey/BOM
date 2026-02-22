@@ -176,14 +176,36 @@ local function get_attackers_with_multiple_blockers(combat_state)
   return out
 end
 
-local function queue_damage(q, side, board_index, amount, source_def, source_state)
+local function queue_damage(q, side, board_index, amount, source_def, source_state, source_side, source_index)
   if amount <= 0 then return end
   q[#q + 1] = {
     side = side,
     board_index = board_index,
     amount = amount,
     deathtouch = has_keyword(source_def, "deathtouch", source_state),
+    source_side = source_side,
+    source_index = source_index,
   }
+end
+
+local function adjust_queue_after_destroy(queue, removed_side, removed_index)
+  for i = #queue, 1, -1 do
+    local ev = queue[i]
+    -- Remove events from dead sources or targeting destroyed unit
+    if (ev.source_side == removed_side and ev.source_index == removed_index)
+      or (ev.side == removed_side and ev.board_index == removed_index) then
+      table.remove(queue, i)
+    else
+      -- Shift target indices
+      if ev.side == removed_side and ev.board_index > removed_index then
+        ev.board_index = ev.board_index - 1
+      end
+      -- Shift source indices
+      if ev.source_side == removed_side and ev.source_index > removed_index then
+        ev.source_index = ev.source_index - 1
+      end
+    end
+  end
 end
 
 local function apply_damage_queue(g, atk_player, def_player, q)
@@ -587,6 +609,27 @@ function combat.assign_attack_trigger_targets(g, player_index, targets)
               source_entry = src_entry,
               attacker_board_index = trigger.attacker_board_index,
             })
+          elseif trigger.effect == "buff_ally_attacker" then
+            local buff_atk = args.attack or 0
+            local buff_hp = args.health or 0
+            local count = args.count or 1
+            local buffed = 0
+            for _, other in ipairs(c.attackers or {}) do
+              if buffed >= count then break end
+              if other.board_index ~= trigger.attacker_board_index and not other.invalidated then
+                local other_entry = atk_player.board[other.board_index]
+                if other_entry then
+                  local ost = ensure_state(other_entry)
+                  if buff_atk ~= 0 then
+                    ost.temp_attack_bonus = (ost.temp_attack_bonus or 0) + buff_atk
+                  end
+                  if buff_hp ~= 0 then
+                    ost.temp_health_bonus = (ost.temp_health_bonus or 0) + buff_hp
+                  end
+                  buffed = buffed + 1
+                end
+              end
+            end
           end
         end
       end
@@ -733,7 +776,7 @@ function combat.resolve(g)
 
   local first_q, normal_q = {}, {}
   local base_damage_first = 0
-  local base_damage_normal = 0
+  local base_damage_normal = {} -- tracked per-source for first strike filtering
 
   for _, attacker in ipairs(c.attackers) do
     if not attacker.invalidated then
@@ -761,12 +804,12 @@ function combat.resolve(g)
                 if has_keyword(b_def, "crew", b_state) and not b_state.crewed then
                   -- crewless blocker deals no combat damage
                 else
-                  queue_damage(b_queue, "atk", attacker.board_index, unit_stats.effective_attack(b_def, b_state), b_def, b_state)
+                  queue_damage(b_queue, "atk", attacker.board_index, unit_stats.effective_attack(b_def, b_state), b_def, b_state, "def", bi)
                 end
                 local bhp = unit_stats.effective_health(b_def, b_state)
                 if has_keyword(atk_def, "deathtouch", atk_state) then bhp = 1 end
                 local to_blocker = math.min(remaining_atk, bhp)
-                queue_damage(queue_for_attacker, "def", bi, to_blocker, atk_def, atk_state)
+                queue_damage(queue_for_attacker, "def", bi, to_blocker, atk_def, atk_state, "atk", attacker.board_index)
                 remaining_atk = remaining_atk - to_blocker
               end
             end
@@ -776,10 +819,10 @@ function combat.resolve(g)
                 if atk_first[attacker.board_index] then
                   base_damage_first = base_damage_first + remaining_atk
                 else
-                  base_damage_normal = base_damage_normal + remaining_atk
+                  base_damage_normal[#base_damage_normal + 1] = { source_index = attacker.board_index, amount = remaining_atk }
                 end
               elseif attacker.target.type == "board" and def_player.board[attacker.target.index] then
-                queue_damage(queue_for_attacker, "def", attacker.target.index, remaining_atk, atk_def, atk_state)
+                queue_damage(queue_for_attacker, "def", attacker.target.index, remaining_atk, atk_def, atk_state, "atk", attacker.board_index)
               end
             end
           else
@@ -787,18 +830,18 @@ function combat.resolve(g)
               if atk_first[attacker.board_index] then
                 base_damage_first = base_damage_first + unit_stats.effective_attack(atk_def, atk_state)
               else
-                base_damage_normal = base_damage_normal + unit_stats.effective_attack(atk_def, atk_state)
+                base_damage_normal[#base_damage_normal + 1] = { source_index = attacker.board_index, amount = unit_stats.effective_attack(atk_def, atk_state) }
               end
             elseif attacker.target.type == "board" then
               local te = def_player.board[attacker.target.index]
               if te then
                 local tdef = cards.get_card_def(te.card_id)
-                queue_damage(queue_for_attacker, "def", attacker.target.index, unit_stats.effective_attack(atk_def, atk_state), atk_def, atk_state)
+                queue_damage(queue_for_attacker, "def", attacker.target.index, unit_stats.effective_attack(atk_def, atk_state), atk_def, atk_state, "atk", attacker.board_index)
                 if tdef.kind == "Unit" or tdef.kind == "Worker" then
                   local tstate = ensure_state(te)
                   if not (has_keyword(tdef, "crew", tstate) and not tstate.crewed) then
                     local t_queue = def_first[attacker.target.index] and first_q or normal_q
-                    queue_damage(t_queue, "atk", attacker.board_index, unit_stats.effective_attack(tdef, tstate), tdef, tstate)
+                    queue_damage(t_queue, "atk", attacker.board_index, unit_stats.effective_attack(tdef, tstate), tdef, tstate, "def", attacker.target.index)
                   end
                 end
               end
@@ -829,11 +872,31 @@ function combat.resolve(g)
       dead_def[#dead_def + 1] = i
     end
   end
-  for i = #dead_atk, 1, -1 do destroy_board_entry(atk_player, g, dead_atk[i]) end
-  for i = #dead_def, 1, -1 do destroy_board_entry(def_player, g, dead_def[i]) end
+  for i = #dead_atk, 1, -1 do
+    local idx = dead_atk[i]
+    destroy_board_entry(atk_player, g, idx)
+    adjust_queue_after_destroy(normal_q, "atk", idx)
+    -- Remove base damage contributions from killed attackers
+    for j = #base_damage_normal, 1, -1 do
+      if base_damage_normal[j].source_index == idx then
+        table.remove(base_damage_normal, j)
+      elseif base_damage_normal[j].source_index > idx then
+        base_damage_normal[j].source_index = base_damage_normal[j].source_index - 1
+      end
+    end
+  end
+  for i = #dead_def, 1, -1 do
+    local idx = dead_def[i]
+    destroy_board_entry(def_player, g, idx)
+    adjust_queue_after_destroy(normal_q, "def", idx)
+  end
 
   apply_damage_queue(g, atk_player, def_player, normal_q)
-  def_player.life = math.max(0, (def_player.life or 0) - base_damage_normal)
+  local total_base_normal = 0
+  for _, entry in ipairs(base_damage_normal) do
+    total_base_normal = total_base_normal + entry.amount
+  end
+  def_player.life = math.max(0, (def_player.life or 0) - total_base_normal)
 
   dead_atk, dead_def = {}, {}
   for i, e in ipairs(atk_player.board) do

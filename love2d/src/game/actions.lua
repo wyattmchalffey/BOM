@@ -367,6 +367,17 @@ function actions.start_turn(g)
       end
     end
   end
+  -- Fire start_of_turn triggered abilities
+  for _, entry in ipairs(p.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and card_def.abilities then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "triggered" and ab.trigger == "start_of_turn" then
+          abilities.resolve(ab, p, g, { source_entry = entry })
+        end
+      end
+    end
+  end
   -- Draw a card (unless base has skip_draw, e.g. Orc Encampment)
   local base_def = cards.get_card_def(p.baseId)
   if not has_static_effect(base_def, "skip_draw") then
