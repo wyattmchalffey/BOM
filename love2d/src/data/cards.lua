@@ -194,6 +194,24 @@ return {
       },
     },
   },
+  {
+    id = "HUMAN_STRUCTURE_GENERAL_WARES_SHOP",
+    name = "General Wares Shop",
+    faction = "Human",
+    kind = "Structure",
+    tier = 1,
+    population = 1,
+    text = "Action — 3 Gold: Draw a card.",
+    costs = { { type = "wood", amount = 3 } },
+    abilities = {
+      {
+        type = "activated",
+        cost = { { type = "gold", amount = 3 } },
+        effect = "draw_cards",
+        effect_args = { amount = 1 },
+      },
+    },
+  },
 
   ---------------------------------------------------------
   -- HUMAN WORKERS
