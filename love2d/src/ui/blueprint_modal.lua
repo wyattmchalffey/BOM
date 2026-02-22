@@ -65,6 +65,12 @@ local function blueprint_cards_for_player(player, faction)
   return out
 end
 
+local function player_has_resource_node(player, resource)
+  if not resource then return true end
+  local res_left = (player.faction == "Human") and "wood" or "food"
+  return resource == res_left or resource == "stone"
+end
+
 -- Open the blueprint viewer for a specific player
 function blueprint.open(player_index, game_state)
   local player = game_state.players[player_index + 1]
@@ -86,7 +92,8 @@ function blueprint.open(player_index, game_state)
         local can_afford = is_active and abilities.can_pay_cost(player.resources, def.costs)
         local built = count_on_board(player, def.id)
         local at_max = def.population and built >= def.population
-        return remaining > 0 and can_afford and not at_max
+        local has_node = player_has_resource_node(player, def.requires_resource)
+        return remaining > 0 and can_afford and not at_max and has_node
       end
       return true
     end,
@@ -97,7 +104,8 @@ function blueprint.open(player_index, game_state)
       local can_afford = abilities.can_pay_cost(player.resources, def.costs)
       local built = count_on_board(player, def.id)
       local at_max = def.population and built >= def.population
-      return remaining > 0 and can_afford and not at_max
+      local has_node = player_has_resource_node(player, def.requires_resource)
+      return remaining > 0 and can_afford and not at_max and has_node
     end,
 
     card_overlay_fn = function(def, x, y, w, h)
@@ -105,7 +113,8 @@ function blueprint.open(player_index, game_state)
       local can_afford = is_active and abilities.can_pay_cost(player.resources, def.costs)
       local built = count_on_board(player, def.id)
       local at_max = def.population and built >= def.population
-      local can_build = remaining > 0 and can_afford and not at_max
+      local has_node = player_has_resource_node(player, def.requires_resource)
+      local can_build = remaining > 0 and can_afford and not at_max and has_node
 
       if not can_build then
         -- Dim overlay
@@ -113,7 +122,10 @@ function blueprint.open(player_index, game_state)
         love.graphics.rectangle("fill", x, y, w, h, 6, 6)
         -- Status label
         love.graphics.setFont(util.get_font(11))
-        if at_max then
+        if not has_node then
+          love.graphics.setColor(0.8, 0.5, 0.3, 0.9)
+          love.graphics.printf("Requires " .. def.requires_resource, x, y + h / 2 - 6, w, "center")
+        elseif at_max then
           love.graphics.setColor(1, 0.5, 0.3, 0.9)
           love.graphics.printf(built .. "/" .. def.population .. " built", x, y + h / 2 - 6, w, "center")
         elseif remaining <= 0 then

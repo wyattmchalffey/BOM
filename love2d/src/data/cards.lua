@@ -135,6 +135,31 @@ return {
   },
 
   ---------------------------------------------------------
+  -- NEUTRAL STRUCTURES
+  ---------------------------------------------------------
+
+  {
+    id = "NEUTRAL_STRUCTURE_HONEYBEE_HIVE",
+    name = "Honeybee Hive",
+    faction = "Neutral",
+    kind = "Structure",
+    population = 1,
+    text = "Wood Enhancement. At the start of your turn, Generate 1 Food.",
+    costs = { { type = "food", amount = 2 } },
+    subtypes = { "Enhancement" },
+    requires_resource = "wood",
+    abilities = {
+      {
+        type = "triggered",
+        trigger = "end_of_turn",
+        effect = "produce",
+        effect_args = { resource = "food", amount = 1 },
+        once_per_turn = true,
+      },
+    },
+  },
+
+  ---------------------------------------------------------
   -- HUMAN STRUCTURES
   ---------------------------------------------------------
 

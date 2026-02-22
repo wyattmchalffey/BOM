@@ -661,11 +661,19 @@ function actions.build_structure(g, player_index, card_id)
     end
   end
 
-  -- Validate card exists and is a Structure of the player's faction
+  -- Validate card exists and is a Structure of the player's faction (or Neutral)
   local ok, card_def = pcall(cards.get_card_def, card_id)
   if not ok or not card_def then return false end
   if card_def.kind ~= "Structure" then return false end
-  if card_def.faction ~= p.faction then return false end
+  if card_def.faction ~= p.faction and card_def.faction ~= "Neutral" then return false end
+
+  -- Check resource node requirement (e.g. "wood" means player must have a Wood node)
+  if card_def.requires_resource then
+    local res = card_def.requires_resource
+    local res_left = (p.faction == "Human") and "wood" or "food"
+    local has_node = (res == res_left or res == "stone")
+    if not has_node then return false end
+  end
 
   local blueprint_index = nil
   for i, blueprint_id in ipairs(p.blueprintDeck) do
