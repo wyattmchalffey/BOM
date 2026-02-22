@@ -11,7 +11,7 @@ local config = require("src.data.config")
 local state = {}
 
 -- Kinds that go into the player's main (draw) deck
-local DECK_KINDS = { Unit = true, Spell = true, Technology = true, Item = true, Artifact = true }
+local DECK_KINDS = { Unit = true, Spell = true, Technology = true, Item = true }
 
 local function has_valid_base(base_id)
   if type(base_id) ~= "string" or base_id == "" then
@@ -57,7 +57,7 @@ local function is_main_deck_card(def)
 end
 
 local function is_blueprint_card(def)
-  return def and def.kind == "Structure"
+  return def and (def.kind == "Structure" or def.kind == "Artifact")
 end
 
 -- Build a draw deck for a faction.

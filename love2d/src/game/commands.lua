@@ -496,7 +496,7 @@ function commands.execute(g, command)
       local entry = p.board[target_board_index]
       if not entry then return fail("invalid_sacrifice_target") end
       local ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
-      if not ok_t or not tdef or tdef.kind == "Structure" or not has_any_subtype(tdef, upgrade_subtypes) then
+      if not ok_t or not tdef or tdef.kind == "Structure" or tdef.kind == "Artifact" or not has_any_subtype(tdef, upgrade_subtypes) then
         return fail("invalid_sacrifice_target")
       end
       sacrificed_tier = tdef.tier or 0

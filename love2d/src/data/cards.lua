@@ -657,6 +657,75 @@ return {
     },
   },
 
+  {
+    id = "ORC_STRUCTURE_CARRION_PIT",
+    name = "Carrion Pit",
+    faction = "Orc",
+    kind = "Structure",
+    population = 1,
+    tier = 3,
+    text = "Start of turn: Generate 1 Bones.",
+    costs = { { type = "bones", amount = 5 } },
+    abilities = {
+      {
+        type = "static",
+        effect = "produce",
+        effect_args = { resource = "bones", amount = 1 },
+      },
+    },
+  },
+
+  {
+    id = "ORC_STRUCTURE_MONUMENT_STAR_GOD",
+    name = "Monument of the Star God",
+    faction = "Orc",
+    kind = "Structure",
+    population = 2,
+    tier = 1,
+    text = "Monument. 2 Stone: Place a Wonder counter on this structure.",
+    costs = {},
+    keywords = { "monument" },
+    abilities = {
+      {
+        type = "activated",
+        cost = { { type = "stone", amount = 2 } },
+        effect = "place_counter",
+        effect_args = { counter = "wonder", amount = 1 },
+        once_per_turn = true,
+      },
+    },
+  },
+
+  ---------------------------------------------------------
+  -- ORC ARTIFACTS
+  ---------------------------------------------------------
+
+  {
+    id = "ORC_ARTIFACT_STONE_TALISMAN",
+    name = "Stone Talisman of Honor",
+    faction = "Orc",
+    kind = "Artifact",
+    population = 1,
+    tier = 2,
+    text = "Whenever a non-Undead Orc dies, place a Counter on this Artifact. Remove 3 Counters: Draw a Card.",
+    costs = { { type = "stone", amount = 4 } },
+    subtypes = {},
+    abilities = {
+      {
+        type = "triggered",
+        trigger = "on_ally_death",
+        effect = "place_counter",
+        effect_args = { counter = "honor", amount = 1, condition = "non_undead_orc" },
+      },
+      {
+        type = "activated",
+        cost = {},
+        effect = "remove_counter_draw",
+        effect_args = { counter = "honor", remove = 3, draw = 1 },
+      },
+    },
+  },
+
   ---------------------------------------------------------
   -- ORC WORKERS
   ---------------------------------------------------------

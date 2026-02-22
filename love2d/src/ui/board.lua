@@ -719,8 +719,8 @@ local function group_board_entries(player, kind_filter, forced_singletons)
   for si, entry in ipairs(player.board) do
     local ok, def = pcall(cards.get_card_def, entry.card_id)
     if ok and def then
-      local dominated = (kind_filter == "Structure") and (def.kind == "Structure")
-      local is_unit = (kind_filter == "Unit") and (def.kind ~= "Structure")
+      local dominated = (kind_filter == "Structure") and (def.kind == "Structure" or def.kind == "Artifact")
+      local is_unit = (kind_filter == "Unit") and (def.kind ~= "Structure" and def.kind ~= "Artifact")
       if dominated or is_unit then
         local key = entry.card_id
         if is_unit then
@@ -960,6 +960,7 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     end
   end
 
+  local alpha = is_active and 1.0 or 0.6
   local ab_btn_y = is_base and (ty + 36) or (ty + 34)
   local has_non_activated_hint = nil
   if sdef.abilities then
@@ -972,7 +973,8 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
           key = tostring(pi) .. ":board:" .. si .. ":" .. ai
         end
         local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
-        local can_act = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and is_active
+        local source_entry = (not is_base) and player.board[si] or nil
+        local can_act = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and abilities.can_pay_counter_cost(ab, source_entry) and is_active
         local ab_hovered = hover and hover.kind == "activate_ability" and hover.pi == pi
           and type(hover.idx) == "table"
           and ((is_base and hover.idx.source == "base") or (not is_base and hover.idx.source == "board" and hover.idx.board_index == si))
@@ -994,6 +996,37 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.setColor(accent[1], accent[2], accent[3], is_active and 0.6 or 0.3)
     love.graphics.setFont(util.get_font(7))
     love.graphics.printf(has_non_activated_hint, tx + 4, ty + 38, tw - 8, "center")
+  end
+
+  -- Counter badges (below ability buttons, left-aligned)
+  if st and unit_stats.has_counters(st) then
+    local all_c = unit_stats.all_counters(st)
+    if all_c then
+      local counter_font = util.get_font(8)
+      local counter_colors = {
+        growth    = { bg = {0.15, 0.35, 0.12}, border = {0.45, 0.75, 0.35}, text = {0.85, 1.0, 0.8} },
+        knowledge = { bg = {0.12, 0.18, 0.35}, border = {0.35, 0.50, 0.85}, text = {0.8, 0.88, 1.0} },
+        wonder    = { bg = {0.35, 0.25, 0.12}, border = {0.85, 0.65, 0.25}, text = {1.0, 0.95, 0.75} },
+        honor     = { bg = {0.30, 0.12, 0.12}, border = {0.75, 0.35, 0.35}, text = {1.0, 0.85, 0.85} },
+      }
+      local default_color = { bg = {0.2, 0.2, 0.25}, border = {0.5, 0.5, 0.6}, text = {0.9, 0.9, 0.95} }
+      local counter_y = ab_btn_y + 2
+      for name, count in pairs(all_c) do
+        local colors = counter_colors[name] or default_color
+        local label = tostring(count) .. " " .. name:sub(1, 1):upper() .. name:sub(2)
+        local cw = math.min(tw - 8, counter_font:getWidth(label) + 8)
+        local ch = 12
+        local cx = tx + 4
+        love.graphics.setColor(colors.bg[1], colors.bg[2], colors.bg[3], 0.92 * alpha)
+        love.graphics.rectangle("fill", cx, counter_y, cw, ch, 3, 3)
+        love.graphics.setColor(colors.border[1], colors.border[2], colors.border[3], 0.9 * alpha)
+        love.graphics.rectangle("line", cx, counter_y, cw, ch, 3, 3)
+        love.graphics.setColor(colors.text[1], colors.text[2], colors.text[3], alpha)
+        love.graphics.setFont(counter_font)
+        love.graphics.printf(label, cx, counter_y + 2, cw, "center")
+        counter_y = counter_y + ch + 2
+      end
+    end
   end
 
   if tile_rested then
@@ -1982,7 +2015,7 @@ function board.board_entry_center(game_state, panel_player_index, board_index, l
 
   local groups
   local row_ax, row_ay, row_aw
-  if def.kind == "Structure" then
+  if def.kind == "Structure" or def.kind == "Artifact" then
     groups = group_board_entries(player, "Structure")
     row_ax, row_ay, row_aw = board.back_row_rect(px, py, pw, ph, panel)
   else

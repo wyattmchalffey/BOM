@@ -24,7 +24,7 @@ end
 
 local function max_copies_for_card(def)
   -- Unit, Structure, and deckable Worker population constrain copies.
-  if def.kind == "Unit" or def.kind == "Structure" or def.kind == "Worker" then
+  if def.kind == "Unit" or def.kind == "Structure" or def.kind == "Worker" or def.kind == "Artifact" then
     return def.population or 1
   end
   return nil

@@ -16,7 +16,7 @@ function card_art.draw_card_art(ax, ay, aw, ah, kind, is_base, name_or_faction)
     end
     return
   end
-  if kind == "Structure" then
+  if kind == "Structure" or kind == "Artifact" then
     card_art._draw_structure(ax, ay, aw, ah)
   elseif kind == "Unit" then
     card_art._draw_unit(ax, ay, aw, ah)

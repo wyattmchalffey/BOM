@@ -729,7 +729,7 @@ function GameState:_is_pending_attack_trigger_target_legal(defender_pi, board_in
   local entry = player and player.board and player.board[board_index]
   if not entry then return false end
   local ok_def, def = pcall(cards.get_card_def, entry.card_id)
-  return ok_def and def and def.kind ~= "Structure"
+  return ok_def and def and def.kind ~= "Structure" and def.kind ~= "Artifact"
 end
 
 function GameState:_attack_trigger_legal_targets(combat_state)
@@ -740,7 +740,7 @@ function GameState:_attack_trigger_legal_targets(combat_state)
   if not player then return out end
   for i, entry in ipairs(player.board or {}) do
     local ok_def, def = pcall(cards.get_card_def, entry.card_id)
-    if ok_def and def and def.kind ~= "Structure" then
+    if ok_def and def and def.kind ~= "Structure" and def.kind ~= "Artifact" then
       out[#out + 1] = i
     end
   end
@@ -1378,6 +1378,7 @@ function GameState:draw()
             used_abilities = used_abs,
             can_activate_abilities = can_act_abs,
             show_ability_text = true,
+            counters = entry.state and unit_stats.all_counters(entry.state),
           })
           love.graphics.pop()
         end
@@ -1742,7 +1743,7 @@ local function find_upgrade_board_sacrifice_indices(player, effect_args)
   local required_subtypes = upgrade_required_subtypes(effect_args)
   for si, entry in ipairs((player and player.board) or {}) do
     local ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
-    if ok_t and tdef and tdef.kind ~= "Structure" and has_any_subtype(tdef, required_subtypes) then
+    if ok_t and tdef and tdef.kind ~= "Structure" and tdef.kind ~= "Artifact" and has_any_subtype(tdef, required_subtypes) then
       local next_tier = (tdef.tier or 0) + 1
       if #find_upgrade_hand_indices(player, effect_args, next_tier) > 0 then
         out[#out + 1] = si
@@ -1850,10 +1851,10 @@ local function can_stage_attack_target(game_state, attacker_pi, attacker_board_i
   if not target_entry then return false end
   local tgt_ok, tgt_def = pcall(cards.get_card_def, target_entry.card_id)
   if not tgt_ok or not tgt_def then return false end
-  if tgt_def.kind ~= "Unit" and tgt_def.kind ~= "Worker" and tgt_def.kind ~= "Structure" then
+  if tgt_def.kind ~= "Unit" and tgt_def.kind ~= "Worker" and tgt_def.kind ~= "Structure" and tgt_def.kind ~= "Artifact" then
     return false
   end
-  if tgt_def.kind == "Structure" and tgt_def.health == nil then
+  if (tgt_def.kind == "Structure" or tgt_def.kind == "Artifact") and tgt_def.health == nil then
     return false
   end
 
@@ -1934,7 +1935,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
             local struct_count = 0
             for _, e in ipairs(self.game_state.players[self.show_blueprint_for_player + 1].board) do
               local e_ok, e_def = pcall(cards.get_card_def, e.card_id)
-              if e_ok and e_def and e_def.kind == "Structure" then struct_count = struct_count + 1 end
+              if e_ok and e_def and (e_def.kind == "Structure" or e_def.kind == "Artifact") then struct_count = struct_count + 1 end
             end
             local tile_step = board.BFIELD_TILE_W + board.BFIELD_GAP
             local start_x = board.centered_row_x(sax, saw, struct_count)
@@ -2272,7 +2273,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       if entry then
         ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
       end
-      if not ok_t or not tdef or tdef.kind == "Structure" or not has_any_subtype(tdef, required_subtypes) then
+      if not ok_t or not tdef or tdef.kind == "Structure" or tdef.kind == "Artifact" or not has_any_subtype(tdef, required_subtypes) then
         local bad_name = "unknown"
         if entry then
           local ok_bad, bad_def = pcall(cards.get_card_def, entry.card_id)

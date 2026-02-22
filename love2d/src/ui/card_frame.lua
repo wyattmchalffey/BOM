@@ -120,7 +120,12 @@ local function ability_effect_text(ab)
     end
     return text
   elseif e == "place_counter" then
-    return (args.amount or 1) .. " " .. (args.counter or "?") .. " counters"
+    return "+" .. (args.amount or 1) .. " " .. (args.counter or "?") .. " counter"
+  elseif e == "remove_counter_draw" then
+    return "-" .. (args.remove or 1) .. " " .. (args.counter or "?") .. ": Draw " .. (args.draw or 1)
+  elseif e == "remove_counter_play" then
+    local sub = args.subtypes and table.concat(args.subtypes, "/") or "unit"
+    return "-" .. (args.remove or 1) .. " " .. (args.counter or "?") .. ": Play " .. sub
   elseif e == "heal" then
     return "Heal " .. (args.amount or 0)
   elseif e == "deal_damage" then
@@ -280,7 +285,12 @@ local function passive_ability_text(ab)
     if trigger == "end_of_turn" then prefix = "End of turn: "
     elseif trigger == "start_of_turn" then prefix = "Start of turn: "
     elseif trigger == "on_play" or trigger == "on_construct" then prefix = "On Play: "
-    elseif trigger == "on_ally_death" then prefix = "Ally death: "
+    elseif trigger == "on_ally_death" then
+      local cond = args.condition
+      if cond == "non_undead_orc" then prefix = "Non-Undead Orc death: "
+      elseif cond == "non_undead" then prefix = "Non-Undead ally death: "
+      else prefix = "Ally death: "
+      end
     elseif trigger == "on_attack" then prefix = "On attack: "
     elseif trigger == "on_mass_attack" then prefix = "Mass attack: "
     elseif trigger == "on_base_damage" then prefix = "Base dmg: "
@@ -835,6 +845,34 @@ function card_frame.draw(x, y, params)
       love.graphics.setColor(text_color)
       love.graphics.setFont(util.get_font(10))
       love.graphics.printf("HP " .. tostring(health), right_x, stat_y + stat_h/2 - 6, sw, "center")
+    end
+  end
+
+  -- Counter display
+  local counters = params.counters
+  if type(counters) == "table" then
+    local counter_colors = {
+      growth    = { bg = {0.15, 0.35, 0.12}, border = {0.45, 0.75, 0.35}, text = {0.85, 1.0, 0.8} },
+      knowledge = { bg = {0.12, 0.18, 0.35}, border = {0.35, 0.50, 0.85}, text = {0.8, 0.88, 1.0} },
+      wonder    = { bg = {0.35, 0.25, 0.12}, border = {0.85, 0.65, 0.25}, text = {1.0, 0.95, 0.75} },
+      honor     = { bg = {0.30, 0.12, 0.12}, border = {0.75, 0.35, 0.35}, text = {1.0, 0.85, 0.85} },
+    }
+    local default_color = { bg = {0.2, 0.2, 0.25}, border = {0.5, 0.5, 0.6}, text = {0.9, 0.9, 0.95} }
+    local cfont = util.get_font(9)
+    local counter_y = y + h - pad - 2
+    for name, count in pairs(counters) do
+      local colors = counter_colors[name] or default_color
+      local label = tostring(count) .. " " .. name:sub(1, 1):upper() .. name:sub(2)
+      local cw = math.min(art_w, cfont:getWidth(label) + 10)
+      local ch = 14
+      love.graphics.setColor(colors.bg[1], colors.bg[2], colors.bg[3], 0.92)
+      love.graphics.rectangle("fill", cx, counter_y, cw, ch, 3, 3)
+      love.graphics.setColor(colors.border[1], colors.border[2], colors.border[3], 0.9)
+      love.graphics.rectangle("line", cx, counter_y, cw, ch, 3, 3)
+      love.graphics.setColor(colors.text[1], colors.text[2], colors.text[3], 1.0)
+      love.graphics.setFont(cfont)
+      love.graphics.printf(label, cx, counter_y + 2, cw, "center")
+      counter_y = counter_y + ch + 2
     end
   end
 end

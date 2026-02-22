@@ -375,7 +375,7 @@ local function safe_card_def(card_id)
 end
 
 local function is_blueprint_entry(entry)
-  return entry and entry.kind == "Structure"
+  return entry and (entry.kind == "Structure" or entry.kind == "Artifact")
 end
 
 function MenuState:deckbuilder_visible_cards()

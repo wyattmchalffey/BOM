@@ -217,6 +217,51 @@ effect_handlers.buff_self = function(ability, player, g, context)
   end
 end
 
+effect_handlers.place_counter = function(ability, player, g, context)
+  local args = ability.effect_args or {}
+  local counter_name = args.counter
+  if type(counter_name) ~= "string" or counter_name == "" then return end
+  local source_entry = context and context.source_entry
+  if type(source_entry) ~= "table" then return end
+  source_entry.state = source_entry.state or {}
+  unit_stats.add_counter(source_entry.state, counter_name, args.amount or 1, args.duration == "end_of_turn")
+end
+
+effect_handlers.remove_counter_draw = function(ability, player, g, context)
+  local args = ability.effect_args or {}
+  local source_entry = context and context.source_entry
+  if type(source_entry) ~= "table" then return end
+  source_entry.state = source_entry.state or {}
+  if not unit_stats.remove_counter(source_entry.state, args.counter, args.remove or 1) then return end
+  for _ = 1, (args.draw or 1) do
+    if not player.deck or #player.deck == 0 then break end
+    player.hand[#player.hand + 1] = table.remove(player.deck)
+  end
+end
+
+effect_handlers.remove_counter_play = function(ability, player, g, context)
+  local args = ability.effect_args or {}
+  local source_entry = context and context.source_entry
+  if type(source_entry) ~= "table" then return end
+  source_entry.state = source_entry.state or {}
+  if not unit_stats.remove_counter(source_entry.state, args.counter, args.remove or 1) then return end
+  -- Play a matching unit from hand (reuses play_unit matching logic)
+  local play_args = {
+    subtypes = args.subtypes,
+    tier = args.tier,
+    faction = args.faction,
+  }
+  local indices = abilities.find_matching_hand_indices(player, play_args)
+  if #indices > 0 then
+    local card_id = player.hand[indices[1]]
+    table.remove(player.hand, indices[1])
+    player.board[#player.board + 1] = {
+      card_id = card_id,
+      state = { rested = false, summoned_turn = g and g.turnNumber or nil },
+    }
+  end
+end
+
 -- Return indices of hand cards matching a play_unit ability's criteria.
 function abilities.find_matching_hand_indices(player, effect_args)
   local args = effect_args or {}
@@ -251,7 +296,7 @@ function abilities.find_sacrifice_targets(player, effect_args)
   local indices = {}
   for si, entry in ipairs(player.board) do
     local ok, card_def = pcall(cards.get_card_def, entry.card_id)
-    if ok and card_def and card_def.kind ~= "Structure" then
+    if ok and card_def and card_def.kind ~= "Structure" and card_def.kind ~= "Artifact" then
       local excluded = false
       if args.condition == "non_undead" then
         if card_def.subtypes then
@@ -266,6 +311,22 @@ function abilities.find_sacrifice_targets(player, effect_args)
     end
   end
   return indices
+end
+
+-- Check if an ability's counter cost can be paid by the source entry.
+function abilities.can_pay_counter_cost(ability, source_entry)
+  if not ability or not source_entry then return true end
+  local effect = ability.effect
+  local args = ability.effect_args or {}
+  if effect == "remove_counter_draw" or effect == "remove_counter_play" then
+    local counter_name = args.counter
+    local remove_count = args.remove or 1
+    if counter_name and remove_count > 0 then
+      local st = source_entry.state or {}
+      return unit_stats.counter_count(st, counter_name) >= remove_count
+    end
+  end
+  return true
 end
 
 -- Resolve an ability's effect using the dispatch table.

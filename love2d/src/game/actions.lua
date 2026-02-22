@@ -41,9 +41,13 @@ local function fire_on_ally_death_triggers(player, game_state, dead_card_def)
           local blocked = false
           if args.condition == "non_undead" and is_undead(dead_card_def) then
             blocked = true
+          elseif args.condition == "non_undead_orc" then
+            if is_undead(dead_card_def) or (dead_card_def and dead_card_def.faction ~= "Orc") then
+              blocked = true
+            end
           end
           if not blocked then
-            abilities.resolve(ab, player, game_state)
+            abilities.resolve(ab, player, game_state, { source_entry = entry })
           end
         end
       end
@@ -675,7 +679,7 @@ function actions.build_structure(g, player_index, card_id)
   -- Validate card exists and is a Structure of the player's faction (or Neutral)
   local ok, card_def = pcall(cards.get_card_def, card_id)
   if not ok or not card_def then return false end
-  if card_def.kind ~= "Structure" then return false end
+  if card_def.kind ~= "Structure" and card_def.kind ~= "Artifact" then return false end
   if card_def.faction ~= p.faction and card_def.faction ~= "Neutral" then return false end
 
   -- Check resource node requirement (e.g. "wood" means player must have a Wood node)

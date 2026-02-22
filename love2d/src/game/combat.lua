@@ -75,9 +75,16 @@ local function fire_on_ally_death_triggers(player, g, dead_card_def)
       for _, ab in ipairs(card_def.abilities) do
         if ab.type == "triggered" and ab.trigger == "on_ally_death" then
           local args = ab.effect_args or {}
-          local blocked = args.condition == "non_undead" and is_undead(dead_card_def)
+          local blocked = false
+          if args.condition == "non_undead" and is_undead(dead_card_def) then
+            blocked = true
+          elseif args.condition == "non_undead_orc" then
+            if is_undead(dead_card_def) or (dead_card_def and dead_card_def.faction ~= "Orc") then
+              blocked = true
+            end
+          end
           if not blocked then
-            abilities.resolve(ab, player, g)
+            abilities.resolve(ab, player, g, { source_entry = entry })
           end
         end
       end
@@ -329,7 +336,7 @@ local function collect_attack_trigger_unit_targets(def_player)
   for i, entry in ipairs(def_player.board or {}) do
     local ok_def, def = pcall(cards.get_card_def, entry.card_id)
     -- Unit row only: units/workers on the battlefield front row.
-    if ok_def and def and def.kind ~= "Structure" then
+    if ok_def and def and def.kind ~= "Structure" and def.kind ~= "Artifact" then
       out[#out + 1] = i
     end
   end
@@ -341,7 +348,7 @@ local function is_valid_attack_trigger_target(def_player, board_index)
   local entry = def_player.board and def_player.board[board_index]
   if not entry then return false end
   local ok_def, def = pcall(cards.get_card_def, entry.card_id)
-  return ok_def and def and def.kind ~= "Structure"
+  return ok_def and def and def.kind ~= "Structure" and def.kind ~= "Artifact"
 end
 
 local function attacker_target_key(attacker_board_index, ability_index)
@@ -443,10 +450,10 @@ function combat.declare_attackers(g, player_index, declarations)
       if not target_entry then return false, "missing_target" end
       local tdef = cards.get_card_def(target_entry.card_id)
       if not tdef then return false, "missing_target" end
-      if tdef.kind ~= "Unit" and tdef.kind ~= "Worker" and tdef.kind ~= "Structure" then
+      if tdef.kind ~= "Unit" and tdef.kind ~= "Worker" and tdef.kind ~= "Structure" and tdef.kind ~= "Artifact" then
         return false, "invalid_target_kind"
       end
-      if tdef.kind == "Structure" and tdef.health == nil then
+      if (tdef.kind == "Structure" or tdef.kind == "Artifact") and tdef.health == nil then
         return false, "invalid_target_kind"
       end
       if (tdef.kind == "Unit" or tdef.kind == "Worker") and not can_target_unit(card_def, target_entry) then
