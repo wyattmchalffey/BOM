@@ -50,7 +50,7 @@ local function blueprint_cards_for_player(player, faction)
   local out = {}
   for _, card_id in ipairs(order) do
     local ok, def = pcall(cards.get_card_def, card_id)
-    if ok and def and def.faction == faction and def.kind == "Structure" then
+    if ok and def and (def.faction == faction or def.faction == "Neutral") and def.kind == "Structure" then
       out[#out + 1] = def
     end
   end
