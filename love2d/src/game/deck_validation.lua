@@ -8,7 +8,7 @@ local cards = require("src.game.cards")
 local deck_validation = {}
 
 local function is_pool_card(def, faction)
-  if not def or def.faction ~= faction then
+  if not def or (def.faction ~= faction and def.faction ~= "Neutral") then
     return false
   end
   -- Bases are selected separately; all other faction cards are deckbuilder-eligible.

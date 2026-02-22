@@ -68,13 +68,13 @@ function state.build_deck(faction, explicit_deck)
     for i = 1, #explicit_deck do
       local card_id = explicit_deck[i]
       local ok, def = pcall(cards.get_card_def, card_id)
-      if ok and def and def.faction == faction and is_main_deck_card(def) then
+      if ok and def and (def.faction == faction or def.faction == "Neutral") and is_main_deck_card(def) then
         deck[#deck + 1] = card_id
       end
     end
   else
     for _, def in ipairs(cards.CARD_DEFS) do
-      if def.faction == faction and is_main_deck_card(def) then
+      if (def.faction == faction or def.faction == "Neutral") and is_main_deck_card(def) then
         local copies = def.population or 1
         for _ = 1, copies do
           deck[#deck + 1] = def.id
@@ -94,7 +94,7 @@ function state.build_blueprint_deck(faction, explicit_deck)
     for i = 1, #explicit_deck do
       local card_id = explicit_deck[i]
       local ok, def = pcall(cards.get_card_def, card_id)
-      if ok and def and def.faction == faction and is_blueprint_card(def) then
+      if ok and def and (def.faction == faction or def.faction == "Neutral") and is_blueprint_card(def) then
         deck[#deck + 1] = card_id
       end
     end
@@ -102,7 +102,7 @@ function state.build_blueprint_deck(faction, explicit_deck)
   end
 
   for _, def in ipairs(cards.CARD_DEFS) do
-    if def.faction == faction and is_blueprint_card(def) then
+    if (def.faction == faction or def.faction == "Neutral") and is_blueprint_card(def) then
       local copies = def.population or 1
       for _ = 1, copies do
         deck[#deck + 1] = def.id
