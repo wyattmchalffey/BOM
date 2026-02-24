@@ -390,7 +390,8 @@ function MenuState:deckbuilder_visible_cards()
   return visible
 end
 
-function MenuState:deckbuilder_selector_layout(card_count)
+function MenuState:deckbuilder_selector_layout(visible_cards)
+  local card_count = type(visible_cards) == "number" and visible_cards or #visible_cards
   local gw, gh = love.graphics.getDimensions()
   local list_x = DECK_LIST_X_PAD
   local list_w = gw - DECK_LIST_X_PAD * 2
@@ -402,11 +403,35 @@ function MenuState:deckbuilder_selector_layout(card_count)
   local grid_w = cols * DECK_SELECTOR_CARD_W + (cols - 1) * DECK_SELECTOR_COL_GAP
   local grid_x = list_x + math.floor((list_w - grid_w) / 2)
 
-  local rows = math.ceil((card_count or 0) / cols)
-  local total_h = 0
-  if rows > 0 then
-    total_h = rows * DECK_SELECTOR_CELL_H + (rows - 1) * DECK_SELECTOR_ROW_GAP
+  -- Compute per-row max card heights from actual card content
+  local rows = math.ceil(card_count / cols)
+  local row_heights = {}
+  for r = 0, rows - 1 do
+    local max_h = DECK_SELECTOR_CARD_H
+    for c = 0, cols - 1 do
+      local idx = r * cols + c + 1
+      if type(visible_cards) == "table" and idx <= #visible_cards then
+        local entry = visible_cards[idx]
+        local def = safe_card_def(entry.card_id)
+        if def then
+          local needed = card_frame.measure_full_height({
+            w = DECK_SELECTOR_CARD_W, faction = def.faction,
+            upkeep = def.upkeep, abilities_list = def.abilities, text = def.text,
+          })
+          if needed > max_h then max_h = needed end
+        end
+      end
+    end
+    row_heights[r + 1] = max_h
   end
+
+  -- Total height using per-row sizes
+  local total_h = 0
+  for r = 1, rows do
+    total_h = total_h + row_heights[r] + DECK_SELECTOR_COUNT_Y_GAP + DECK_SELECTOR_COUNT_H
+    if r < rows then total_h = total_h + DECK_SELECTOR_ROW_GAP end
+  end
+
   local max_scroll = math.max(0, total_h - list_h)
   self.deckbuilder_scroll = math.max(0, math.min(self.deckbuilder_scroll or 0, max_scroll))
 
@@ -420,18 +445,31 @@ function MenuState:deckbuilder_selector_layout(card_count)
     grid_x = grid_x,
     total_h = total_h,
     max_scroll = max_scroll,
+    row_heights = row_heights,
   }
 end
 
 function MenuState:deckbuilder_selector_items(visible_cards)
-  local layout = self:deckbuilder_selector_layout(#visible_cards)
+  local layout = self:deckbuilder_selector_layout(visible_cards)
   local items = {}
+
+  -- Compute cumulative y offsets per row
+  local row_y = {}
+  local cum_y = 0
+  for r = 1, #layout.row_heights do
+    row_y[r] = cum_y
+    local cell_h = layout.row_heights[r] + DECK_SELECTOR_COUNT_Y_GAP + DECK_SELECTOR_COUNT_H
+    cum_y = cum_y + cell_h + DECK_SELECTOR_ROW_GAP
+  end
+
   for i, entry in ipairs(visible_cards) do
     local col = (i - 1) % layout.cols
-    local row = math.floor((i - 1) / layout.cols)
+    local row = math.floor((i - 1) / layout.cols) + 1  -- 1-indexed
+    local card_h = layout.row_heights[row] or DECK_SELECTOR_CARD_H
     local card_x = layout.grid_x + col * (DECK_SELECTOR_CARD_W + DECK_SELECTOR_COL_GAP)
-    local card_y = layout.list_top + row * (DECK_SELECTOR_CELL_H + DECK_SELECTOR_ROW_GAP) - self.deckbuilder_scroll
-    local controls_y = card_y + DECK_SELECTOR_CARD_H + DECK_SELECTOR_COUNT_Y_GAP
+    local card_y = layout.list_top + row_y[row] - self.deckbuilder_scroll
+    local cell_h = card_h + DECK_SELECTOR_COUNT_Y_GAP + DECK_SELECTOR_COUNT_H
+    local controls_y = card_y + card_h + DECK_SELECTOR_COUNT_Y_GAP
     local btn_y = controls_y + math.floor((DECK_SELECTOR_COUNT_H - DECK_SELECTOR_BTN_H) / 2)
     local minus_r = { x = card_x + 12, y = btn_y, w = DECK_SELECTOR_BTN_W, h = DECK_SELECTOR_BTN_H }
     local plus_r = { x = card_x + DECK_SELECTOR_CARD_W - 12 - DECK_SELECTOR_BTN_W, y = btn_y, w = DECK_SELECTOR_BTN_W, h = DECK_SELECTOR_BTN_H }
@@ -444,8 +482,8 @@ function MenuState:deckbuilder_selector_items(visible_cards)
     items[#items + 1] = {
       index = i,
       entry = entry,
-      card_r = { x = card_x, y = card_y, w = DECK_SELECTOR_CARD_W, h = DECK_SELECTOR_CARD_H },
-      cell_r = { x = card_x, y = card_y, w = DECK_SELECTOR_CARD_W, h = DECK_SELECTOR_CELL_H },
+      card_r = { x = card_x, y = card_y, w = DECK_SELECTOR_CARD_W, h = card_h },
+      cell_r = { x = card_x, y = card_y, w = DECK_SELECTOR_CARD_W, h = cell_h },
       minus_r = minus_r,
       plus_r = plus_r,
       count_r = count_r,
@@ -662,12 +700,12 @@ function MenuState:draw_deckbuilder()
           title = def.name or entry.name,
           faction = def.faction,
           kind = def.kind,
-          typeLine = (def.faction or "") .. " - " .. (def.kind or ""),
+          subtypes = def.subtypes or {},
           text = def.text,
           costs = def.costs,
           upkeep = def.upkeep,
           attack = def.attack,
-          health = def.health,
+          health = def.health or def.baseHealth,
           tier = def.tier,
           abilities_list = def.abilities,
           show_ability_text = true,
@@ -1483,7 +1521,7 @@ function MenuState:wheelmoved(x, y)
     if self.browse_scroll < 0 then self.browse_scroll = 0 end
   elseif self.screen == "deckbuilder" then
     local visible_cards = self:deckbuilder_visible_cards()
-    local selector_layout = self:deckbuilder_selector_layout(#visible_cards)
+    local selector_layout = self:deckbuilder_selector_layout(visible_cards)
     local max_scroll = selector_layout.max_scroll
     self.deckbuilder_scroll = (self.deckbuilder_scroll or 0) - y * 30
     if self.deckbuilder_scroll < 0 then self.deckbuilder_scroll = 0 end

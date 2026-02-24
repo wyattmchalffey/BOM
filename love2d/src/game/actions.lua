@@ -531,21 +531,34 @@ function actions.activate_ability(g, player_index, card_def, source_key, ability
   end
   if not ability or ability.type ~= "activated" then return false, "invalid_ability" end
 
+  -- Resolve source_entry early so rest cost can be checked.
+  local source_entry = nil
+  if type(source) == "table" and source.type == "board" and type(source.index) == "number" then
+    source_entry = p.board[source.index]
+  end
+
   local key = tostring(player_index) .. ":" .. source_key
   if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
   if not abilities.can_pay_cost(p.resources, ability.cost) then return false, "insufficient_resources" end
 
-  -- Pay cost
+  -- Check rest cost
+  if ability.rest and source_entry and source_entry.state and source_entry.state.rested then
+    return false, "unit_is_rested"
+  end
+
+  -- Pay resource costs
   for _, c in ipairs(ability.cost or {}) do
     p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
   end
   g.activatedUsedThisTurn[key] = true
 
-  -- Resolve effect
-  local source_entry = nil
-  if type(source) == "table" and source.type == "board" and type(source.index) == "number" then
-    source_entry = p.board[source.index]
+  -- Pay rest cost
+  if ability.rest and source_entry then
+    source_entry.state = source_entry.state or {}
+    source_entry.state.rested = true
   end
+
+  -- Resolve effect
   abilities.resolve(ability, p, g, {
     source = source,
     source_entry = source_entry,
@@ -1073,6 +1086,27 @@ function actions.unassign_special_worker(g, player_index, sw_index)
     end
   end
   sw.assigned_to = nil
+  return true
+end
+
+-- Apply ability damage to a unit. Kills it if lethal. Works on any player's board.
+function actions.apply_damage_to_unit(g, target_player_index, board_index, damage_amount)
+  local p = g.players[target_player_index + 1]
+  if not p then return false end
+  local entry = p.board[board_index]
+  if not entry then return false end
+  local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+  if not ok or not card_def then return false end
+
+  entry.state = entry.state or {}
+  entry.state.damage = (entry.state.damage or 0) + damage_amount
+
+  if card_def.health ~= nil then
+    local effective_hp = unit_stats.effective_health(card_def, entry.state)
+    if effective_hp - (entry.state.damage or 0) <= 0 then
+      destroy_board_entry(p, g, board_index)
+    end
+  end
   return true
 end
 

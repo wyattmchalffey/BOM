@@ -269,8 +269,19 @@ function viewer.draw()
   local gx, gy, gw_area, gh_area = grid_area()
   local visible = get_visible_cards()
   local cols = math.max(1, math.floor((gw_area + GRID_PAD) / (CARD_W + GRID_PAD)))
+
+  -- Compute the max card height needed among visible cards so the grid is uniform
+  local dyn_card_h = CARD_H
+  for _, def in ipairs(visible) do
+    local needed = card_frame.measure_full_height({
+      w = CARD_W, faction = def.faction, upkeep = def.upkeep,
+      abilities_list = def.abilities, text = def.text,
+    })
+    if needed > dyn_card_h then dyn_card_h = needed end
+  end
+
   local rows = math.ceil(#visible / cols)
-  local content_h = rows * (CARD_H + GRID_PAD) - GRID_PAD
+  local content_h = rows * (dyn_card_h + GRID_PAD) - GRID_PAD
   local max_scroll = math.max(0, content_h - gh_area)
   _scroll_y = math.max(0, math.min(_scroll_y, max_scroll))
 
@@ -284,26 +295,35 @@ function viewer.draw()
     local col = (idx - 1) % cols
     local row = math.floor((idx - 1) / cols)
     local card_x = gx + col * (CARD_W + GRID_PAD)
-    local card_y = gy + row * (CARD_H + GRID_PAD) - _scroll_y
+    local card_y = gy + row * (dyn_card_h + GRID_PAD) - _scroll_y
+
+    -- Compute this card's actual height
+    local card_h = card_frame.measure_full_height({
+      w = CARD_W, faction = def.faction, upkeep = def.upkeep,
+      abilities_list = def.abilities, text = def.text,
+    })
 
     -- Skip cards entirely off-screen
-    if card_y + CARD_H >= gy and card_y <= gy + gh_area then
-      -- Store rect for hit testing
+    if card_y + dyn_card_h >= gy and card_y <= gy + gh_area then
+      -- Store rect for hit testing (use actual card height)
       _card_rects[#_card_rects + 1] = {
         def = def,
         x = card_x, y = card_y,
-        w = CARD_W, h = CARD_H,
+        w = CARD_W, h = card_h,
       }
 
-      -- Draw the card
       card_frame.draw(card_x, card_y, {
+        w = CARD_W,
+        h = card_h,
         title = def.name,
         faction = def.faction,
         kind = def.kind,
-        typeLine = (def.faction or "") .. " — " .. (def.kind or ""),
+        subtypes = def.subtypes or {},
         text = def.text,
         costs = def.costs,
         upkeep = def.upkeep,
+        attack = def.attack,
+        health = def.health or def.baseHealth,
         tier = def.tier,
         abilities_list = def.abilities,
         show_ability_text = true,
@@ -311,16 +331,16 @@ function viewer.draw()
 
       -- Card overlay (caller-provided: dim, badges, highlights)
       if _config.card_overlay_fn then
-        _config.card_overlay_fn(def, card_x, card_y, CARD_W, CARD_H)
+        _config.card_overlay_fn(def, card_x, card_y, CARD_W, card_h)
       end
 
       -- Hover highlight for clickable cards
       if _config.can_click_fn and _config.can_click_fn(def) then
-        local card_hov = util.point_in_rect(mx, my, card_x, card_y, CARD_W, CARD_H)
+        local card_hov = util.point_in_rect(mx, my, card_x, card_y, CARD_W, card_h)
         if card_hov then
           love.graphics.setColor(0.2, 0.8, 0.4, 0.45)
           love.graphics.setLineWidth(3)
-          love.graphics.rectangle("line", card_x - 2, card_y - 2, CARD_W + 4, CARD_H + 4, 7, 7)
+          love.graphics.rectangle("line", card_x - 2, card_y - 2, CARD_W + 4, card_h + 4, 7, 7)
           love.graphics.setLineWidth(1)
         end
       end
@@ -352,6 +372,28 @@ function viewer.draw()
   love.graphics.setColor(0.45, 0.47, 0.55, 0.8)
   love.graphics.setFont(util.get_font(10))
   love.graphics.print(#visible .. " / " .. #_config.cards .. " cards", _box.x + PAD, _box.y + _box.h - 20)
+
+  -- Optional confirm button (used for selection modes like graveyard targeting)
+  if _config.confirm_label then
+    local btn_w = 140
+    local btn_h = CLOSE_BTN_H - 2
+    local btn_x = _box.x + _box.w - PAD - btn_w
+    local btn_y = _box.y + _box.h - btn_h - 8
+    local enabled = not _config.confirm_enabled_fn or _config.confirm_enabled_fn()
+    local btn_hov = enabled and util.point_in_rect(mx, my, btn_x, btn_y, btn_w, btn_h)
+    love.graphics.setColor(
+      enabled and (btn_hov and 0.25 or 0.15) or 0.08,
+      enabled and (btn_hov and 0.55 or 0.42) or 0.12,
+      enabled and (btn_hov and 0.25 or 0.15) or 0.08,
+      enabled and 1 or 0.4
+    )
+    love.graphics.rectangle("fill", btn_x, btn_y, btn_w, btn_h, 5, 5)
+    love.graphics.setColor(enabled and 0.3 or 0.15, enabled and 0.75 or 0.25, enabled and 0.3 or 0.15, enabled and 0.85 or 0.3)
+    love.graphics.rectangle("line", btn_x, btn_y, btn_w, btn_h, 5, 5)
+    love.graphics.setColor(1, 1, 1, enabled and 1 or 0.3)
+    love.graphics.setFont(util.get_font(12))
+    love.graphics.printf(_config.confirm_label, btn_x, btn_y + 6, btn_w, "center")
+  end
 end
 
 --------------------------------------------------------------------------
@@ -414,6 +456,19 @@ function viewer.mousepressed(x, y, button)
         end
         return true
       end
+    end
+  end
+
+  -- Confirm button
+  if _config.confirm_label and _config.confirm_fn then
+    local btn_w = 140
+    local btn_h = CLOSE_BTN_H - 2
+    local btn_x = _box.x + _box.w - PAD - btn_w
+    local btn_y = _box.y + _box.h - btn_h - 8
+    local enabled = not _config.confirm_enabled_fn or _config.confirm_enabled_fn()
+    if enabled and util.point_in_rect(x, y, btn_x, btn_y, btn_w, btn_h) then
+      _config.confirm_fn()
+      return true
     end
   end
 

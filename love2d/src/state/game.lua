@@ -67,7 +67,14 @@ function GameState.new(opts)
     pending_sacrifice = nil,      -- { source, ability_index, effect_args, eligible_board_indices }
     pending_hand_sacrifice = nil, -- { hand_index, required_count, selected_targets }
     pending_monument = nil,        -- { hand_index, min_counters, eligible_indices }
+    pending_graveyard_return = nil, -- { source, ability_index, max_count, effect_args, selected_graveyard_indices }
+    pending_discard_draw = nil,     -- { source, ability_index, required_count, draw_count, selected_set }
     pending_upgrade = nil, -- { source, ability_index, stage, sacrifice_target, eligible_hand_indices, eligible_board_indices, eligible_worker_sacrifice }
+    pending_counter_placement = nil, -- { source, ability_index, eligible_board_indices }
+    pending_damage_target = nil,     -- { source, ability_index, effect_args, eligible_player_index, eligible_board_indices }
+    pending_damage_x = nil,          -- { source, ability_index, effect_args, eligible_player_index, eligible_board_indices, x_amount, max_x }
+    pending_spell_target = nil,      -- { hand_index, effect_args, eligible_player_index, eligible_board_indices, monument_board_index?, via_ability_source?, via_ability_ability_index? }
+    pending_play_spell = nil,        -- { source, ability_index, cost, effect_args, eligible_indices }
     hand_y_offsets = {},          -- per-card animated y offset (negative = raised)
     command_log = replay.new_log({
       command_schema_version = commands.SCHEMA_VERSION,
@@ -289,6 +296,50 @@ local function graveyard_cards_for_player(player)
   return out
 end
 
+-- Build the graveyard card list for selection mode (newest-first, includes graveyard_index metadata).
+-- Only includes cards matching the return_from_graveyard effect_args filter.
+local function graveyard_cards_for_selection(player, effect_args)
+  local args = effect_args or {}
+  local req_tier = args.tier
+  local req_subtypes = args.subtypes
+  local out = {}
+  if not player or type(player.graveyard) ~= "table" then return out end
+
+  for i = #player.graveyard, 1, -1 do
+    local entry = player.graveyard[i]
+    local card_id = (type(entry) == "table") and entry.card_id or entry
+    if type(card_id) == "string" and card_id ~= "" then
+      local ok_def, def = pcall(cards.get_card_def, card_id)
+      if ok_def and def then
+        local eligible = true
+        if req_tier ~= nil and (def.tier or 0) ~= req_tier then eligible = false end
+        if eligible and args.target == "unit" and def.kind ~= "Unit" and def.kind ~= "Worker" then eligible = false end
+        if eligible and req_subtypes and #req_subtypes > 0 then
+          if not def.subtypes then
+            eligible = false
+          else
+            local found = false
+            for _, req in ipairs(req_subtypes) do
+              for _, got in ipairs(def.subtypes) do
+                if req == got then found = true; break end
+              end
+              if found then break end
+            end
+            if not found then eligible = false end
+          end
+        end
+        -- Shallow-copy the def and attach graveyard_index so on_click can identify it
+        local entry_def = {}
+        for k, v in pairs(def) do entry_def[k] = v end
+        entry_def.graveyard_index = i
+        entry_def.graveyard_eligible = eligible
+        out[#out + 1] = entry_def
+      end
+    end
+  end
+  return out
+end
+
 function GameState:open_graveyard_view(player_index)
   local player = self.game_state.players[player_index + 1]
   if not player then
@@ -333,6 +384,13 @@ function GameState:_sync_terminal_state()
   self.pending_upgrade = nil
   self.pending_hand_sacrifice = nil
   self.pending_monument = nil
+  self.pending_graveyard_return = nil
+  self.pending_counter_placement = nil
+  self.pending_damage_target = nil
+  self.pending_damage_x = nil
+  self.pending_spell_target = nil
+  self.pending_play_spell = nil
+  self.pending_discard_draw = nil
   self:_clear_pending_attack_declarations()
   self.pending_attack_trigger_targets = {}
   self.pending_block_assignments = {}
@@ -1234,6 +1292,78 @@ function GameState:_draw_pending_monument_overlay()
   self:_draw_top_combat_prompt(prompt_text, { 0.6, 0.5, 0.1, 0.85 }, { 0.98, 0.92, 0.6, 1.0 })
 end
 
+function GameState:_draw_pending_damage_x_overlay()
+  local pending = self.pending_damage_x
+  if not pending then return end
+
+  local gw = love.graphics.getWidth()
+  local btn_w, btn_h = 24, 22
+  local prompt_font = util.get_font(14)
+  local label_text = "X Stone -> Deal " .. pending.x_amount .. " damage  (max: " .. pending.max_x .. ")"
+  local label_w = prompt_font:getWidth(label_text)
+  local total_w = btn_w + 8 + label_w + 8 + btn_w + 28
+  local total_h = btn_h + 12
+  local rx = (gw - total_w) / 2
+  local ry = 8
+
+  love.graphics.setColor(0.07, 0.08, 0.12, 0.9)
+  love.graphics.rectangle("fill", rx, ry, total_w, total_h, 7, 7)
+  love.graphics.setColor(0.95, 0.35, 0.2, 0.75)
+  love.graphics.rectangle("line", rx, ry, total_w, total_h, 7, 7)
+
+  local minus_x = rx + 6
+  local minus_y = ry + (total_h - btn_h) / 2
+  love.graphics.setColor(0.25, 0.25, 0.3, 0.9)
+  love.graphics.rectangle("fill", minus_x, minus_y, btn_w, btn_h, 4, 4)
+  love.graphics.setColor(0.85, 0.85, 0.95, 1.0)
+  love.graphics.setFont(prompt_font)
+  love.graphics.printf("-", minus_x, minus_y + 3, btn_w, "center")
+
+  local label_x = minus_x + btn_w + 8
+  love.graphics.setColor(0.98, 0.85, 0.7, 1.0)
+  love.graphics.printf(label_text, label_x, ry + (total_h - prompt_font:getHeight()) / 2, label_w + 4, "left")
+
+  local plus_x = label_x + label_w + 8
+  love.graphics.setColor(0.25, 0.25, 0.3, 0.9)
+  love.graphics.rectangle("fill", plus_x, minus_y, btn_w, btn_h, 4, 4)
+  love.graphics.setColor(0.85, 0.85, 0.95, 1.0)
+  love.graphics.printf("+", plus_x, minus_y + 3, btn_w, "center")
+
+  -- Store button rects for click detection in mousepressed
+  pending.minus_btn = { x = minus_x, y = minus_y, w = btn_w, h = btn_h }
+  pending.plus_btn  = { x = plus_x,  y = minus_y, w = btn_w, h = btn_h }
+end
+
+function GameState:_draw_pending_discard_draw_overlay()
+  local pending = self.pending_discard_draw
+  if not pending then return end
+  local selected_count = 0
+  for _ in pairs(pending.selected_set) do selected_count = selected_count + 1 end
+  local remaining = pending.required_count - selected_count
+  local msg
+  if remaining > 0 then
+    msg = "Select " .. remaining .. " card" .. (remaining == 1 and "" or "s") .. " to discard"
+  else
+    msg = "Discarding..."
+  end
+  self:_draw_top_combat_prompt(msg, { 0.9, 0.45, 0.1, 0.85 }, { 1.0, 0.85, 0.6, 1.0 })
+end
+
+function GameState:_draw_pending_spell_target_prompt()
+  local pending = self.pending_spell_target
+  if not pending then return end
+  local p = self.game_state and self.game_state.players[self.local_player_index + 1]
+  local spell_name = "Spell"
+  if p and p.hand and pending.hand_index then
+    local cid = p.hand[pending.hand_index]
+    if cid then
+      local ok_d, cdef = pcall(cards.get_card_def, cid)
+      if ok_d and cdef and cdef.name then spell_name = cdef.name end
+    end
+  end
+  self:_draw_top_combat_prompt(spell_name .. ": select a target", { 0.7, 0.4, 0.9, 0.85 }, { 0.9, 0.8, 1.0, 1.0 })
+end
+
 function GameState:draw()
   shake.apply()
 
@@ -1253,13 +1383,19 @@ function GameState:draw()
     hover_index = self.hand_hover_index,
     selected_index = self.hand_selected_index,
     y_offsets = self.hand_y_offsets,
-    eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or (pending_upgrade_hand and pending_upgrade_hand.eligible_hand_indices) or nil,
+    eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or (pending_upgrade_hand and pending_upgrade_hand.eligible_hand_indices) or (self.pending_play_spell and self.pending_play_spell.eligible_indices) or nil,
     sacrifice_eligible_indices = (self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices) or (pending_upgrade_sacrifice and pending_upgrade_sacrifice.eligible_board_indices) or (self.pending_hand_sacrifice and {}) or nil,
     sacrifice_allow_workers = sacrifice_allow_workers,
     monument_eligible_indices = self.pending_monument and self.pending_monument.eligible_indices or nil,
+    counter_target_eligible_indices = self.pending_counter_placement and self.pending_counter_placement.eligible_board_indices or nil,
+    damage_target_eligible_player_index = (self.pending_damage_target and self.pending_damage_target.eligible_player_index) or (self.pending_damage_x and self.pending_damage_x.eligible_player_index) or (self.pending_spell_target and self.pending_spell_target.eligible_player_index) or nil,
+    damage_target_eligible_indices = (self.pending_damage_target and self.pending_damage_target.eligible_board_indices) or (self.pending_damage_x and self.pending_damage_x.eligible_board_indices) or (self.pending_spell_target and self.pending_spell_target.eligible_board_indices) or nil,
+    damage_target_board_indices_by_player = self.pending_damage_target and self.pending_damage_target.eligible_board_indices_by_player or nil,
+    damage_target_base_player_indices = self.pending_damage_target and self.pending_damage_target.eligible_base_player_indices or nil,
     pending_attack_declarations = self.pending_attack_declarations,
     pending_block_assignments = self.pending_block_assignments,
     pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+    discard_selected_set = self.pending_discard_draw and self.pending_discard_draw.selected_set or nil,
   }
   board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
   self:_draw_attack_declaration_arrows()
@@ -1267,6 +1403,9 @@ function GameState:draw()
   self:_draw_combat_priority_overlay()
   self:_draw_pending_hand_sacrifice_overlay()
   self:_draw_pending_monument_overlay()
+  self:_draw_pending_damage_x_overlay()
+  self:_draw_pending_spell_target_prompt()
+  self:_draw_pending_discard_draw_overlay()
 
   -- Ambient particles (drawn on top of panels but below UI overlays)
   local active_player = self.game_state.players[self.game_state.activePlayer + 1]
@@ -1340,7 +1479,7 @@ function GameState:draw()
         local ok, def = pcall(cards.get_card_def, entry.card_id)
         if ok and def then
           local preview_attack = def.attack
-          local preview_health = def.health
+          local preview_health = def.health or def.baseHealth
           if si ~= 0 and (def.kind == "Unit" or def.kind == "Worker") then
             local est = entry.state or {}
             preview_attack = unit_stats.effective_attack(def, est)
@@ -1349,14 +1488,17 @@ function GameState:draw()
           local mx, my = love.mouse.getPosition()
           local gw, gh = love.graphics.getDimensions()
           -- Enlarged preview with ability text
-          local tw, th = 200, 280
-          local n_activated = 0
-          if def.abilities then
-            for _, ab in ipairs(def.abilities) do
-              if ab.type == "activated" then n_activated = n_activated + 1 end
-            end
-          end
-          if n_activated > 0 then th = th + n_activated * 12 end
+          local aspect = card_frame.FULL_CARD_ASPECT_H_OVER_W or (3.5 / 2.5)
+          local max_tw = math.max(80, gw - 20)
+          local max_th = math.max(120, gh - 20)
+          local tw = math.max(80, math.min(200, max_tw, math.floor(max_th / aspect + 0.5)))
+          local th = card_frame.measure_full_height({
+            w = tw,
+            faction = def.faction,
+            upkeep = def.upkeep,
+            abilities_list = def.abilities,
+            text = def.text,
+          })
 
           local tx = mx + 16
           local ty = my - th / 2
@@ -1372,7 +1514,15 @@ function GameState:draw()
                 local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
                 local used = self.game_state.activatedUsedThisTurn and self.game_state.activatedUsedThisTurn[key]
                 used_abs[ai] = used or false
-                can_act_abs[ai] = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and pi == self.game_state.activePlayer
+                local board_entry = player.board[si]
+                local _cbt_tt = self.game_state.pendingCombat
+                local _in_blk_tt = _cbt_tt and _cbt_tt.stage == "DECLARED"
+                  and (pi == _cbt_tt.attacker or pi == _cbt_tt.defender)
+                can_act_abs[ai] = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost)
+                  and (pi == self.game_state.activePlayer or (ab.fast and _in_blk_tt))
+                  and (not ab.rest or not (board_entry and board_entry.state and board_entry.state.rested))
+                  and (ab.effect ~= "deal_damage_x" or (player.resources[(ab.effect_args and ab.effect_args.resource) or "stone"] or 0) >= 1)
+                  and (ab.effect ~= "discard_draw" or #player.hand >= (ab.effect_args and ab.effect_args.discard or 2))
               end
             end
           end
@@ -1389,7 +1539,7 @@ function GameState:draw()
             title = def.name,
             faction = def.faction,
             kind = def.kind,
-            typeLine = def.faction .. " — " .. def.kind,
+            subtypes = def.subtypes or {},
             text = def.text,
             costs = def.costs,
             upkeep = def.upkeep,
@@ -1425,7 +1575,14 @@ function GameState:draw()
         if def then
           local mx, my = love.mouse.getPosition()
           local gw, gh = love.graphics.getDimensions()
-          local tw, th = 200, 280
+          local aspect = card_frame.FULL_CARD_ASPECT_H_OVER_W or (3.5 / 2.5)
+          local max_tw = math.max(80, gw - 20)
+          local max_th = math.max(120, gh - 20)
+          local tw = math.max(80, math.min(200, max_tw, math.floor(max_th / aspect + 0.5)))
+          local th = card_frame.measure_full_height({
+            w = tw, faction = def.faction, upkeep = def.upkeep,
+            abilities_list = def.abilities, text = def.text,
+          })
           local tx = mx + 16
           local ty = my - th / 2
           if tx + tw > gw - 10 then tx = mx - tw - 16 end
@@ -1443,14 +1600,12 @@ function GameState:draw()
             title = def.name,
             faction = def.faction,
             kind = def.kind,
-            typeLine = (def.subtypes and #def.subtypes > 0)
-              and (def.faction .. " — " .. table.concat(def.subtypes, ", "))
-              or (def.faction .. " — " .. def.kind),
+            subtypes = def.subtypes or {},
             text = def.text,
             costs = def.costs,
             upkeep = def.upkeep,
             attack = def.attack,
-            health = def.health,
+            health = def.health or def.baseHealth,
             tier = def.tier,
             abilities_list = def.abilities,
             show_ability_text = true,
@@ -1473,7 +1628,14 @@ function GameState:draw()
         if ok and def then
           local mx, my = love.mouse.getPosition()
           local gw, gh = love.graphics.getDimensions()
-          local tw, th = 200, 280
+          local aspect = card_frame.FULL_CARD_ASPECT_H_OVER_W or (3.5 / 2.5)
+          local max_tw = math.max(80, gw - 20)
+          local max_th = math.max(120, gh - 20)
+          local tw = math.max(80, math.min(200, max_tw, math.floor(max_th / aspect + 0.5)))
+          local th = card_frame.measure_full_height({
+            w = tw, faction = def.faction, upkeep = def.upkeep,
+            abilities_list = def.abilities, text = def.text,
+          })
           local tx = mx + 16
           local ty = my - th / 2
           if tx + tw > gw - 10 then tx = mx - tw - 16 end
@@ -1491,14 +1653,12 @@ function GameState:draw()
             title = def.name,
             faction = def.faction,
             kind = def.kind,
-            typeLine = (def.subtypes and #def.subtypes > 0)
-              and (def.faction .. " — " .. table.concat(def.subtypes, ", "))
-              or (def.faction .. " — " .. def.kind),
+            subtypes = def.subtypes or {},
             text = def.text,
             costs = def.costs,
             upkeep = def.upkeep,
             attack = def.attack,
-            health = def.health,
+            health = def.health or def.baseHealth,
             tier = def.tier,
             abilities_list = def.abilities,
             show_ability_text = true,
@@ -1508,7 +1668,7 @@ function GameState:draw()
       end
     end
 
-    -- Ability button tooltip (compact: effect description + cost + once-per-turn note)
+    -- Ability button tooltip (full text panel for activated abilities)
     if self.hover and (self.hover.kind == "ability_hover" or self.hover.kind == "activate_ability")
        and type(self.hover.idx) == "table" and self.tooltip_timer >= 0.3 then
       local pi = self.hover.pi
@@ -1533,47 +1693,152 @@ function GameState:draw()
       if ab then
         local mx, my = love.mouse.getPosition()
         local gw, gh = love.graphics.getDimensions()
-        local effect_text = card_frame.ability_effect_text(ab)
+        local body_text = tostring(ab.text or card_frame.ability_effect_text(ab) or "")
+        local header_text = (ab.label and tostring(ab.label) ~= "" and tostring(ab.label)) or "Activated Ability"
+        local can_activate_now = (self.hover.kind == "activate_ability")
+        local status_text = can_activate_now and "Usable Now" or "Not Usable"
+
+        local function title_case_resource(key)
+          key = tostring(key or "?")
+          if key == "" then return "?" end
+          return key:sub(1, 1):upper() .. key:sub(2)
+        end
+
         local cost_parts = {}
         for _, c in ipairs(ab.cost or {}) do
-          local rdef = res_registry[c.type]
-          local letter = rdef and rdef.letter or "?"
-          cost_parts[#cost_parts + 1] = c.amount .. letter
+          cost_parts[#cost_parts + 1] = tostring(c.amount or 0) .. " " .. title_case_resource(c.type)
         end
-        local cost_str = #cost_parts > 0 and ("Cost: " .. table.concat(cost_parts, " + ")) or "Free"
-        local lines = { effect_text, cost_str }
-        if ab.once_per_turn then
-          lines[#lines + 1] = "Once per turn"
+        local cost_text = (#cost_parts > 0) and ("Cost: " .. table.concat(cost_parts, " + ")) or "Cost: Free"
+
+        local detail_parts = {}
+        if ab.fast then detail_parts[#detail_parts + 1] = "Fast" end
+        if ab.once_per_turn then detail_parts[#detail_parts + 1] = "Once per turn" end
+        if ab.rest then detail_parts[#detail_parts + 1] = "Requires ready unit" end
+        local detail_text = (#detail_parts > 0) and table.concat(detail_parts, "  |  ") or nil
+
+        local header_font = util.get_title_font(12)
+        local body_font = util.get_font(11)
+        local meta_font = util.get_font(9)
+        local chip_font = util.get_font(8)
+
+        local pad_x, pad_y = 12, 10
+        local inner_w = math.max(200, math.min(340, gw - 36) - pad_x * 2)
+        local tw = inner_w + pad_x * 2
+
+        local _, body_lines = body_font:getWrap(body_text, inner_w)
+        if #body_lines == 0 then body_lines = { body_text } end
+        local _, cost_lines = meta_font:getWrap(cost_text, inner_w)
+        if #cost_lines == 0 then cost_lines = { cost_text } end
+        local detail_lines = {}
+        if detail_text and detail_text ~= "" then
+          local _, wrapped = meta_font:getWrap(detail_text, inner_w)
+          detail_lines = (#wrapped > 0) and wrapped or { detail_text }
         end
-        local font = util.get_font(10)
-        local max_line_w = 0
-        for _, line in ipairs(lines) do
-          max_line_w = math.max(max_line_w, font:getWidth(line))
+
+        local header_h = header_font:getHeight()
+        local chip_w = chip_font:getWidth(status_text) + 12
+        local chip_h = chip_font:getHeight() + 4
+        local body_line_h = body_font:getHeight() + 1
+        local meta_line_h = meta_font:getHeight() + 1
+        local divider_h = 1
+        local section_gap = 6
+
+        local body_h = #body_lines * body_line_h
+        local meta_h = #cost_lines * meta_line_h
+        if #detail_lines > 0 then
+          meta_h = meta_h + 3 + (#detail_lines * meta_line_h)
         end
-        local pad_x, pad_y = 10, 6
-        local tw = max_line_w + pad_x * 2
-        local line_h = font:getHeight() + 2
-        local th = #lines * line_h + pad_y * 2
+
+        local th = pad_y
+          + math.max(header_h, chip_h)
+          + section_gap
+          + divider_h
+          + section_gap
+          + meta_h
+          + section_gap
+          + divider_h
+          + section_gap
+          + body_h
+          + pad_y
+
         local tx = mx + 16
-        local ty = my - th - 4
+        local ty = my - th - 8
         if tx + tw > gw - 10 then tx = mx - tw - 16 end
-        if ty < 10 then ty = 10 end
+        if ty < 10 then ty = my + 14 end
+        if ty + th > gh - 10 then ty = gh - th - 10 end
+        if tx < 10 then tx = 10 end
 
         local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
-        -- Dark rounded-rect background
-        love.graphics.setColor(0.06, 0.07, 0.1, 0.92 * fade_in)
-        love.graphics.rectangle("fill", tx, ty, tw, th, 5, 5)
-        love.graphics.setColor(0.3, 0.35, 0.5, 0.5 * fade_in)
-        love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
-        -- Lines
-        love.graphics.setFont(font)
-        for li, line in ipairs(lines) do
-          if li == 1 then
-            love.graphics.setColor(0.9, 0.92, 1.0, fade_in)
-          else
-            love.graphics.setColor(0.65, 0.67, 0.75, fade_in)
+        local corner = 7
+        local accent = can_activate_now and { 0.25, 0.8, 0.45 } or { 0.45, 0.5, 0.62 }
+
+        -- Shadow/backdrop
+        love.graphics.setColor(0, 0, 0, 0.45 * fade_in)
+        love.graphics.rectangle("fill", tx + 3, ty + 4, tw, th, corner, corner)
+        -- Panel body
+        love.graphics.setColor(0.06, 0.07, 0.1, 0.95 * fade_in)
+        love.graphics.rectangle("fill", tx, ty, tw, th, corner, corner)
+        -- Accent strip
+        love.graphics.setColor(accent[1], accent[2], accent[3], 0.8 * fade_in)
+        love.graphics.rectangle("fill", tx + 1, ty + 1, tw - 2, 3, corner, corner)
+        -- Border
+        love.graphics.setColor(0.3, 0.35, 0.5, 0.6 * fade_in)
+        love.graphics.rectangle("line", tx, ty, tw, th, corner, corner)
+
+        local cy = ty + pad_y
+
+        -- Header row
+        love.graphics.setFont(header_font)
+        love.graphics.setColor(0.94, 0.96, 1.0, fade_in)
+        love.graphics.print(header_text, tx + pad_x, cy)
+
+        local chip_x = tx + tw - pad_x - chip_w
+        local chip_y = cy + math.floor((header_h - chip_h) / 2)
+        love.graphics.setColor(0, 0, 0, 0.2 * fade_in)
+        love.graphics.rectangle("fill", chip_x + 1, chip_y + 1, chip_w, chip_h, 4, 4)
+        love.graphics.setColor(accent[1], accent[2], accent[3], (can_activate_now and 0.28 or 0.18) * fade_in + 0.05)
+        love.graphics.rectangle("fill", chip_x, chip_y, chip_w, chip_h, 4, 4)
+        love.graphics.setColor(accent[1], accent[2], accent[3], 0.85 * fade_in)
+        love.graphics.rectangle("line", chip_x, chip_y, chip_w, chip_h, 4, 4)
+        love.graphics.setFont(chip_font)
+        love.graphics.setColor(1, 1, 1, fade_in)
+        love.graphics.printf(status_text, chip_x, chip_y + 2, chip_w, "center")
+
+        cy = cy + math.max(header_h, chip_h) + section_gap
+
+        -- Divider 1
+        love.graphics.setColor(accent[1], accent[2], accent[3], 0.22 * fade_in)
+        love.graphics.rectangle("fill", tx + pad_x, cy, inner_w, 1)
+        cy = cy + divider_h + section_gap
+
+        -- Meta section (cost + traits)
+        love.graphics.setFont(meta_font)
+        love.graphics.setColor(0.74, 0.77, 0.86, fade_in)
+        for _, line in ipairs(cost_lines) do
+          love.graphics.print(line, tx + pad_x, cy)
+          cy = cy + meta_line_h
+        end
+        if #detail_lines > 0 then
+          cy = cy + 3
+          love.graphics.setColor(0.62, 0.66, 0.76, fade_in)
+          for _, line in ipairs(detail_lines) do
+            love.graphics.print(line, tx + pad_x, cy)
+            cy = cy + meta_line_h
           end
-          love.graphics.print(line, tx + pad_x, ty + pad_y + (li - 1) * line_h)
+        end
+
+        cy = cy + section_gap
+        -- Divider 2
+        love.graphics.setColor(1, 1, 1, 0.08 * fade_in)
+        love.graphics.rectangle("fill", tx + pad_x, cy, inner_w, 1)
+        cy = cy + divider_h + section_gap
+
+        -- Body text (full ability text, wrapped)
+        love.graphics.setFont(body_font)
+        love.graphics.setColor(0.88, 0.9, 0.96, fade_in)
+        for _, line in ipairs(body_lines) do
+          love.graphics.print(line, tx + pad_x, cy)
+          cy = cy + body_line_h
         end
       end
     end
@@ -1983,8 +2248,23 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     deck_viewer.mousepressed(x, y, button)
     if was_open and not deck_viewer.is_open() then
       self.show_blueprint_for_player = nil
+      self.pending_graveyard_return = nil
     end
     return
+  end
+
+  -- Handle deal_damage_x +/- button clicks before board hit-test
+  if self.pending_damage_x then
+    local pdx = self.pending_damage_x
+    local function in_btn(b) return b and x >= b.x and x <= b.x + b.w and y >= b.y and y <= b.y + b.h end
+    if in_btn(pdx.minus_btn) then
+      pdx.x_amount = math.max(1, pdx.x_amount - 1)
+      return
+    end
+    if in_btn(pdx.plus_btn) then
+      pdx.x_amount = math.min(pdx.max_x, pdx.x_amount + 1)
+      return
+    end
   end
 
   local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, {
@@ -2063,6 +2343,37 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       sound.play("click")
       return
     end
+    if self.pending_counter_placement then
+      self.pending_counter_placement = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_damage_target then
+      self.pending_damage_target = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_damage_x then
+      self.pending_damage_x = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_spell_target then
+      self.pending_spell_target = nil
+      self.hand_selected_index = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_play_spell then
+      self.pending_play_spell = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_discard_draw then
+      self.pending_discard_draw = nil
+      sound.play("click")
+      return
+    end
     if self.hand_selected_index then
       self.hand_selected_index = nil
       sound.play("click")
@@ -2087,6 +2398,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
         source = pending.source,
         ability_index = pending.ability_index,
         hand_index = idx,
+        fast_ability = pending.fast or false,
       })
       if result.ok then
         sound.play("coin")
@@ -2115,6 +2427,142 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       end
     else
       sound.play("error")
+    end
+    return
+  end
+
+  -- Hand card click during pending play_spell selection (e.g. Alchemy Table)
+  if kind == "hand_card" and self.pending_play_spell then
+    local pending = self.pending_play_spell
+    local is_eligible = false
+    for _, ei in ipairs(pending.eligible_indices) do
+      if ei == idx then is_eligible = true; break end
+    end
+    if is_eligible then
+      local p = self.game_state.players[self.local_player_index + 1]
+      local spell_id = p.hand[idx]
+      local spell_def = nil
+      if spell_id then
+        local ok_s, sd = pcall(cards.get_card_def, spell_id)
+        if ok_s and sd then spell_def = sd end
+      end
+      -- Check if this spell has a targeted on_cast ability
+      local targeted_ab = nil
+      if spell_def then
+        for _, sab in ipairs(spell_def.abilities or {}) do
+          if sab.trigger == "on_cast" and sab.effect == "deal_damage" then targeted_ab = sab; break end
+        end
+      end
+      if targeted_ab then
+        local args = targeted_ab.effect_args or {}
+        local opponent_pi = 1 - self.local_player_index
+        local op = self.game_state.players[opponent_pi + 1]
+        local eligible = {}
+        for si, entry in ipairs(op.board) do
+          local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+          if ok_d and edef then
+            if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
+              eligible[#eligible + 1] = si
+            elseif args.target == "any" then
+              eligible[#eligible + 1] = si
+            end
+          end
+        end
+        if #eligible == 0 then
+          sound.play("error")
+          return
+        end
+        self.pending_spell_target = {
+          hand_index = idx,
+          effect_args = args,
+          eligible_player_index = opponent_pi,
+          eligible_board_indices = eligible,
+          via_ability_source = pending.source,
+          via_ability_ability_index = pending.ability_index,
+          fast = pending.fast or false,
+        }
+        self.pending_play_spell = nil
+        sound.play("click")
+      else
+        -- Non-targeted: cast immediately via ability
+        local before_res = {}
+        for k, v in pairs(p.resources) do before_res[k] = v end
+        local result = self:dispatch_command({
+          type = "PLAY_SPELL_VIA_ABILITY",
+          player_index = self.local_player_index,
+          source = pending.source,
+          ability_index = pending.ability_index,
+          hand_index = idx,
+          fast_ability = pending.fast or false,
+        })
+        if result.ok then
+          sound.play("coin")
+          local pi_panel = self:player_to_panel(self.local_player_index)
+          local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+          for _, c in ipairs(pending.cost or {}) do
+            if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+              local rb_x, rb_y = board.resource_bar_rect(pi_panel)
+              popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
+            end
+          end
+          local sname = spell_def and spell_def.name or "Spell"
+          popup.create(sname .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
+          self.pending_play_spell = nil
+          while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+        else
+          sound.play("error")
+        end
+      end
+    else
+      sound.play("error")
+    end
+    return
+  end
+
+  -- Hand card click during pending discard_draw selection (e.g. Hospital)
+  if kind == "hand_card" and self.pending_discard_draw then
+    local pending = self.pending_discard_draw
+    local selected = pending.selected_set
+    -- Toggle selection
+    if selected[idx] then
+      selected[idx] = nil
+      sound.play("click")
+    else
+      local count = 0
+      for _ in pairs(selected) do count = count + 1 end
+      if count >= pending.required_count then
+        sound.play("error")
+      else
+        selected[idx] = true
+        sound.play("click")
+        -- Auto-dispatch when required count reached
+        count = count + 1
+        if count == pending.required_count then
+          local indices = {}
+          for hi in pairs(selected) do indices[#indices + 1] = hi end
+          local p = self.game_state.players[self.local_player_index + 1]
+          local result = self:dispatch_command({
+            type = "DISCARD_DRAW_HAND",
+            player_index = self.local_player_index,
+            source = pending.source,
+            ability_index = pending.ability_index,
+            hand_indices = indices,
+          })
+          if result.ok then
+            sound.play("coin")
+            local pi_panel = self:player_to_panel(self.local_player_index)
+            local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+            popup.create("Drew " .. pending.draw_count .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.65, 0.3 })
+            self.pending_discard_draw = nil
+            while #self.hand_y_offsets > #p.hand do
+              table.remove(self.hand_y_offsets)
+            end
+          else
+            sound.play("error")
+            self.pending_discard_draw = nil
+          end
+        end
+      end
     end
     return
   end
@@ -2193,11 +2641,72 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     if is_eligible then
       local p = self.game_state.players[self.local_player_index + 1]
       local hand_card_id = p.hand[pending.hand_index]
+      local hand_card_def = nil
       local card_name = "Card"
       if hand_card_id then
         local ok_c, cdef = pcall(cards.get_card_def, hand_card_id)
-        if ok_c and cdef then card_name = cdef.name end
+        if ok_c and cdef then card_name = cdef.name; hand_card_def = cdef end
       end
+
+      -- If the hand card is a Spell, use the spell cast flow (not board placement)
+      if hand_card_def and hand_card_def.kind == "Spell" then
+        local targeted_ab = nil
+        for _, ab in ipairs(hand_card_def.abilities or {}) do
+          if ab.trigger == "on_cast" and ab.effect == "deal_damage" then targeted_ab = ab; break end
+        end
+        if targeted_ab then
+          local args = targeted_ab.effect_args or {}
+          local opponent_pi = 1 - self.local_player_index
+          local op = self.game_state.players[opponent_pi + 1]
+          local eligible = {}
+          for si, entry in ipairs(op.board) do
+            local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+            if ok_d and edef then
+              if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
+                eligible[#eligible + 1] = si
+              elseif args.target == "any" then
+                eligible[#eligible + 1] = si
+              end
+            end
+          end
+          if #eligible == 0 then
+            sound.play("error")
+            return
+          end
+          self.pending_spell_target = {
+            hand_index = pending.hand_index,
+            effect_args = args,
+            eligible_player_index = opponent_pi,
+            eligible_board_indices = eligible,
+            monument_board_index = target_si,
+          }
+          self.pending_monument = nil
+          sound.play("click")
+          return
+        else
+          -- Non-targeted monument spell
+          local result = self:dispatch_command({
+            type = "PLAY_SPELL_FROM_HAND",
+            player_index = self.local_player_index,
+            hand_index = pending.hand_index,
+            monument_board_index = target_si,
+          })
+          if result.ok then
+            sound.play("coin")
+            local pi_panel = self:player_to_panel(self.local_player_index)
+            local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+            popup.create(card_name .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
+            self.pending_monument = nil
+            self.hand_selected_index = nil
+            while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+          else
+            sound.play("error")
+          end
+          return
+        end
+      end
+
+      -- Default: non-spell monument card (place on board)
       local result = self:dispatch_command({
         type = "PLAY_MONUMENT_FROM_HAND",
         player_index = self.local_player_index,
@@ -2259,6 +2768,183 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       else
         sound.play("error")
       end
+    else
+      sound.play("error")
+    end
+    return
+  end
+
+  -- Board tile click during deal_damage targeting
+  if kind == "structure" and self.pending_damage_target then
+    local pending = self.pending_damage_target
+    local target_si = idx
+    local is_global = pending.eligible_board_indices_by_player ~= nil
+
+    local function fire_damage(target_pi, board_idx, is_base)
+      local result = self:dispatch_command({
+        type = "DEAL_DAMAGE_TO_TARGET",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        target_player_index = target_pi,
+        target_board_index = board_idx,
+        target_is_base = is_base or false,
+        fast_ability = pending.fast or false,
+      })
+      if result.ok then
+        local damage = pending.effect_args.damage or 0
+        local tgt_panel = self:player_to_panel(target_pi)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(tgt_panel)
+        popup.create("-" .. damage, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
+        sound.play("coin")
+      else
+        sound.play("error")
+      end
+      self.pending_damage_target = nil
+    end
+
+    -- Base click (idx == 0)
+    if target_si == 0 then
+      if pending.eligible_base_player_indices and pending.eligible_base_player_indices[pi] then
+        fire_damage(pi, nil, true)
+      else
+        sound.play("error")
+      end
+      return
+    end
+
+    -- Board card click
+    if is_global then
+      local eligible = pending.eligible_board_indices_by_player[pi] or {}
+      local is_eligible = false
+      for _, ei in ipairs(eligible) do
+        if ei == target_si then is_eligible = true; break end
+      end
+      if is_eligible then
+        fire_damage(pi, target_si, false)
+      else
+        sound.play("error")
+      end
+      return
+    else
+      -- Legacy single-player targeting
+      if pi == pending.eligible_player_index then
+        local is_eligible = false
+        for _, ei in ipairs(pending.eligible_board_indices) do
+          if ei == target_si then is_eligible = true; break end
+        end
+        if is_eligible then
+          fire_damage(pending.eligible_player_index, target_si, false)
+        else
+          sound.play("error")
+        end
+        return
+      end
+      -- Not the eligible player - fall through to other handlers
+    end
+  end
+
+  -- Board tile click to resolve a targeted spell
+  if kind == "structure" and self.pending_spell_target and pi == self.pending_spell_target.eligible_player_index then
+    local pending = self.pending_spell_target
+    local target_si = idx
+    local is_eligible = false
+    for _, ei in ipairs(pending.eligible_board_indices) do
+      if ei == target_si then is_eligible = true; break end
+    end
+    if is_eligible then
+      local cmd_type = pending.via_ability_source and "PLAY_SPELL_VIA_ABILITY" or "PLAY_SPELL_FROM_HAND"
+      local result = self:dispatch_command({
+        type = cmd_type,
+        player_index = self.local_player_index,
+        source = pending.via_ability_source,
+        ability_index = pending.via_ability_ability_index,
+        hand_index = pending.hand_index,
+        target_player_index = pending.eligible_player_index,
+        target_board_index = target_si,
+        monument_board_index = pending.monument_board_index,
+        fast_ability = pending.fast or false,
+      })
+      if result.ok then
+        local damage = pending.effect_args.damage or 0
+        local opp_panel = self:player_to_panel(pending.eligible_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(opp_panel)
+        popup.create("-" .. damage, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
+        sound.play("coin")
+      else
+        sound.play("error")
+      end
+      self.pending_spell_target = nil
+      self.hand_selected_index = nil
+    else
+      sound.play("error")
+    end
+    return
+  end
+
+  -- Enemy board tile click during deal_damage_x targeting (Flying Machine)
+  if kind == "structure" and self.pending_damage_x and pi == self.pending_damage_x.eligible_player_index then
+    local pending = self.pending_damage_x
+    local target_si = idx
+    local is_eligible = false
+    for _, ei in ipairs(pending.eligible_board_indices) do
+      if ei == target_si then is_eligible = true; break end
+    end
+    if is_eligible then
+      local result = self:dispatch_command({
+        type = "DEAL_DAMAGE_X_TO_TARGET",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        target_player_index = pending.eligible_player_index,
+        target_board_index = target_si,
+        x_amount = pending.x_amount,
+        fast_ability = pending.fast or false,
+      })
+      if result.ok then
+        local opp_panel = self:player_to_panel(pending.eligible_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(opp_panel)
+        popup.create("-" .. pending.x_amount, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
+        sound.play("coin")
+      else
+        sound.play("error")
+      end
+      self.pending_damage_x = nil
+    else
+      sound.play("error")
+    end
+    return
+  end
+
+  -- Board tile click during counter placement targeting
+  if kind == "structure" and self.pending_counter_placement then
+    local pending = self.pending_counter_placement
+    local target_si = idx
+    local is_eligible = false
+    for _, ei in ipairs(pending.eligible_board_indices) do
+      if ei == target_si then is_eligible = true; break end
+    end
+    if is_eligible then
+      local result = self:dispatch_command({
+        type = "PLACE_COUNTER_ON_TARGET",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        target_board_index = target_si,
+        fast_ability = pending.fast or false,
+      })
+      local cp_args = pending.effect_args or {}
+      if result.ok then
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        local amount = cp_args.amount or 2
+        local cname = cp_args.counter or "knowledge"
+        popup.create("+" .. amount .. " " .. cname, px_b + pw_b / 2, py_b + ph_b - 80, { 0.35, 0.55, 0.95 })
+        sound.play("coin")
+      else
+        sound.play("error")
+      end
+      self.pending_counter_placement = nil
     else
       sound.play("error")
     end
@@ -2469,6 +3155,68 @@ function GameState:mousepressed(x, y, button, istouch, presses)
               return
             end
           end
+          -- Check for Spell cast
+          if card_def.kind == "Spell" then
+            if abilities.can_pay_cost(local_p.resources, card_def.costs) then
+              -- Find first on_cast ability that needs a target
+              local targeted_ab = nil
+              for _, ab in ipairs(card_def.abilities or {}) do
+                if ab.trigger == "on_cast" and ab.effect == "deal_damage" then
+                  targeted_ab = ab; break
+                end
+              end
+              if targeted_ab then
+                local args = targeted_ab.effect_args or {}
+                local opponent_pi = 1 - pi
+                local op = self.game_state.players[opponent_pi + 1]
+                local eligible = {}
+                for si, entry in ipairs(op.board) do
+                  local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+                  if ok_d and edef then
+                    if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
+                      eligible[#eligible + 1] = si
+                    elseif args.target == "any" then
+                      eligible[#eligible + 1] = si
+                    end
+                  end
+                end
+                if #eligible == 0 then
+                  sound.play("error")
+                  self.hand_selected_index = nil
+                  return
+                end
+                self.pending_spell_target = {
+                  hand_index = idx,
+                  effect_args = args,
+                  eligible_player_index = opponent_pi,
+                  eligible_board_indices = eligible,
+                }
+                sound.play("click")
+                return
+              else
+                -- Non-targeted: cast immediately
+                local result = self:dispatch_command({
+                  type = "PLAY_SPELL_FROM_HAND",
+                  player_index = pi,
+                  hand_index = idx,
+                })
+                if result.ok then
+                  local pi_panel = self:player_to_panel(pi)
+                  local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+                  popup.create(card_def.name .. "!", px_b + pw_b / 2, py_b + 40, { 0.7, 0.85, 1.0 })
+                  sound.play("coin")
+                else
+                  sound.play("error")
+                end
+                self.hand_selected_index = nil
+                return
+              end
+            else
+              sound.play("error")
+              self.hand_selected_index = nil
+              return
+            end
+          end
         end
       end
       -- Deselect if not playable
@@ -2544,6 +3292,8 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     self.pending_sacrifice = nil
     self.pending_upgrade = nil
     self.pending_monument = nil
+    self.pending_graveyard_return = nil
+    self.pending_discard_draw = nil
     self:_clear_pending_attack_declarations()
     self:_clear_pending_attack_trigger_targets()
     self.pending_block_assignments = {}
@@ -2653,7 +3403,10 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  if kind == "activate_ability" and pi == self.game_state.activePlayer then
+  local _cbt = self.game_state.pendingCombat
+  local _in_blocker_window = _cbt and _cbt.stage == "DECLARED"
+    and (pi == _cbt.attacker or pi == _cbt.defender)
+  if kind == "activate_ability" and (pi == self.game_state.activePlayer or _in_blocker_window) then
     local info = extra  -- { source = "base"|"board", board_index = N, ability_index = N }
     local p = self.game_state.players[pi + 1]
     local card_def
@@ -2668,6 +3421,11 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     if card_def and card_def.abilities then
       local ab = card_def.abilities[info.ability_index]
       if ab and ab.type == "activated" then
+        -- During the blocker window only Fast abilities are permitted.
+        if _in_blocker_window and not (pi == self.game_state.activePlayer) and not ab.fast then
+          sound.play("error")
+          return
+        end
         -- Two-step flow for play_unit abilities
         if ab.effect == "play_unit" then
           local eligible = abilities.find_matching_hand_indices(p, ab.effect_args)
@@ -2684,6 +3442,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
               source = { type = info.source, index = info.board_index },
               ability_index = info.ability_index,
               hand_index = eligible[1],
+              fast_ability = ab.fast or false,
             })
             if result.ok then
               sound.play("coin")
@@ -2717,6 +3476,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
               effect_args = ab.effect_args,
               eligible_indices = eligible,
               cost = ab.cost,
+              fast = ab.fast or false,
             }
             self.hand_selected_index = nil
             sound.play("click")
@@ -2766,6 +3526,382 @@ function GameState:mousepressed(x, y, button, istouch, presses)
           }
           self.hand_selected_index = nil
           self.pending_play_unit = nil
+          sound.play("click")
+          return
+        end
+
+        -- Two-step flow for deal_damage abilities (Alchemist)
+        if ab.effect == "deal_damage" then
+          local source_entry = info.source == "board" and p.board[info.board_index] or nil
+          if ab.rest and source_entry and source_entry.state and source_entry.state.rested then
+            sound.play("error")
+            return
+          end
+          if not abilities.can_pay_cost(p.resources, ab.cost) then
+            sound.play("error")
+            return
+          end
+          local source_key = (info.source == "board" and "board:" .. info.board_index or "base") .. ":" .. info.ability_index
+          local used_key = tostring(pi) .. ":" .. source_key
+          if ab.once_per_turn and self.game_state.activatedUsedThisTurn[used_key] then
+            sound.play("error")
+            return
+          end
+          local args = ab.effect_args or {}
+          local opponent_pi = 1 - pi
+          local op = self.game_state.players[opponent_pi + 1]
+          if args.target == "global" then
+            -- Can target any unit/structure on either board, and either base
+            local own_eligible, opp_eligible = {}, {}
+            for si, entry in ipairs(p.board) do
+              local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+              if ok_d and edef then own_eligible[#own_eligible + 1] = si end
+            end
+            for si, entry in ipairs(op.board) do
+              local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+              if ok_d and edef then opp_eligible[#opp_eligible + 1] = si end
+            end
+            self.pending_damage_target = {
+              source = { type = info.source, index = info.board_index },
+              ability_index = info.ability_index,
+              effect_args = args,
+              eligible_board_indices_by_player = { [pi] = own_eligible, [opponent_pi] = opp_eligible },
+              eligible_base_player_indices = { [pi] = true, [opponent_pi] = true },
+              fast = ab.fast or false,
+            }
+          else
+            local eligible = {}
+            for si, entry in ipairs(op.board) do
+              local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+              if ok_d and edef then
+                if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
+                  eligible[#eligible + 1] = si
+                elseif args.target == "any" then
+                  eligible[#eligible + 1] = si
+                end
+              end
+            end
+            if #eligible == 0 then
+              sound.play("error")
+              return
+            end
+            self.pending_damage_target = {
+              source = { type = info.source, index = info.board_index },
+              ability_index = info.ability_index,
+              effect_args = args,
+              eligible_player_index = opponent_pi,
+              eligible_board_indices = eligible,
+              fast = ab.fast or false,
+            }
+          end
+          sound.play("click")
+          return
+        end
+
+        -- Two-step flow for play_spell abilities (Alchemy Table)
+        if ab.effect == "play_spell" then
+          local eligible = abilities.find_matching_spell_hand_indices(p, ab.effect_args)
+          if #eligible == 0 then
+            sound.play("error")
+            return
+          end
+          local function do_cast_spell(hand_idx)
+            local spell_id = p.hand[hand_idx]
+            local spell_def = nil
+            if spell_id then
+              local ok_s, sd = pcall(cards.get_card_def, spell_id)
+              if ok_s and sd then spell_def = sd end
+            end
+            local targeted_ab = nil
+            if spell_def then
+              for _, sab in ipairs(spell_def.abilities or {}) do
+                if sab.trigger == "on_cast" and sab.effect == "deal_damage" then targeted_ab = sab; break end
+              end
+            end
+            if targeted_ab then
+              local args = targeted_ab.effect_args or {}
+              local opponent_pi = 1 - pi
+              local op = self.game_state.players[opponent_pi + 1]
+              local dmg_eligible = {}
+              for si, entry in ipairs(op.board) do
+                local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+                if ok_d and edef then
+                  if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
+                    dmg_eligible[#dmg_eligible + 1] = si
+                  elseif args.target == "any" then
+                    dmg_eligible[#dmg_eligible + 1] = si
+                  end
+                end
+              end
+              if #dmg_eligible == 0 then sound.play("error"); return end
+              self.pending_spell_target = {
+                hand_index = hand_idx,
+                effect_args = args,
+                eligible_player_index = opponent_pi,
+                eligible_board_indices = dmg_eligible,
+                via_ability_source = { type = info.source, index = info.board_index },
+                via_ability_ability_index = info.ability_index,
+                fast = ab.fast or false,
+              }
+              self.pending_play_spell = nil
+              sound.play("click")
+            else
+              local before_res = {}
+              for k, v in pairs(p.resources) do before_res[k] = v end
+              local result = self:dispatch_command({
+                type = "PLAY_SPELL_VIA_ABILITY",
+                player_index = pi,
+                source = { type = info.source, index = info.board_index },
+                ability_index = info.ability_index,
+                hand_index = hand_idx,
+                fast_ability = ab.fast or false,
+              })
+              if result.ok then
+                sound.play("coin")
+                local pi_panel = self:player_to_panel(pi)
+                local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+                for _, c in ipairs(ab.cost or {}) do
+                  if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+                    local rb_x, rb_y = board.resource_bar_rect(pi_panel)
+                    popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
+                  end
+                end
+                local sname = spell_def and spell_def.name or "Spell"
+                popup.create(sname .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
+                self.pending_play_spell = nil
+                while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+              else
+                sound.play("error")
+              end
+            end
+          end
+          if #eligible == 1 then
+            do_cast_spell(eligible[1])
+          else
+            self.pending_play_spell = {
+              source = { type = info.source, index = info.board_index },
+              ability_index = info.ability_index,
+              cost = ab.cost,
+              effect_args = ab.effect_args,
+              eligible_indices = eligible,
+              fast = ab.fast or false,
+            }
+            self.hand_selected_index = nil
+            sound.play("click")
+          end
+          return
+        end
+
+        -- Two-step flow for discard_draw abilities (Hospital)
+        if ab.effect == "discard_draw" then
+          local args = ab.effect_args or {}
+          local required_discard = args.discard or 2
+          if #p.hand < required_discard then
+            sound.play("error")
+            return
+          end
+          self.pending_discard_draw = {
+            source = { type = info.source, index = info.board_index },
+            ability_index = info.ability_index,
+            required_count = required_discard,
+            draw_count = args.draw or 1,
+            selected_set = {},
+          }
+          self.hand_selected_index = nil
+          sound.play("click")
+          return
+        end
+
+        -- Two-step flow for deal_damage_x abilities (Flying Machine)
+        if ab.effect == "deal_damage_x" then
+          local source_entry = info.source == "board" and p.board[info.board_index] or nil
+          if ab.rest and source_entry and source_entry.state and source_entry.state.rested then
+            sound.play("error")
+            return
+          end
+          local args = ab.effect_args or {}
+          local resource = args.resource or "stone"
+          local available = p.resources[resource] or 0
+          if available < 1 then
+            sound.play("error")
+            return
+          end
+          local opponent_pi = 1 - pi
+          local op = self.game_state.players[opponent_pi + 1]
+          local eligible = {}
+          for si, entry in ipairs(op.board) do
+            local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+            if ok_d and edef then
+              if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
+                eligible[#eligible + 1] = si
+              elseif args.target == "any" then
+                eligible[#eligible + 1] = si
+              end
+            end
+          end
+          if #eligible == 0 then
+            sound.play("error")
+            return
+          end
+          self.pending_damage_x = {
+            source = { type = info.source, index = info.board_index },
+            ability_index = info.ability_index,
+            effect_args = args,
+            eligible_player_index = opponent_pi,
+            eligible_board_indices = eligible,
+            x_amount = available,
+            max_x = available,
+            fast = ab.fast or false,
+          }
+          sound.play("click")
+          return
+        end
+
+        -- Two-step flow for place_counter_on_target abilities (Prince of Reason)
+        if ab.effect == "place_counter_on_target" then
+          local source_entry = info.source == "board" and p.board[info.board_index] or nil
+          if ab.rest and source_entry and source_entry.state and source_entry.state.rested then
+            sound.play("error")
+            return
+          end
+          if not abilities.can_pay_cost(p.resources, ab.cost) then
+            sound.play("error")
+            return
+          end
+          -- Collect eligible ally units/workers
+          local eligible = {}
+          for si, entry in ipairs(p.board) do
+            local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
+            if ok_d and edef and (edef.kind == "Unit" or edef.kind == "Worker") then
+              eligible[#eligible + 1] = si
+            end
+          end
+          if #eligible == 0 then
+            sound.play("error")
+            return
+          end
+          self.pending_counter_placement = {
+            source = { type = info.source, index = info.board_index },
+            ability_index = info.ability_index,
+            effect_args = ab.effect_args or {},
+            eligible_board_indices = eligible,
+            fast = ab.fast or false,
+          }
+          sound.play("click")
+          return
+        end
+
+        -- Two-step flow for return_from_graveyard abilities (Skelieutenant)
+        if ab.effect == "return_from_graveyard" then
+          if not abilities.can_pay_cost(p.resources, ab.cost) then
+            sound.play("error")
+            return
+          end
+          local source_key = (info.source == "board" and "board:" .. info.board_index or "base") .. ":" .. info.ability_index
+          local used_key = tostring(pi) .. ":" .. source_key
+          if ab.once_per_turn and self.game_state.activatedUsedThisTurn[used_key] then
+            sound.play("error")
+            return
+          end
+          local args = ab.effect_args or {}
+          local cards_for_selection = graveyard_cards_for_selection(p, args)
+          local has_eligible = false
+          for _, c in ipairs(cards_for_selection) do
+            if c.graveyard_eligible then has_eligible = true; break end
+          end
+          if not has_eligible then
+            sound.play("error")
+            return
+          end
+          self.pending_graveyard_return = {
+            source = { type = info.source, index = info.board_index },
+            ability_index = info.ability_index,
+            max_count = args.count or 1,
+            effect_args = args,
+            selected_graveyard_indices = {},
+          }
+          local pending_ref = self.pending_graveyard_return
+          local faction_info = factions_data[p.faction]
+          local accent = faction_info and faction_info.color or { 0.5, 0.5, 0.7 }
+          local viewer_title = (args.return_to == "hand") and "Return to Hand" or "Return from Graveyard"
+          local viewer_hint = "Select up to " .. (args.count or 1) .. ((args.return_to == "hand") and " card" or " Undead") .. ((args.count or 1) > 1 and "s" or "")
+          deck_viewer.open({
+            title = viewer_title,
+            hint = viewer_hint,
+            cards = cards_for_selection,
+            accent = accent,
+            can_click_fn = function(def) return def.graveyard_eligible == true end,
+            card_overlay_fn = function(def, cx, cy, cw, ch)
+              if not def.graveyard_index then return end
+              -- Dim ineligible cards
+              if not def.graveyard_eligible then
+                love.graphics.setColor(0, 0, 0, 0.55)
+                love.graphics.rectangle("fill", cx, cy, cw, ch, 5, 5)
+                return
+              end
+              -- Highlight selected cards
+              local selected = pending_ref.selected_graveyard_indices
+              for _, gi in ipairs(selected) do
+                if gi == def.graveyard_index then
+                  love.graphics.setColor(0.2, 0.9, 0.35, 0.35)
+                  love.graphics.rectangle("fill", cx, cy, cw, ch, 5, 5)
+                  love.graphics.setColor(0.2, 0.9, 0.35, 0.85)
+                  love.graphics.setLineWidth(2)
+                  love.graphics.rectangle("line", cx - 2, cy - 2, cw + 4, ch + 4, 7, 7)
+                  love.graphics.setLineWidth(1)
+                  return
+                end
+              end
+            end,
+            on_click = function(def)
+              if not def.graveyard_eligible or not def.graveyard_index then return end
+              local sel = pending_ref.selected_graveyard_indices
+              -- Toggle: deselect if already selected
+              for i, gi in ipairs(sel) do
+                if gi == def.graveyard_index then
+                  table.remove(sel, i)
+                  sound.play("click")
+                  return
+                end
+              end
+              -- Add if under max
+              if #sel < pending_ref.max_count then
+                sel[#sel + 1] = def.graveyard_index
+                sound.play("click")
+              else
+                sound.play("error")
+              end
+            end,
+            confirm_label = (args.return_to == "hand") and "Return to Hand" or "Summon Selected",
+            confirm_enabled_fn = function()
+              return #pending_ref.selected_graveyard_indices > 0
+            end,
+            confirm_fn = function()
+              local selected = pending_ref.selected_graveyard_indices
+              if #selected == 0 then return end
+              local result = self:dispatch_command({
+                type = "RETURN_FROM_GRAVEYARD",
+                player_index = self.local_player_index,
+                source = pending_ref.source,
+                ability_index = pending_ref.ability_index,
+                selected_graveyard_indices = selected,
+              })
+              if result.ok then
+                sound.play("coin")
+                local pi_panel = self:player_to_panel(self.local_player_index)
+                local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+                local count = result.meta and result.meta.returned_count or 0
+                local msg = (args.return_to == "hand") and (count .. " card" .. (count == 1 and "" or "s") .. " returned to hand!") or (count .. " Undead summoned!")
+                popup.create(msg, px_b + pw_b / 2, py_b + ph_b - 80, { 0.55, 0.9, 0.45 })
+              else
+                sound.play("error")
+              end
+              deck_viewer.close()
+              self.show_blueprint_for_player = nil
+              self.pending_graveyard_return = nil
+            end,
+          })
+          self.show_blueprint_for_player = nil
           sound.play("click")
           return
         end
@@ -3307,6 +4443,7 @@ function GameState:keypressed(key, scancode, isrepeat)
     deck_viewer.keypressed(key)
     if was_open and not deck_viewer.is_open() then
       self.show_blueprint_for_player = nil
+      self.pending_graveyard_return = nil
     end
     return
   end
@@ -3334,6 +4471,11 @@ function GameState:keypressed(key, scancode, isrepeat)
     end
     if self.pending_monument then
       self.pending_monument = nil
+      sound.play("click")
+      return
+    end
+    if self.pending_discard_draw then
+      self.pending_discard_draw = nil
       sound.play("click")
       return
     end

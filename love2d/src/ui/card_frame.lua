@@ -12,6 +12,7 @@ local card_frame = {}
 
 local CARD_W = 160
 local CARD_H = 220
+local FULL_CARD_ASPECT_H_OVER_W = 3.5 / 2.5
 
 -- Get faction strip color (RGBA) from centralized data
 local function get_strip_color(faction)
@@ -63,23 +64,44 @@ end
 -- Returns width consumed.
 ---------------------------------------------------------
 -- Draw a once-per-turn indicator (only shown for once_per_turn abilities).
--- Returns width consumed (0 if not once-per-turn).
+-- Also draws a Fast indicator when ab.fast == true.
+-- Returns width consumed (0 if neither applies).
 local function draw_frequency_icon(ab, x, y, size, alpha)
-  if not ab.once_per_turn then return 0 end
-  local cx = x + size / 2
-  local cy = y + size / 2
-  local r = size / 2
-  -- Circle with "1" inside, muted gold
-  love.graphics.setColor(0.85, 0.75, 0.4, alpha * 0.6)
-  love.graphics.circle("fill", cx, cy, r)
-  love.graphics.setColor(0.85, 0.75, 0.4, alpha * 0.9)
-  love.graphics.circle("line", cx, cy, r)
-  love.graphics.setColor(1, 1, 1, alpha)
-  local font = util.get_font(8)
-  love.graphics.setFont(font)
-  local tw = font:getWidth("1")
-  love.graphics.print("1", cx - tw / 2, cy - font:getHeight() / 2)
-  return size + 3
+  local consumed = 0
+  if ab.fast then
+    -- Small cyan diamond with "F" — indicates the ability is usable at Fast speed
+    local cx = x + size / 2
+    local cy = y + size / 2
+    local r = size / 2
+    love.graphics.setColor(0.2, 0.85, 0.95, alpha * 0.6)
+    love.graphics.circle("fill", cx, cy, r)
+    love.graphics.setColor(0.3, 0.95, 1.0, alpha * 0.9)
+    love.graphics.circle("line", cx, cy, r)
+    love.graphics.setColor(1, 1, 1, alpha)
+    local font = util.get_font(8)
+    love.graphics.setFont(font)
+    local tw = font:getWidth("F")
+    love.graphics.print("F", cx - tw / 2, cy - font:getHeight() / 2)
+    x = x + size + 3
+    consumed = consumed + size + 3
+  end
+  if ab.once_per_turn then
+    local cx = x + size / 2
+    local cy = y + size / 2
+    local r = size / 2
+    -- Circle with "1" inside, muted gold
+    love.graphics.setColor(0.85, 0.75, 0.4, alpha * 0.6)
+    love.graphics.circle("fill", cx, cy, r)
+    love.graphics.setColor(0.85, 0.75, 0.4, alpha * 0.9)
+    love.graphics.circle("line", cx, cy, r)
+    love.graphics.setColor(1, 1, 1, alpha)
+    local font = util.get_font(8)
+    love.graphics.setFont(font)
+    local tw = font:getWidth("1")
+    love.graphics.print("1", cx - tw / 2, cy - font:getHeight() / 2)
+    consumed = consumed + size + 3
+  end
+  return consumed
 end
 
 ---------------------------------------------------------
@@ -129,7 +151,18 @@ local function ability_effect_text(ab)
   elseif e == "heal" then
     return "Heal " .. (args.amount or 0)
   elseif e == "deal_damage" then
-    return "Deal " .. (args.amount or 0) .. " dmg"
+    local tgt = args.target == "global" and "any target" or (args.target == "unit" and "target unit" or "target")
+    return "Deal " .. (args.damage or args.amount or 0) .. " damage to " .. tgt
+  elseif e == "deal_damage_x" then
+    local res = args.resource or "resource"
+    return "Spend X " .. res:sub(1,1):upper() .. res:sub(2) .. ": Deal X damage to target unit"
+  elseif e == "discard_draw" then
+    local d = args.discard or 1
+    local dr = args.draw or 1
+    return "Discard " .. d .. " card" .. (d > 1 and "s" or "") .. ", then draw " .. dr
+  elseif e == "play_spell" then
+    local sub = args.subtypes and table.concat(args.subtypes, "/") or "Spell"
+    return "Play a T" .. (args.tier or "?") .. " " .. sub .. " Spell"
   elseif e == "sacrifice_produce" then
     local who = (args.condition == "non_undead") and "non-Undead ally" or "ally"
     return "Sacrifice " .. who .. ": Create " .. (args.amount or 1) .. " " .. (args.resource or "resource")
@@ -138,6 +171,25 @@ local function ability_effect_text(ab)
     return "Sacrifice " .. sub .. ": Play +1 tier " .. sub
   end
   return ab.label or e or "?"
+end
+
+local function measure_ability_line_height(ab, max_w, show_ability_text)
+  local icon_s = 16
+  local line_h = 26
+
+  if show_ability_text then
+    local font = util.get_font(10)
+    local effect_text = ab.text or ability_effect_text(ab)
+    local left_w = 5 + ((ab.once_per_turn and 1 or 0) + (ab.fast and 1 or 0)) * (icon_s + 3) + measure_cost_cluster(ab.cost, icon_s)
+    local sep_w = font:getWidth(":") + 4
+    local remaining_w = math.max(20, max_w - left_w - sep_w - 4)
+    local _, wrapped = font:getWrap(effect_text, remaining_w)
+    local lines = math.max(1, #wrapped)
+    local text_h = lines * font:getHeight()
+    line_h = math.max(26, text_h + 8)
+  end
+
+  return line_h + 3
 end
 
 local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
@@ -151,17 +203,20 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
 
   local show_text = opts.show_ability_text
   local font = show_text and util.get_font(10) or util.get_font(9)
+  local text_alpha = show_text and 1.0 or alpha
+  local icon_alpha = show_text and 1.0 or alpha
   local line_h = 26
+  local text_h_measured = 0
 
-  local effect_text = show_text and ability_effect_text(ab) or nil
+  local effect_text = show_text and (ab.text or ability_effect_text(ab)) or nil
   if show_text then
-    local left_w = 5 + (ab.once_per_turn and (icon_s + 3) or 0) + measure_cost_cluster(ab.cost, icon_s)
+    local left_w = 5 + ((ab.once_per_turn and 1 or 0) + (ab.fast and 1 or 0)) * (icon_s + 3) + measure_cost_cluster(ab.cost, icon_s)
     local sep_w = font:getWidth(":") + 4
     local remaining_w = math.max(20, max_w - left_w - sep_w - 4)
     local _, wrapped = font:getWrap(effect_text, remaining_w)
     local lines = math.max(1, #wrapped)
-    local text_h = lines * font:getHeight()
-    line_h = math.max(26, text_h + 8)
+    text_h_measured = lines * font:getHeight()
+    line_h = math.max(26, text_h_measured + 8)
   end
 
   -- Background: subtle gradient-like two-layer fill
@@ -188,25 +243,26 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
   if show_text then
     -- Left-aligned layout: icons then effect text
     local cx = ab_x + 5
-    local cy_icon = ab_y + (line_h - icon_s) / 2
+    local text_top = ab_y + (line_h - text_h_measured) / 2  -- vertically center the text block
+    local cy_icon = ab_y + (line_h - icon_s) / 2            -- icons centered in button
 
-    local freq_w = draw_frequency_icon(ab, cx, cy_icon, icon_s, alpha)
+    local freq_w = draw_frequency_icon(ab, cx, cy_icon, icon_s, icon_alpha)
     cx = cx + freq_w
 
-    local cost_w = draw_cost_cluster(ab.cost, cx, cy_icon, icon_s, alpha)
+    local cost_w = draw_cost_cluster(ab.cost, cx, cy_icon, icon_s, icon_alpha)
     cx = cx + cost_w
 
-    -- Colon separator
-    love.graphics.setColor(0.7, 0.72, 0.82, alpha)
+    -- Colon separator (aligned to first line of text)
+    love.graphics.setColor(0.7, 0.72, 0.82, text_alpha)
     love.graphics.setFont(font)
-    love.graphics.print(":", cx, ab_y + (line_h - font:getHeight()) / 2)
+    love.graphics.print(":", cx, text_top)
     cx = cx + font:getWidth(":") + 4
 
-    -- Effect text
-    love.graphics.setColor(0.85, 0.87, 0.95, alpha)
+    -- Effect text (wrapped, vertically centered as a block)
+    love.graphics.setColor(0.85, 0.87, 0.95, text_alpha)
     love.graphics.setFont(font)
     local remaining_w = max_w - (cx - ab_x) - 4
-    love.graphics.printf(effect_text, cx, ab_y + (line_h - font:getHeight()) / 2, math.max(remaining_w, 20), "left")
+    love.graphics.printf(effect_text, cx, text_top, math.max(remaining_w, 20), "left")
   else
     -- Centered icons only (compact mode)
     local freq_w_est = draw_frequency_icon(ab, -1000, -1000, icon_s, 0)
@@ -221,7 +277,7 @@ local function draw_ability_line(ab, ab_x, ab_y, max_w, opts)
   end
 
   -- "Used" overlay
-  if is_used then
+  if is_used and not show_text then
     love.graphics.setColor(0, 0, 0, 0.35)
     love.graphics.rectangle("fill", ab_x, ab_y, max_w, line_h, r, r)
     love.graphics.setColor(0.6, 0.3, 0.3, 0.8)
@@ -435,7 +491,18 @@ local function is_keyword_sentence(sentence)
   local core = trim_text(sentence)
   if core == "" then return false end
   core = core:gsub("[%.!?:]+$", "")
-  return KEYWORD_NAME_SET[string.lower(core)] == true
+  local core_lc = string.lower(core)
+  if KEYWORD_NAME_SET[core_lc] == true then
+    return true
+  end
+
+  -- Monument reminder cards commonly use a keyword header like "Monument 4."
+  -- Treat this as a keyword line so it gets bolded + separated like other keywords.
+  if core_lc:match("^monument%s+%d+$") or core_lc:match("^monument%s+x$") then
+    return true
+  end
+
+  return false
 end
 
 local function build_rule_segments_with_keywords(display_text)
@@ -578,9 +645,26 @@ function card_frame.draw_ability_button(ab, bx, by, bw, opts)
 end
 
 ---------------------------------------------------------
+-- Standard full-card height (fixed TCG-style aspect ratio).
+-- Use this before drawing to determine the `h` param for enlarged/full views.
+---------------------------------------------------------
+local function measure_full_height(params)
+  local w = (params and params.w) or CARD_W
+  -- Full-card views should stay at a standard TCG-like aspect ratio.
+  local standard_h = math.floor(w * FULL_CARD_ASPECT_H_OVER_W + 0.5)
+  return math.max(CARD_H, standard_h)
+end
+
+card_frame.measure_full_height = measure_full_height
+card_frame.FULL_CARD_ASPECT_H_OVER_W = FULL_CARD_ASPECT_H_OVER_W
+card_frame.full_height_for_width = function(w)
+  return measure_full_height({ w = w })
+end
+
+---------------------------------------------------------
 -- Main card draw
 -- params: title, faction, kind, typeLine, text, costs,
---         attack, health, population, tier, is_base,
+--         population, tier, is_base,
 --         abilities_list, used_abilities, can_activate_abilities
 ---------------------------------------------------------
 function card_frame.draw(x, y, params)
@@ -595,6 +679,7 @@ function card_frame.draw(x, y, params)
   local attack = params.attack
   local health = params.health
   local tier = params.tier
+  local subtypes = params.subtypes
   local is_base = params.is_base or false
   -- New: full abilities list for standardized rendering
   local abilities_list = params.abilities_list  -- array of ability defs
@@ -690,26 +775,66 @@ function card_frame.draw(x, y, params)
 
   cy = cy + header_h + 3
 
-  -- ===================== TYPE LINE + TIER =====================
-  love.graphics.setColor(muted)
-  love.graphics.setFont(util.get_font(9))
-  love.graphics.print(type_line, cx + 2, cy)
-  -- Tier badge (right-aligned)
-  if tier and tier > 0 then
-    local tier_font = util.get_font(9)
-    local tier_label = "T" .. tostring(tier)
-    local tw_text = tier_font:getWidth(tier_label)
-    -- Small pill badge
-    local pill_w = tw_text + 8
-    local pill_h = 12
-    local pill_x = cx + header_w - pill_w - 1
-    local pill_y = cy
-    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.2)
-    love.graphics.rectangle("fill", pill_x, pill_y, pill_w, pill_h, 3, 3)
-    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.8)
-    love.graphics.setFont(tier_font)
-    love.graphics.printf(tier_label, pill_x, pill_y + 1, pill_w, "center")
+  -- ===================== TYPE LINE + TIER BADGE =====================
+  local display_type_line
+  local tier_badge_label = nil
+  if subtypes ~= nil then
+    -- New format: [T{tier} badge] {faction} - {subtype(s)/kind}
+    local parts = {}
+    if tier then
+      tier_badge_label = "T" .. tostring(tier)
+    end
+    parts[#parts + 1] = faction
+    if #subtypes > 0 then
+      parts[#parts + 1] = table.concat(subtypes, "/")
+    else
+      parts[#parts + 1] = kind
+    end
+    display_type_line = table.concat(parts, " - ")
+  else
+    display_type_line = type_line
   end
+
+  local type_font = util.get_font(9)
+  local type_x = cx + 2
+  local type_w = header_w - 4
+
+  if tier_badge_label then
+    local badge_font = util.get_font(8)
+    local badge_text_w = badge_font:getWidth(tier_badge_label)
+    local badge_w = badge_text_w + 10
+    local badge_h = 12
+    local badge_x = cx + 1
+    local badge_y = cy
+
+    -- Badge shadow
+    love.graphics.setColor(0, 0, 0, 0.2)
+    love.graphics.rectangle("fill", badge_x + 1, badge_y + 1, badge_w, badge_h, 3, 3)
+    -- Badge body
+    love.graphics.setColor(0.08, 0.1, 0.15, 0.95)
+    love.graphics.rectangle("fill", badge_x, badge_y, badge_w, badge_h, 3, 3)
+    -- Faction-tinted fill + border
+    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.22)
+    love.graphics.rectangle("fill", badge_x, badge_y, badge_w, badge_h, 3, 3)
+    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.8)
+    love.graphics.rectangle("line", badge_x, badge_y, badge_w, badge_h, 3, 3)
+    -- Top highlight
+    love.graphics.setColor(1, 1, 1, 0.08)
+    love.graphics.rectangle("fill", badge_x + 1, badge_y + 1, badge_w - 2, 1, 2, 2)
+    -- Badge text
+    love.graphics.setFont(badge_font)
+    love.graphics.setColor(0.96, 0.97, 1.0, 1.0)
+    love.graphics.printf(tier_badge_label, badge_x, badge_y + 2, badge_w, "center")
+
+    type_x = badge_x + badge_w + 5
+    type_w = math.max(10, (cx + header_w) - type_x - 1)
+  end
+
+  love.graphics.setColor(muted)
+  love.graphics.setFont(type_font)
+  love.graphics.setScissor(type_x, cy, type_w, type_font:getHeight() + 1)
+  love.graphics.print(display_type_line, type_x, cy)
+  love.graphics.setScissor()
 
   -- Upkeep strip for units/resources that must be paid at end of turn.
   if upkeep and #upkeep > 0 then
@@ -734,30 +859,59 @@ function card_frame.draw(x, y, params)
   cy = cy + 2
 
   -- ===================== ART BOX =====================
-  local art_h = math.min(62, h - 130)  -- scales down for shorter cards (e.g. bases)
+  -- For base cards the art shrinks based on h; regular cards always use full 62px.
+  local art_h = is_base and math.min(62, h - 130) or 62
   local art_w = header_w
+  local art_y = cy
   -- Art background
   love.graphics.setColor(art_bg)
-  love.graphics.rectangle("fill", cx, cy, art_w, art_h, 4, 4)
+  love.graphics.rectangle("fill", cx, art_y, art_w, art_h, 4, 4)
   -- Art content (with scissor to clip to art box)
-  love.graphics.setScissor(cx, cy, art_w, art_h)
-  card_art.draw_card_art(cx, cy, art_w, art_h, kind, is_base, title or faction)
+  love.graphics.setScissor(cx, art_y, art_w, art_h)
+  card_art.draw_card_art(cx, art_y, art_w, art_h, kind, is_base, title or faction)
   love.graphics.setScissor()  -- Clear scissor immediately after art
   -- Inner shadow on art box
-  textures.draw_inner_shadow(cx, cy, art_w, art_h, 3, 0.25)
+  textures.draw_inner_shadow(cx, art_y, art_w, art_h, 3, 0.25)
   -- Art border
   love.graphics.setColor(0.15, 0.16, 0.2, 1)
-  love.graphics.rectangle("line", cx, cy, art_w, art_h, 4, 4)
-  cy = cy + art_h + 4
+  love.graphics.rectangle("line", cx, art_y, art_w, art_h, 4, 4)
+
+  -- Overlay ATK/HP badges in the bottom corners for full-card previews.
+  if attack ~= nil or health ~= nil then
+    local stat_font = util.get_font(9)
+    local badge_w = 52
+    local badge_h = 20
+    local corner_inset = 6
+    local badge_y = y + h - badge_h - corner_inset
+    local function draw_stat_badge(label, value, bx, bw, fill_rgb, border_rgb)
+      love.graphics.setColor(0, 0, 0, 0.35)
+      love.graphics.rectangle("fill", bx + 1, badge_y + 1, bw, badge_h, 5, 5)
+      love.graphics.setColor(fill_rgb[1], fill_rgb[2], fill_rgb[3], 0.92)
+      love.graphics.rectangle("fill", bx, badge_y, bw, badge_h, 5, 5)
+      love.graphics.setColor(border_rgb[1], border_rgb[2], border_rgb[3], 0.95)
+      love.graphics.rectangle("line", bx, badge_y, bw, badge_h, 5, 5)
+      love.graphics.setFont(stat_font)
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.printf(label .. " " .. tostring(value), bx, badge_y + math.floor((badge_h - stat_font:getHeight()) / 2), bw, "center")
+    end
+
+    if attack ~= nil then
+      draw_stat_badge("ATK", attack, x + corner_inset, badge_w, { 0.38, 0.14, 0.10 }, { 0.95, 0.45, 0.28 })
+    end
+    if health ~= nil then
+      draw_stat_badge("HP", health, x + w - badge_w - corner_inset, badge_w, { 0.10, 0.28, 0.18 }, { 0.45, 0.95, 0.55 })
+    end
+  end
+
+  cy = art_y + art_h + 4
 
   -- ===================== DIVIDER =====================
   love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.25)
   love.graphics.rectangle("fill", cx + 4, cy - 2, art_w - 8, 1)
 
   -- ===================== ABILITIES / TEXT AREA =====================
-  -- Calculate how much vertical space we have before the stat bar
-  local stat_bar_h = ((attack ~= nil or health ~= nil) and 24 or 0)
-  local text_area_bottom = y + h - pad - stat_bar_h - 2
+  -- Calculate how much vertical space we have
+  local text_area_bottom = y + h - pad - 2
   local text_area_h = math.max(1, text_area_bottom - cy)  -- Ensure positive height
 
   -- Note: Scissor clipping disabled for scaled cards (hand) as it uses screen coords
@@ -766,10 +920,15 @@ function card_frame.draw(x, y, params)
   -- Draw standardized ability lines (new system)
   local ab_y = cy
   local has_activated_abilities = false
+  local ability_bottom_limit = y + h - pad - 22
   
   if abilities_list and #abilities_list > 0 then
     for ai, ab in ipairs(abilities_list) do
       if ab.type == "activated" then
+        local consumed_est = measure_ability_line_height(ab, art_w, show_ability_text)
+        if (ab_y + consumed_est - 3) > ability_bottom_limit then
+          break
+        end
         has_activated_abilities = true
         local is_used = used_abilities[ai] or false
         local can_act = can_activate_abilities[ai] or false
@@ -783,15 +942,18 @@ function card_frame.draw(x, y, params)
     end
   elseif activated_ability then
     -- Legacy: single activated ability rendering
+    local consumed_est = measure_ability_line_height(activated_ability, art_w, show_ability_text)
     has_activated_abilities = true
     local is_used = ability_used_this_turn and activated_ability.once_per_turn
     local can_act = ability_can_activate and not is_used
-    local consumed = draw_ability_line(activated_ability, cx, ab_y, art_w, {
-      can_activate = can_act,
-      is_used = is_used,
-      show_ability_text = show_ability_text,
-    })
-    ab_y = ab_y + consumed
+    if (ab_y + consumed_est - 3) <= ability_bottom_limit then
+      local consumed = draw_ability_line(activated_ability, cx, ab_y, art_w, {
+        can_activate = can_act,
+        is_used = is_used,
+        show_ability_text = show_ability_text,
+      })
+      ab_y = ab_y + consumed
+    end
   end
 
   -- Show rules text under ability lines without duplicating activated ability effect text.
@@ -801,8 +963,8 @@ function card_frame.draw(x, y, params)
   end
   if display_text and display_text ~= "" then
     local text_y = has_activated_abilities and (ab_y + 2) or (cy + 1)
-    -- Ensure text doesn't go below the stat bar
-    local max_text_y = y + h - pad - stat_bar_h - 20
+    -- Ensure text doesn't overflow card bottom
+    local max_text_y = y + h - pad - 20
     if text_y < max_text_y then
       draw_rules_text_with_keyword_emphasis(display_text, cx + 2, text_y, art_w - 4, max_text_y, text_color)
     end
@@ -810,43 +972,6 @@ function card_frame.draw(x, y, params)
 
   -- Always clear scissor at end of text area
   love.graphics.setScissor()
-
-  -- ===================== STAT BAR =====================
-  if attack ~= nil or health ~= nil then
-    local stat_y = y + h - pad - stat_bar_h
-    local stat_h = 20
-
-    if attack ~= nil then
-      -- ATK badge (left)
-      local sw = (art_w - 4) / 2
-      love.graphics.setColor(0.5, 0.2, 0.2, 0.35)
-      love.graphics.rectangle("fill", cx, stat_y, sw, stat_h, 3, 3)
-      love.graphics.setColor(0.7, 0.3, 0.3, 0.5)
-      love.graphics.rectangle("line", cx, stat_y, sw, stat_h, 3, 3)
-      -- Bevel
-      love.graphics.setColor(1, 1, 1, 0.05)
-      love.graphics.rectangle("fill", cx + 1, stat_y + 1, sw - 2, 1)
-      love.graphics.setColor(text_color)
-      love.graphics.setFont(util.get_font(10))
-      love.graphics.printf("ATK " .. tostring(attack), cx, stat_y + stat_h/2 - 6, sw, "center")
-    end
-
-    if health ~= nil then
-      -- HP badge (right)
-      local sw = (art_w - 4) / 2
-      local right_x = cx + art_w - sw
-      love.graphics.setColor(0.2, 0.35, 0.2, 0.35)
-      love.graphics.rectangle("fill", right_x, stat_y, sw, stat_h, 3, 3)
-      love.graphics.setColor(0.3, 0.55, 0.3, 0.5)
-      love.graphics.rectangle("line", right_x, stat_y, sw, stat_h, 3, 3)
-      -- Bevel
-      love.graphics.setColor(1, 1, 1, 0.05)
-      love.graphics.rectangle("fill", right_x + 1, stat_y + 1, sw - 2, 1)
-      love.graphics.setColor(text_color)
-      love.graphics.setFont(util.get_font(10))
-      love.graphics.printf("HP " .. tostring(health), right_x, stat_y + stat_h/2 - 6, sw, "center")
-    end
-  end
 
   -- Counter display
   local counters = params.counters
@@ -940,10 +1065,10 @@ function card_frame.get_ability_rects(card_x, card_y, card_w, card_h, abilities_
   local pad = 6
   local header_h = 22 + 3  -- header + gap
   local type_h = 13 + 2    -- type line + gap
-  local art_h = math.min(62, card_h - 130) + 4  -- matches draw's dynamic art_h + gap
+  local art_h = 62 + 4  -- regular cards always use 62px art
   local ab_y = card_y + pad + header_h + type_h + art_h
   local ab_w = card_w - pad * 2
-  local line_h = 29  -- ability line height (26) + gap (3)
+  local line_h = 29  -- ability line height (26) + gap (3); variable-height buttons tracked below
 
   for ai, ab in ipairs(abilities_list) do
     if ab.type == "activated" then

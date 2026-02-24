@@ -82,6 +82,7 @@ local _real_gfx_getWidth = love.graphics.getWidth
 local _real_gfx_getHeight = love.graphics.getHeight
 local _real_gfx_getDimensions = love.graphics.getDimensions
 local _real_mouse_getPosition = love.mouse.getPosition
+local _real_gfx_setScissor = love.graphics.setScissor
 
 -- Convert screen coordinates to logical coordinates
 local function screen_to_logical(sx, sy)
@@ -103,6 +104,19 @@ love.graphics.getDimensions = function() return BASE_W, BASE_H end
 love.mouse.getPosition = function()
   local sx, sy = _real_mouse_getPosition()
   return screen_to_logical(sx, sy)
+end
+-- setScissor expects screen-pixel coordinates but game code uses logical coords;
+-- convert automatically so scissor clipping works at any window size/scale.
+love.graphics.setScissor = function(x, y, w, h)
+  if x == nil then
+    _real_gfx_setScissor()
+  else
+    local sx = math.floor(x * ui_scale + ui_offset_x)
+    local sy = math.floor(y * ui_scale + ui_offset_y)
+    local sw = math.ceil(w * ui_scale)
+    local sh = math.ceil(h * ui_scale)
+    _real_gfx_setScissor(sx, sy, sw, sh)
+  end
 end
 
 function love.load()

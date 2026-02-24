@@ -885,6 +885,27 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.setColor(1, 1, 1, alpha)
     love.graphics.setFont(util.get_font(10))
     love.graphics.printf("HP " .. tostring(life), tx + 4, stat_y + stat_h / 2 - 6, badge_w, "center")
+  elseif (sdef.kind == "Structure" or sdef.kind == "Artifact") and sdef.health then
+    local effective_health = unit_stats.effective_health(sdef, st)
+    local damage_taken = (st and st.damage) or 0
+    local life = math.max(0, effective_health - damage_taken)
+    local stat_h = 20
+    local stat_y = ty + th - stat_h - 4
+    local badge_w = tw - 8
+    local alpha = is_active and 1.0 or 0.6
+    love.graphics.setColor(0.2, 0.35, 0.2, 0.35 * alpha)
+    love.graphics.rectangle("fill", tx + 4, stat_y, badge_w, stat_h, 3, 3)
+    love.graphics.setColor(0.3, 0.55, 0.3, 0.5 * alpha)
+    love.graphics.rectangle("line", tx + 4, stat_y, badge_w, stat_h, 3, 3)
+    love.graphics.setColor(1, 1, 1, 0.05)
+    love.graphics.rectangle("fill", tx + 5, stat_y + 1, badge_w - 2, 1)
+    if damage_taken > 0 then
+      love.graphics.setColor(1.0, 0.8, 0.8, alpha)
+    else
+      love.graphics.setColor(1, 1, 1, alpha)
+    end
+    love.graphics.setFont(util.get_font(10))
+    love.graphics.printf("HP " .. tostring(life), tx + 4, stat_y + stat_h / 2 - 6, badge_w, "center")
   elseif (sdef.kind == "Unit" or sdef.kind == "Worker") and sdef.attack and sdef.health then
     local attack_bonus = unit_stats.attack_bonus(st)
     local health_bonus = unit_stats.health_bonus(st)
@@ -963,6 +984,9 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
   local alpha = is_active and 1.0 or 0.6
   local ab_btn_y = is_base and (ty + 36) or (ty + 34)
   local has_non_activated_hint = nil
+  local _c_rnd = game_state.pendingCombat
+  local _in_blocker_window_rnd = _c_rnd and _c_rnd.stage == "DECLARED"
+    and (pi == _c_rnd.attacker or pi == _c_rnd.defender)
   if sdef.abilities then
     for ai, ab in ipairs(sdef.abilities) do
       if ab.type == "activated" then
@@ -974,7 +998,12 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
         end
         local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
         local source_entry = (not is_base) and player.board[si] or nil
-        local can_act = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and abilities.can_pay_counter_cost(ab, source_entry) and is_active
+        local can_act = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and abilities.can_pay_counter_cost(ab, source_entry)
+          and (is_active or (ab.fast and _in_blocker_window_rnd))
+          and (not ab.rest or not (source_entry and source_entry.state and source_entry.state.rested))
+          and (ab.effect ~= "deal_damage_x" or (player.resources[(ab.effect_args and ab.effect_args.resource) or "stone"] or 0) >= 1)
+          and (ab.effect ~= "play_spell" or #abilities.find_matching_spell_hand_indices(player, ab.effect_args or {}) > 0)
+          and (ab.effect ~= "discard_draw" or #player.hand >= (ab.effect_args and ab.effect_args.discard or 2))
         local ab_hovered = hover and hover.kind == "activate_ability" and hover.pi == pi
           and type(hover.idx) == "table"
           and ((is_base and hover.idx.source == "base") or (not is_base and hover.idx.source == "board" and hover.idx.board_index == si))
@@ -1411,6 +1440,136 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       love.graphics.printf("Select a Monument", px, back_ay - 20, pw, "center")
     end
 
+    -- Damage target overlay: highlight eligible enemy units/structures, dim others
+    local dmg_indices = hand_state and hand_state.damage_target_eligible_indices
+    local dmg_target_pi = hand_state and hand_state.damage_target_eligible_player_index
+    if dmg_indices and dmg_target_pi == pi then
+      local function is_dmg_eligible(si)
+        for _, ei in ipairs(dmg_indices) do
+          if ei == si then return true end
+        end
+        return false
+      end
+      local pulse = 0.3 + 0.2 * math.sin(t * 4)
+      for gi, group in ipairs(struct_groups) do
+        local tile_x = struct_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if is_dmg_eligible(group.first_si) then
+          love.graphics.setColor(0.95, 0.3, 0.2, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, back_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+        end
+      end
+      for gi, group in ipairs(unit_groups) do
+        local tile_x = unit_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if is_dmg_eligible(group.first_si) then
+          love.graphics.setColor(0.95, 0.3, 0.2, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, front_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+        end
+      end
+      love.graphics.setFont(util.get_font(12))
+      love.graphics.setColor(0.95, 0.3, 0.2, 0.7 + 0.2 * math.sin(t * 3))
+      love.graphics.printf("Select a target", px, front_ay - 20, pw, "center")
+    end
+
+    -- Global damage target overlay (e.g. Catapult): both panels + bases
+    local dmg_by_player = hand_state and hand_state.damage_target_board_indices_by_player
+    local dmg_base_pis = hand_state and hand_state.damage_target_base_player_indices
+    local dmg_global_indices = dmg_by_player and dmg_by_player[pi]
+    local base_eligible = dmg_base_pis and dmg_base_pis[pi]
+    if dmg_global_indices or base_eligible then
+      local function is_global_eligible(si)
+        if not dmg_global_indices then return false end
+        for _, ei in ipairs(dmg_global_indices) do
+          if ei == si then return true end
+        end
+        return false
+      end
+      local pulse = 0.3 + 0.2 * math.sin(t * 4)
+      for gi, group in ipairs(struct_groups) do
+        local tile_x = struct_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if is_global_eligible(group.first_si) then
+          love.graphics.setColor(0.95, 0.3, 0.2, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, back_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+        end
+      end
+      for gi, group in ipairs(unit_groups) do
+        local tile_x = unit_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if is_global_eligible(group.first_si) then
+          love.graphics.setColor(0.95, 0.3, 0.2, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, front_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+        end
+      end
+      -- Base tile highlight
+      if base_eligible then
+        love.graphics.setColor(0.95, 0.3, 0.2, pulse)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", base_bx - 2, base_by - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+        love.graphics.setLineWidth(1)
+      else
+        love.graphics.setColor(0, 0, 0, 0.5)
+        love.graphics.rectangle("fill", base_bx, base_by, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+      end
+      if panel == 0 then
+        love.graphics.setFont(util.get_font(12))
+        love.graphics.setColor(0.95, 0.3, 0.2, 0.7 + 0.2 * math.sin(t * 3))
+        love.graphics.printf("Select a target", px, front_ay - 20, pw, "center")
+      end
+    end
+
+    -- Counter placement target overlay: highlight eligible allies, dim others
+    local ctr_indices = hand_state and hand_state.counter_target_eligible_indices
+    if ctr_indices and panel == 0 then
+      local function is_ctr_eligible(si)
+        for _, ei in ipairs(ctr_indices) do
+          if ei == si then return true end
+        end
+        return false
+      end
+      -- Dim structures
+      for gi, group in ipairs(struct_groups) do
+        local tile_x = struct_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        love.graphics.setColor(0, 0, 0, 0.5)
+        love.graphics.rectangle("fill", tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+      end
+      -- Overlay units
+      for gi, group in ipairs(unit_groups) do
+        local tile_x = unit_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if is_ctr_eligible(group.first_si) then
+          local pulse = 0.3 + 0.2 * math.sin(t * 4)
+          love.graphics.setColor(0.35, 0.55, 0.95, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, front_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+        end
+      end
+      -- Prompt banner
+      love.graphics.setFont(util.get_font(12))
+      love.graphics.setColor(0.35, 0.65, 0.95, 0.7 + 0.2 * math.sin(t * 3))
+      love.graphics.printf("Select an ally to place counters on", px, front_ay - 20, pw, "center")
+    end
+
     -- Resource nodes: title + placeholder only, centered in panel
     local res_left_title = (player.faction == "Human") and "Wood" or "Food"
     local res_left_resource = (player.faction == "Human") and "wood" or "food"
@@ -1641,14 +1800,10 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
             title = def.name,
             faction = def.faction,
             kind = def.kind,
-            typeLine = (def.subtypes and #def.subtypes > 0)
-              and (def.faction .. " — " .. table.concat(def.subtypes, ", "))
-              or (def.faction .. " — " .. def.kind),
+            subtypes = def.subtypes or {},
             text = def.text,
             costs = def.costs,
             upkeep = def.upkeep,
-            attack = def.attack,
-            health = def.health,
             tier = def.tier,
             abilities_list = def.abilities,
             show_ability_text = true,
@@ -1667,8 +1822,16 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
               love.graphics.rectangle("fill", r.x, r.y, r.w, r.h, 5, 5)
             end
           end
+          -- Discard selection: orange glow for selected-for-discard cards
+          if hand_state.discard_selected_set and hand_state.discard_selected_set[i] then
+            local pulse = 0.5 + 0.25 * math.sin(t * 4)
+            love.graphics.setColor(0.9, 0.4, 0.1, pulse)
+            love.graphics.setLineWidth(2)
+            love.graphics.rectangle("line", r.x - 2, r.y - 2, r.w + 4, r.h + 4, 6, 6)
+            love.graphics.setLineWidth(1)
+          end
           -- Selected glow (normal mode only)
-          if i == selected_idx and not eligible_set then
+          if i == selected_idx and not eligible_set and not hand_state.discard_selected_set then
             love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.5 + 0.15 * math.sin(t * 5))
             love.graphics.setLineWidth(2)
             love.graphics.rectangle("line", r.x - 2, r.y - 2, r.w + 4, r.h + 4, 6, 6)
@@ -1684,12 +1847,16 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       local ok, def = pcall(cards.get_card_def, hand[hover_idx])
       if ok and def then
         local is_eligible_hover = (eligible_set == nil) or eligible_set[hover_idx]
-        -- Enlarged card dimensions
+        -- Enlarged card dimensions: width fixed, height auto-sized to content
         local hover_w = math.floor(CARD_W * HAND_HOVER_SCALE)
-        local hover_h = math.floor(CARD_H * HAND_HOVER_SCALE)
+        local hover_h = card_frame.measure_full_height({
+          w = hover_w, faction = def.faction, upkeep = def.upkeep,
+          abilities_list = def.abilities, text = def.text,
+        })
         -- Anchor at center-bottom of the original rect so card grows upward
         local hx = r.x + r.w / 2 - hover_w / 2
         local hy = r.y + r.h - hover_h
+        if hy < 4 then hy = 4 end  -- clamp to screen top
         -- Larger shadow for lifted card
         love.graphics.setColor(0, 0, 0, 0.55)
         love.graphics.rectangle("fill", hx + 4, hy + 6, hover_w, hover_h, 5, 5)
@@ -1701,27 +1868,23 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
           love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.2)
         end
         love.graphics.rectangle("fill", hx - 4, hy - 4, hover_w + 8, hover_h + 8, 8, 8)
-        -- Draw card at hover scale
-        love.graphics.push()
-        love.graphics.translate(hx, hy)
-        love.graphics.scale(HAND_HOVER_SCALE)
-        card_frame.draw(0, 0, {
+        -- Draw card (no scale transform needed since HAND_HOVER_SCALE = 1.0)
+        card_frame.draw(hx, hy, {
+          w = hover_w,
+          h = hover_h,
           title = def.name,
           faction = def.faction,
           kind = def.kind,
-          typeLine = (def.subtypes and #def.subtypes > 0)
-            and (def.faction .. " — " .. table.concat(def.subtypes, ", "))
-            or (def.faction .. " — " .. def.kind),
+          subtypes = def.subtypes or {},
           text = def.text,
           costs = def.costs,
           upkeep = def.upkeep,
           attack = def.attack,
-          health = def.health,
+          health = def.health or def.baseHealth,
           tier = def.tier,
           abilities_list = def.abilities,
           show_ability_text = true,
         })
-        love.graphics.pop()
         -- Dim overlay for non-eligible hovered card
         if eligible_set and not eligible_set[hover_idx] then
           love.graphics.setColor(0, 0, 0, 0.55)
@@ -1814,7 +1977,11 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
             if util.point_in_rect(mx, my, base_tx + 4, ab_btn_y, BFIELD_TILE_W - 8, 24) then
               local key = tostring(pi) .. ":base:" .. ai
               local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
-              local can_act = pi == game_state.activePlayer and (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
+              local _c_base = game_state.pendingCombat
+              local _in_blk_base = _c_base and _c_base.stage == "DECLARED"
+                and (pi == _c_base.attacker or pi == _c_base.defender)
+              local can_act = (pi == game_state.activePlayer or (ab.fast and _in_blk_base))
+                and (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
               if can_act then
                 return "activate_ability", pi, { source = "base", ability_index = ai }
               else
@@ -1844,7 +2011,16 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
                 if util.point_in_rect(mx, my, tx + 4, ab_btn_y, tw - 8, 24) then
                   local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
                   local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
-                  local can_act = (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost) and pi == game_state.activePlayer
+                  local board_entry = player.board[si]
+                  local _c_brd = game_state.pendingCombat
+                  local _in_blk_brd = _c_brd and _c_brd.stage == "DECLARED"
+                    and (pi == _c_brd.attacker or pi == _c_brd.defender)
+                  local can_act = (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
+                    and (pi == game_state.activePlayer or (ab.fast and _in_blk_brd))
+                    and (not ab.rest or not (board_entry and board_entry.state and board_entry.state.rested))
+                    and (ab.effect ~= "deal_damage_x" or (player.resources[(ab.effect_args and ab.effect_args.resource) or "stone"] or 0) >= 1)
+                    and (ab.effect ~= "play_spell" or #abilities.find_matching_spell_hand_indices(player, ab.effect_args or {}) > 0)
+                    and (ab.effect ~= "discard_draw" or #player.hand >= (ab.effect_args and ab.effect_args.discard or 2))
                   if can_act then
                     return "activate_ability", pi, { source = "board", board_index = si, ability_index = ai }
                   else

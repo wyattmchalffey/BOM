@@ -15,6 +15,10 @@ local function is_pool_card(def, faction)
   if def.kind == "Base" then
     return false
   end
+  -- Resource nodes are chosen as starting resources (color identity), not deck cards.
+  if def.kind == "ResourceNode" then
+    return false
+  end
   -- Token workers (e.g., Peasant/Grunt) are not deckbuilder cards.
   if def.kind == "Worker" and def.deckable ~= true then
     return false
@@ -23,8 +27,8 @@ local function is_pool_card(def, faction)
 end
 
 local function max_copies_for_card(def)
-  -- Unit, Structure, and deckable Worker population constrain copies.
-  if def.kind == "Unit" or def.kind == "Structure" or def.kind == "Worker" or def.kind == "Artifact" then
+  -- Unit, Structure, deckable Worker, and Spell population constrain copies.
+  if def.kind == "Unit" or def.kind == "Structure" or def.kind == "Worker" or def.kind == "Artifact" or def.kind == "Spell" then
     return def.population or 1
   end
   return nil

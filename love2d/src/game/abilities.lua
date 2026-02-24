@@ -39,6 +39,10 @@ effect_handlers.draw_cards = function(ability, player, g)
   end
 end
 
+effect_handlers.discard_draw = function(ability, player, g)
+  -- Handled by the two-step DISCARD_DRAW_HAND command; nothing to do here.
+end
+
 effect_handlers.discard_random = function(ability, player, g)
   local args = ability.effect_args or {}
   local amount = args.amount or 1
@@ -217,6 +221,58 @@ effect_handlers.buff_self = function(ability, player, g, context)
   end
 end
 
+-- Targeted damage is resolved in the DEAL_DAMAGE_TO_TARGET command handler.
+effect_handlers.deal_damage = function(ability, player, g, context) end
+
+-- Variable damage is resolved in the DEAL_DAMAGE_X_TO_TARGET command handler.
+effect_handlers.deal_damage_x = function(ability, player, g, context) end
+
+-- Spell play is resolved via the PLAY_SPELL_VIA_ABILITY command handler.
+effect_handlers.play_spell = function(ability, player, g, context) end
+
+effect_handlers.place_counter_on_target = function(ability, player, g, context)
+  local args = ability.effect_args or {}
+  local counter_name = args.counter
+  if type(counter_name) ~= "string" or counter_name == "" then return end
+  local target_entry = (context and context.target_entry) or (context and context.source_entry)
+  if type(target_entry) ~= "table" then return end
+  target_entry.state = target_entry.state or {}
+  unit_stats.add_counter(target_entry.state, counter_name, args.amount or 1, false)
+end
+
+effect_handlers.search_deck = function(ability, player, g)
+  local args = ability.effect_args or {}
+  local criteria = args.search_criteria or {}
+  local function matches_criterion(card_def, crit)
+    if crit.kind and card_def.kind ~= crit.kind then return false end
+    if crit.faction and card_def.faction ~= crit.faction then return false end
+    if crit.subtypes then
+      if not card_def.subtypes then return false end
+      local found = false
+      for _, req in ipairs(crit.subtypes) do
+        for _, got in ipairs(card_def.subtypes) do
+          if req == got then found = true; break end
+        end
+        if found then break end
+      end
+      if not found then return false end
+    end
+    return true
+  end
+  for i, card_id in ipairs(player.deck) do
+    local ok, card_def = pcall(cards.get_card_def, card_id)
+    if ok and card_def then
+      for _, crit in ipairs(criteria) do
+        if matches_criterion(card_def, crit) then
+          table.remove(player.deck, i)
+          player.hand[#player.hand + 1] = card_id
+          return
+        end
+      end
+    end
+  end
+end
+
 effect_handlers.place_counter = function(ability, player, g, context)
   local args = ability.effect_args or {}
   local counter_name = args.counter
@@ -260,6 +316,94 @@ effect_handlers.remove_counter_play = function(ability, player, g, context)
       state = { rested = false, summoned_turn = g and g.turnNumber or nil },
     }
   end
+end
+
+effect_handlers.return_from_graveyard = function(ability, player, g)
+  local args = ability.effect_args or {}
+  local max_count = args.count or 1
+  local req_tier = args.tier        -- nil = any tier
+  local req_subtypes = args.subtypes -- nil = any subtype
+
+  local function card_matches(card_def)
+    if not card_def then return false end
+    if req_tier ~= nil and (card_def.tier or 0) ~= req_tier then return false end
+    if req_subtypes and #req_subtypes > 0 then
+      if not card_def.subtypes then return false end
+      local found = false
+      for _, req in ipairs(req_subtypes) do
+        for _, got in ipairs(card_def.subtypes) do
+          if req == got then found = true; break end
+        end
+        if found then break end
+      end
+      if not found then return false end
+    end
+    return true
+  end
+
+  local function count_on_board(card_id)
+    local n = 0
+    for _, entry in ipairs(player.board) do
+      if entry.card_id == card_id then n = n + 1 end
+    end
+    return n
+  end
+
+  -- Collect eligible graveyard indices newest-first; track pending adds per card_id
+  -- so population limits are respected across multiple picks of the same card.
+  local eligible = {}
+  local pending_add = {}
+  for i = #player.graveyard, 1, -1 do
+    if #eligible >= max_count then break end
+    local gentry = player.graveyard[i]
+    local ok, card_def = pcall(cards.get_card_def, gentry.card_id)
+    if ok and card_def and card_matches(card_def) then
+      local pending = pending_add[gentry.card_id] or 0
+      local pop = card_def.population
+      if not pop or (count_on_board(gentry.card_id) + pending) < pop then
+        eligible[#eligible + 1] = i
+        pending_add[gentry.card_id] = pending + 1
+      end
+    end
+  end
+
+  -- Remove from graveyard in descending index order (so earlier indices stay valid).
+  for _, gi in ipairs(eligible) do
+    local gentry = player.graveyard[gi]
+    table.remove(player.graveyard, gi)
+    player.board[#player.board + 1] = {
+      card_id = gentry.card_id,
+      state = { rested = false, summoned_turn = g and g.turnNumber or nil },
+    }
+  end
+end
+
+-- Return indices of hand Spell cards matching a play_spell ability's criteria.
+function abilities.find_matching_spell_hand_indices(player, effect_args)
+  local args = effect_args or {}
+  local indices = {}
+  for i, card_id in ipairs(player.hand) do
+    local ok, card_def = pcall(cards.get_card_def, card_id)
+    if ok and card_def and card_def.kind == "Spell" then
+      local match = true
+      if args.faction and card_def.faction ~= args.faction then match = false end
+      if args.tier and (card_def.tier or 0) ~= args.tier then match = false end
+      if args.subtypes and card_def.subtypes then
+        local has_subtype = false
+        for _, req in ipairs(args.subtypes) do
+          for _, got in ipairs(card_def.subtypes) do
+            if req == got then has_subtype = true; break end
+          end
+          if has_subtype then break end
+        end
+        if not has_subtype then match = false end
+      elseif args.subtypes then
+        match = false
+      end
+      if match then indices[#indices + 1] = i end
+    end
+  end
+  return indices
 end
 
 -- Return indices of hand cards matching a play_unit ability's criteria.

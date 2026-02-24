@@ -1,13 +1,41 @@
--- Simple procedural art for cards and resource nodes (no image files).
+-- Mostly procedural art for cards and resource nodes, with optional image overrides.
 -- All drawing uses (x, y, w, h) as the art box; shapes are scaled to fit.
 
 local card_art = {}
+card_art._image_cache = {}
 
 local function fill(r, g, b, a) love.graphics.setColor(r, g, b, a or 1) end
 
+local function get_image_cached(path)
+  local cached = card_art._image_cache[path]
+  if cached ~= nil then
+    return cached or nil
+  end
+  local ok, img = pcall(love.graphics.newImage, path)
+  if ok and img then
+    card_art._image_cache[path] = img
+    return img
+  end
+  card_art._image_cache[path] = false
+  return nil
+end
+
+local function draw_image_cover(img, ax, ay, aw, ah)
+  local iw, ih = img:getWidth(), img:getHeight()
+  if iw <= 0 or ih <= 0 then return end
+  local sx = aw / iw
+  local sy = ah / ih
+  local scale = math.max(sx, sy)
+  local dw = iw * scale
+  local dh = ih * scale
+  local dx = ax + (aw - dw) / 2
+  local dy = ay + (ah - dh) / 2
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.draw(img, dx, dy, 0, scale, scale)
+end
+
 -- Draw art inside box (ax, ay, aw, ah). name_id: "Castle", "Encampment", "Wood", "Stone", "Food", or kind "Structure"/"Unit".
 function card_art.draw_card_art(ax, ay, aw, ah, kind, is_base, name_or_faction)
-  local cx, cy = ax + aw/2, ay + ah/2
   if is_base then
     if name_or_faction == "Human" or (name_or_faction or ""):lower():match("castle") then
       card_art._draw_castle(ax, ay, aw, ah)
@@ -16,6 +44,16 @@ function card_art.draw_card_art(ax, ay, aw, ah, kind, is_base, name_or_faction)
     end
     return
   end
+
+  local title_lc = (name_or_faction or ""):lower()
+  if title_lc == "brittle skeleton" then
+    local img = get_image_cached("assets/skeleton.png")
+    if img then
+      draw_image_cover(img, ax, ay, aw, ah)
+      return
+    end
+  end
+
   if kind == "Structure" or kind == "Artifact" then
     card_art._draw_structure(ax, ay, aw, ah)
   elseif kind == "Unit" then

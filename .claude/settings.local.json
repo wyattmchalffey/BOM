@@ -1,7 +1,14 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find:*)"
+      "Bash(find:*)",
+      "Bash(head:*)",
+      "Bash(echo === $\\(basename $f\\) ===:*)",
+      "Bash(for f in /c/Users/Wyatt/Desktop/BOM/love2d/*.lua /c/Users/Wyatt/Desktop/BOM/love2d/src/*.lua; do echo \"=== $\\(basename $f\\) ===\"; head -10 \"$f\" | grep \"^--\" | head -3; done 2>/dev/null)",
+      "Bash(cd /c/Users/Wyatt/Desktop/BOM && luac -p love2d/src/ui/card_frame.lua 2>&1)",
+      "Bash(cd /c/Users/Wyatt/Desktop/BOM && luac -p love2d/src/state/menu.lua 2>&1)",
+      "Bash(cd /c/Users/Wyatt/Desktop/BOM && luac -p love2d/src/ui/deck_viewer.lua 2>&1 && luac -p love2d/src/state/game.lua 2>&1 && luac -p love2d/src/ui/board.lua 2>&1)",
+      "Bash(cd:*)"
     ]
   }
 }

@@ -8,6 +8,7 @@ local cards = require("src.game.cards")
 local abilities = require("src.game.abilities")
 local combat = require("src.game.combat")
 local game_state = require("src.game.state")
+local unit_stats = require("src.game.unit_stats")
 
 local commands = {}
 
@@ -96,13 +97,31 @@ local function copy_table(t)
   return out
 end
 
+-- Returns true when command.fast_ability is set and we're in the DECLARED
+-- blocker window, meaning the active-player / MAIN-phase gate is bypassed.
+local function fast_in_blocker_window(g, player_index, command)
+  if not command.fast_ability then return false end
+  local c = g.pendingCombat
+  return c ~= nil and c.stage == "DECLARED"
+    and (player_index == c.attacker or player_index == c.defender)
+end
+
 local function can_activate(g, player_index, card_def, source_key, ability_index)
-  if g.phase ~= "MAIN" then return false end
-  if player_index ~= g.activePlayer then return false end
   if not card_def or not card_def.abilities then return false end
 
   local ab = card_def.abilities[ability_index]
   if not ab or ab.type ~= "activated" then return false end
+
+  -- Fast abilities may be used during the blocker window (DECLARED stage) by
+  -- either the attacker or the defender, bypassing the normal MAIN-phase gate.
+  local c = g.pendingCombat
+  local in_blocker_window = ab.fast == true and c and c.stage == "DECLARED"
+    and (player_index == c.attacker or player_index == c.defender)
+
+  if not in_blocker_window then
+    if g.phase ~= "MAIN" then return false end
+    if player_index ~= g.activePlayer then return false end
+  end
 
   local key = tostring(player_index) .. ":" .. source_key
   if ab.once_per_turn and g.activatedUsedThisTurn[key] then return false end
@@ -253,6 +272,11 @@ function commands.execute(g, command)
       if not entry then return fail("missing_board_entry") end
       card_def = cards.get_card_def(entry.card_id)
       source_key = "board:" .. source.index .. ":" .. ability_index
+      -- Check rest cost before further validation
+      local ab_check = card_def.abilities and card_def.abilities[ability_index]
+      if ab_check and ab_check.rest and entry.state and entry.state.rested then
+        return fail("unit_is_rested")
+      end
     else
       return fail("invalid_source_type")
     end
@@ -281,8 +305,10 @@ function commands.execute(g, command)
     if not p or not source or not ability_index or not hand_index then
       return fail("invalid_play_unit_payload")
     end
-    if pi ~= g.activePlayer then return fail("not_active_player") end
-    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    if not fast_in_blocker_window(g, pi, command) then
+      if pi ~= g.activePlayer then return fail("not_active_player") end
+      if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    end
 
     local card_def
     local source_key
@@ -324,6 +350,111 @@ function commands.execute(g, command)
     return succeed(g,
       { source_type = source.type, ability_index = ability_index, card_id = card_id, hand_index = hand_index },
       { { type = "unit_played_from_hand", player_index = pi, source_type = source.type, ability_index = ability_index, card_id = card_id } }
+    )
+  end
+
+  if command.type == "PLAY_SPELL_VIA_ABILITY" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local hand_index = command.hand_index
+    local target_player_index = command.target_player_index
+    local target_board_index = command.target_board_index
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index or not hand_index then
+      return fail("invalid_payload")
+    end
+    if not fast_in_blocker_window(g, pi, command) then
+      if pi ~= g.activePlayer then return fail("not_active_player") end
+      if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    end
+
+    -- Resolve source ability
+    local src_card_def
+    local source_key
+    if source.type == "base" then
+      src_card_def = cards.get_card_def(p.baseId)
+      source_key = "base:" .. ability_index
+    elseif source.type == "board" then
+      local entry = p.board[source.index]
+      if not entry then return fail("missing_board_entry") end
+      src_card_def = cards.get_card_def(entry.card_id)
+      source_key = "board:" .. source.index .. ":" .. ability_index
+    else
+      return fail("invalid_source_type")
+    end
+    if not src_card_def or not src_card_def.abilities then return fail("no_abilities") end
+    local ab = src_card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "play_spell" then
+      return fail("not_play_spell_ability")
+    end
+    if not can_activate(g, pi, src_card_def, source_key, ability_index) then
+      return fail("ability_not_activatable")
+    end
+
+    -- Validate hand card is an eligible spell
+    if hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
+    local matching = abilities.find_matching_spell_hand_indices(p, ab.effect_args)
+    local is_eligible = false
+    for _, idx in ipairs(matching) do
+      if idx == hand_index then is_eligible = true; break end
+    end
+    if not is_eligible then return fail("hand_card_not_eligible") end
+
+    local spell_id = p.hand[hand_index]
+    local spell_ok, spell_def = pcall(cards.get_card_def, spell_id)
+    if not spell_ok or not spell_def then return fail("invalid_spell_card") end
+
+    -- Validate target if the spell needs one
+    for _, sab in ipairs(spell_def.abilities or {}) do
+      if sab.trigger == "on_cast" and sab.effect == "deal_damage" then
+        local args = sab.effect_args or {}
+        if args.target and args.target ~= "self" then
+          if type(target_player_index) ~= "number" then return fail("missing_target_player") end
+          local tp = g.players[target_player_index + 1]
+          if not tp then return fail("invalid_target_player") end
+          if not target_board_index then return fail("missing_target") end
+          local target_entry = tp.board[target_board_index]
+          if not target_entry then return fail("invalid_target") end
+          local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
+          if not tok or not tdef then return fail("invalid_target_card") end
+          if args.target == "unit" and tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then
+            return fail("target_not_a_unit")
+          end
+        end
+      end
+    end
+
+    -- Pay ability cost and mark used
+    local key = tostring(pi) .. ":" .. source_key
+    for _, c in ipairs(ab.cost or {}) do
+      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
+    end
+    if ab.once_per_turn then g.activatedUsedThisTurn[key] = true end
+
+    -- Remove spell from hand
+    table.remove(p.hand, hand_index)
+
+    -- Resolve on_cast abilities (spell cost is waived — already paid by ability)
+    for _, sab in ipairs(spell_def.abilities or {}) do
+      if sab.trigger == "on_cast" then
+        if sab.effect == "deal_damage" and target_board_index then
+          local damage = (sab.effect_args or {}).damage or 0
+          actions.apply_damage_to_unit(g, target_player_index, target_board_index, damage)
+        else
+          abilities.resolve(sab, p, g, {})
+        end
+      end
+    end
+
+    -- Move spell to graveyard
+    p.graveyard = p.graveyard or {}
+    p.graveyard[#p.graveyard + 1] = { card_id = spell_id }
+
+    return succeed(g,
+      { card_id = spell_id, ability_index = ability_index },
+      { { type = "spell_cast_via_ability", player_index = pi, card_id = spell_id } }
     )
   end
 
@@ -646,6 +777,103 @@ function commands.execute(g, command)
     end
   end
 
+  if command.type == "RETURN_FROM_GRAVEYARD" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local selected = command.selected_graveyard_indices
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index then return fail("invalid_payload") end
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    if source.type ~= "board" then return fail("invalid_source_type") end
+
+    local entry = p.board[source.index]
+    if not entry then return fail("missing_board_entry") end
+    local card_def = cards.get_card_def(entry.card_id)
+    if not card_def or not card_def.abilities then return fail("no_abilities") end
+
+    local ab = card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "return_from_graveyard" then
+      return fail("not_return_ability")
+    end
+
+    local source_key = "board:" .. source.index .. ":" .. ability_index
+    local key = tostring(pi) .. ":" .. source_key
+    if ab.once_per_turn and g.activatedUsedThisTurn[key] then return fail("ability_already_used") end
+    if not abilities.can_pay_cost(p.resources, ab.cost) then return fail("insufficient_resources") end
+
+    if type(selected) ~= "table" or #selected == 0 then return fail("no_cards_selected") end
+    local args = ab.effect_args or {}
+    local max_count = args.count or 1
+    if #selected > max_count then return fail("too_many_selected") end
+
+    local req_tier = args.tier
+    local req_subtypes = args.subtypes
+    local req_target = args.target
+    local function card_matches(cdef)
+      if not cdef then return false end
+      if req_tier ~= nil and (cdef.tier or 0) ~= req_tier then return false end
+      if req_target == "unit" and cdef.kind ~= "Unit" and cdef.kind ~= "Worker" then return false end
+      if req_subtypes and #req_subtypes > 0 then
+        if not cdef.subtypes then return false end
+        local found = false
+        for _, req in ipairs(req_subtypes) do
+          for _, got in ipairs(cdef.subtypes) do
+            if req == got then found = true; break end
+          end
+          if found then break end
+        end
+        if not found then return false end
+      end
+      return true
+    end
+
+    -- Validate each selected index
+    local to_return = {}
+    local seen = {}
+    for _, gi in ipairs(selected) do
+      if type(gi) ~= "number" or gi < 1 or gi > #p.graveyard or seen[gi] then
+        return fail("invalid_graveyard_index")
+      end
+      seen[gi] = true
+      local gentry = p.graveyard[gi]
+      local ok_g, gdef = pcall(cards.get_card_def, gentry.card_id)
+      if not ok_g or not gdef or not card_matches(gdef) then
+        return fail("invalid_graveyard_card")
+      end
+      to_return[#to_return + 1] = { gi = gi, card_id = gentry.card_id }
+    end
+
+    -- Pay cost and mark used
+    for _, c in ipairs(ab.cost or {}) do
+      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
+    end
+    g.activatedUsedThisTurn[key] = true
+
+    -- Remove from graveyard highest-index first, then add to board or hand
+    table.sort(to_return, function(a, b) return a.gi > b.gi end)
+    local returned = {}
+    for _, etr in ipairs(to_return) do
+      table.remove(p.graveyard, etr.gi)
+      if args.return_to == "hand" then
+        p.hand[#p.hand + 1] = etr.card_id
+      else
+        p.board[#p.board + 1] = {
+          card_id = etr.card_id,
+          state = { rested = false, summoned_turn = g.turnNumber },
+        }
+      end
+      returned[#returned + 1] = etr.card_id
+    end
+
+    return succeed(g,
+      { summoned = returned, returned_count = #returned },
+      { { type = "units_returned_from_graveyard", player_index = pi, count = #returned } }
+    )
+  end
+
   if command.type == "PLAY_MONUMENT_FROM_HAND" then
     local pi = command.player_index
     local hand_index = command.hand_index
@@ -673,6 +901,380 @@ function commands.execute(g, command)
     return succeed(g,
       { card_id = card_id },
       { { type = "monument_card_played", player_index = pi, card_id = card_id } }
+    )
+  end
+
+  if command.type == "DEAL_DAMAGE_TO_TARGET" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local target_player_index = command.target_player_index
+    local target_board_index = command.target_board_index
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index then return fail("invalid_payload") end
+    if not fast_in_blocker_window(g, pi, command) then
+      if pi ~= g.activePlayer then return fail("not_active_player") end
+      if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    end
+    if source.type ~= "board" then return fail("invalid_source_type") end
+
+    local source_entry = p.board[source.index]
+    if not source_entry then return fail("missing_source_entry") end
+    local card_def = cards.get_card_def(source_entry.card_id)
+    if not card_def or not card_def.abilities then return fail("no_abilities") end
+
+    local ab = card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "deal_damage" then
+      return fail("not_deal_damage_ability")
+    end
+
+    local source_key = "board:" .. source.index .. ":" .. ability_index
+    local key = tostring(pi) .. ":" .. source_key
+    if ab.once_per_turn and g.activatedUsedThisTurn[key] then return fail("ability_already_used") end
+    if not abilities.can_pay_cost(p.resources, ab.cost) then return fail("insufficient_resources") end
+    if ab.rest and source_entry.state and source_entry.state.rested then return fail("unit_is_rested") end
+
+    if type(target_player_index) ~= "number" then return fail("missing_target_player") end
+    local tp = g.players[target_player_index + 1]
+    if not tp then return fail("invalid_target_player") end
+
+    local args = ab.effect_args or {}
+    local damage = args.damage or 0
+
+    -- Pay costs
+    for _, c in ipairs(ab.cost or {}) do
+      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
+    end
+    if ab.rest then
+      source_entry.state = source_entry.state or {}
+      source_entry.state.rested = true
+    end
+    g.activatedUsedThisTurn[key] = true
+
+    if command.target_is_base then
+      -- Damage the target player's base directly
+      tp.life = math.max(0, (tp.life or 0) - damage)
+      return succeed(g,
+        { damage = damage, target_player_index = target_player_index, target_is_base = true },
+        { { type = "damage_dealt", player_index = pi, damage = damage } }
+      )
+    end
+
+    if not target_board_index then return fail("missing_target") end
+    local target_entry = tp.board[target_board_index]
+    if not target_entry then return fail("invalid_target") end
+    local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
+    if not tok or not tdef then return fail("invalid_target_card") end
+
+    if args.target == "unit" and tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then
+      return fail("target_not_a_unit")
+    end
+
+    actions.apply_damage_to_unit(g, target_player_index, target_board_index, damage)
+
+    return succeed(g,
+      { damage = damage, target_player_index = target_player_index },
+      { { type = "damage_dealt", player_index = pi, damage = damage } }
+    )
+  end
+
+  if command.type == "PLACE_COUNTER_ON_TARGET" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local target_board_index = command.target_board_index
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index then return fail("invalid_payload") end
+    if not fast_in_blocker_window(g, pi, command) then
+      if pi ~= g.activePlayer then return fail("not_active_player") end
+      if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    end
+    if source.type ~= "board" then return fail("invalid_source_type") end
+
+    local source_entry = p.board[source.index]
+    if not source_entry then return fail("missing_source_entry") end
+    local card_def = cards.get_card_def(source_entry.card_id)
+    if not card_def or not card_def.abilities then return fail("no_abilities") end
+
+    local ab = card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "place_counter_on_target" then
+      return fail("not_place_counter_ability")
+    end
+
+    local source_key = "board:" .. source.index .. ":" .. ability_index
+    local key = tostring(pi) .. ":" .. source_key
+    if ab.once_per_turn and g.activatedUsedThisTurn[key] then return fail("ability_already_used") end
+    if not abilities.can_pay_cost(p.resources, ab.cost) then return fail("insufficient_resources") end
+    if ab.rest and source_entry.state and source_entry.state.rested then return fail("unit_is_rested") end
+
+    if not target_board_index then return fail("missing_target") end
+    local target_entry = p.board[target_board_index]
+    if not target_entry then return fail("invalid_target") end
+    local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
+    if not tok or not tdef then return fail("invalid_target_card") end
+    if tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then return fail("target_not_a_unit") end
+
+    -- Pay costs
+    for _, c in ipairs(ab.cost or {}) do
+      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
+    end
+    if ab.rest then
+      source_entry.state = source_entry.state or {}
+      source_entry.state.rested = true
+    end
+    g.activatedUsedThisTurn[key] = true
+
+    -- Apply effect
+    abilities.resolve(ab, p, g, {
+      source = source,
+      source_entry = source_entry,
+      target_entry = target_entry,
+      source_key = source_key,
+      ability_index = ability_index,
+      player_index = pi,
+    })
+
+    return succeed(g,
+      { target_board_index = target_board_index },
+      { { type = "counter_placed_on_target", player_index = pi, target_board_index = target_board_index } }
+    )
+  end
+
+  if command.type == "PLAY_SPELL_FROM_HAND" then
+    local pi = command.player_index
+    local hand_index = command.hand_index
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    local p = g.players[pi + 1]
+    if not hand_index or hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
+    local card_id = p.hand[hand_index]
+    local card_ok, card_def = pcall(cards.get_card_def, card_id)
+    if not card_ok or not card_def then return fail("invalid_card") end
+    if card_def.kind ~= "Spell" then return fail("not_a_spell") end
+
+    -- Check for monument cost ability (overrides resource cost)
+    local mon_cost_ab = nil
+    for _, ab in ipairs(card_def.abilities or {}) do
+      if ab.type == "static" and ab.effect == "monument_cost" then mon_cost_ab = ab; break end
+    end
+    local monument_board_index = command.monument_board_index
+    if mon_cost_ab then
+      if not monument_board_index then return fail("missing_monument_board_index") end
+      local monument_entry = p.board[monument_board_index]
+      if not monument_entry then return fail("invalid_monument") end
+      local ok_mon, mon_def = pcall(cards.get_card_def, monument_entry.card_id)
+      if not ok_mon or not mon_def then return fail("invalid_monument_card") end
+      local is_monument = false
+      for _, kw in ipairs(mon_def.keywords or {}) do
+        if kw == "monument" then is_monument = true; break end
+      end
+      if not is_monument then return fail("not_a_monument") end
+      local min_counters = (mon_cost_ab.effect_args and mon_cost_ab.effect_args.min_counters) or 1
+      monument_entry.state = monument_entry.state or {}
+      if unit_stats.counter_count(monument_entry.state, "wonder") < min_counters then
+        return fail("insufficient_monument_counters")
+      end
+    else
+      if not abilities.can_pay_cost(p.resources, card_def.costs) then return fail("insufficient_resources") end
+    end
+
+    -- Validate target requirements for targeted on_cast abilities
+    local target_player_index = command.target_player_index
+    local target_board_index = command.target_board_index
+    for _, ab in ipairs(card_def.abilities or {}) do
+      if ab.trigger == "on_cast" and ab.effect == "deal_damage" then
+        local args = ab.effect_args or {}
+        if args.target and args.target ~= "self" then
+          if type(target_player_index) ~= "number" then return fail("missing_target_player") end
+          local tp = g.players[target_player_index + 1]
+          if not tp then return fail("invalid_target_player") end
+          if not target_board_index then return fail("missing_target") end
+          local target_entry = tp.board[target_board_index]
+          if not target_entry then return fail("invalid_target") end
+          local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
+          if not tok or not tdef then return fail("invalid_target_card") end
+          if args.target == "unit" and tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then
+            return fail("target_not_a_unit")
+          end
+        end
+      end
+    end
+
+    -- Pay costs
+    if mon_cost_ab then
+      unit_stats.remove_counter(p.board[monument_board_index].state, "wonder", 1)
+    else
+      for _, c in ipairs(card_def.costs or {}) do
+        p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
+      end
+    end
+
+    -- Remove from hand
+    table.remove(p.hand, hand_index)
+
+    -- Resolve on_cast abilities
+    for _, ab in ipairs(card_def.abilities or {}) do
+      if ab.trigger == "on_cast" then
+        if ab.effect == "deal_damage" and target_board_index then
+          local damage = (ab.effect_args or {}).damage or 0
+          actions.apply_damage_to_unit(g, target_player_index, target_board_index, damage)
+        else
+          abilities.resolve(ab, p, g, {})
+        end
+      end
+    end
+
+    -- Move to graveyard
+    p.graveyard = p.graveyard or {}
+    p.graveyard[#p.graveyard + 1] = { card_id = card_id }
+
+    return succeed(g,
+      { card_id = card_id },
+      { { type = "spell_cast", player_index = pi, card_id = card_id } }
+    )
+  end
+
+  if command.type == "DEAL_DAMAGE_X_TO_TARGET" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local target_player_index = command.target_player_index
+    local target_board_index = command.target_board_index
+    local x_amount = command.x_amount
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index then return fail("invalid_payload") end
+    if not fast_in_blocker_window(g, pi, command) then
+      if pi ~= g.activePlayer then return fail("not_active_player") end
+      if g.phase ~= "MAIN" then return fail("wrong_phase") end
+    end
+    if source.type ~= "board" then return fail("invalid_source_type") end
+    if type(x_amount) ~= "number" or x_amount < 1 then return fail("invalid_x_amount") end
+
+    local source_entry = p.board[source.index]
+    if not source_entry then return fail("missing_source_entry") end
+    local card_def = cards.get_card_def(source_entry.card_id)
+    if not card_def or not card_def.abilities then return fail("no_abilities") end
+
+    local ab = card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "deal_damage_x" then
+      return fail("not_deal_damage_x_ability")
+    end
+
+    local source_key = "board:" .. source.index .. ":" .. ability_index
+    local key = tostring(pi) .. ":" .. source_key
+    if ab.once_per_turn and g.activatedUsedThisTurn[key] then return fail("ability_already_used") end
+    if ab.rest and source_entry.state and source_entry.state.rested then return fail("unit_is_rested") end
+
+    local args = ab.effect_args or {}
+    local resource = args.resource or "stone"
+    local available = p.resources[resource] or 0
+    if x_amount > available then return fail("insufficient_resources") end
+
+    if type(target_player_index) ~= "number" then return fail("missing_target_player") end
+    local tp = g.players[target_player_index + 1]
+    if not tp then return fail("invalid_target_player") end
+
+    if not target_board_index then return fail("missing_target") end
+    local target_entry = tp.board[target_board_index]
+    if not target_entry then return fail("invalid_target") end
+    local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
+    if not tok or not tdef then return fail("invalid_target_card") end
+    if args.target == "unit" and tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then
+      return fail("target_not_a_unit")
+    end
+
+    -- Pay costs
+    p.resources[resource] = available - x_amount
+    if ab.rest then
+      source_entry.state = source_entry.state or {}
+      source_entry.state.rested = true
+    end
+    g.activatedUsedThisTurn[key] = true
+
+    actions.apply_damage_to_unit(g, target_player_index, target_board_index, x_amount)
+
+    return succeed(g,
+      { damage = x_amount, target_player_index = target_player_index },
+      { { type = "damage_dealt", player_index = pi, damage = x_amount } }
+    )
+  end
+
+  if command.type == "DISCARD_DRAW_HAND" then
+    local pi = command.player_index
+    local source = command.source
+    local ability_index = command.ability_index
+    local hand_indices = command.hand_indices
+    local p = g.players[pi + 1]
+
+    if not p or not source or not ability_index or type(hand_indices) ~= "table" then
+      return fail("invalid_discard_draw_payload")
+    end
+    if pi ~= g.activePlayer then return fail("not_active_player") end
+    if g.phase ~= "MAIN" then return fail("wrong_phase") end
+
+    local card_def, source_key
+    if source.type == "base" then
+      card_def = cards.get_card_def(p.baseId)
+      source_key = "base:" .. ability_index
+    elseif source.type == "board" then
+      local entry = p.board[source.index]
+      if not entry then return fail("missing_board_entry") end
+      card_def = cards.get_card_def(entry.card_id)
+      source_key = "board:" .. source.index .. ":" .. ability_index
+    else
+      return fail("invalid_source_type")
+    end
+    if not card_def or not card_def.abilities then return fail("no_abilities") end
+
+    local ab = card_def.abilities[ability_index]
+    if not ab or ab.type ~= "activated" or ab.effect ~= "discard_draw" then
+      return fail("not_discard_draw_ability")
+    end
+    if not can_activate(g, pi, card_def, source_key, ability_index) then
+      return fail("ability_not_activatable")
+    end
+
+    local args = ab.effect_args or {}
+    local required_discard = args.discard or 2
+    local draw_amount = args.draw or 1
+
+    if #hand_indices ~= required_discard then return fail("wrong_discard_count") end
+
+    local seen = {}
+    for _, hi in ipairs(hand_indices) do
+      if type(hi) ~= "number" or hi < 1 or hi > #p.hand then return fail("invalid_hand_index") end
+      if seen[hi] then return fail("duplicate_hand_index") end
+      seen[hi] = true
+    end
+
+    -- Pay cost and mark used
+    for _, c in ipairs(ab.cost or {}) do
+      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
+    end
+    local key = tostring(pi) .. ":" .. source_key
+    if ab.once_per_turn then g.activatedUsedThisTurn[key] = true end
+
+    -- Discard in descending index order so earlier indices stay valid
+    local sorted = {}
+    for _, hi in ipairs(hand_indices) do sorted[#sorted + 1] = hi end
+    table.sort(sorted, function(a, b) return a > b end)
+    for _, hi in ipairs(sorted) do
+      table.remove(p.hand, hi)
+    end
+
+    -- Draw
+    for _ = 1, draw_amount do
+      if #p.deck > 0 then
+        p.hand[#p.hand + 1] = table.remove(p.deck)
+      end
+    end
+
+    return succeed(g,
+      { discard_count = required_discard, draw_count = draw_amount },
+      { { type = "discard_draw_resolved", player_index = pi, discard_count = required_discard, draw_count = draw_amount } }
     )
   end
 
