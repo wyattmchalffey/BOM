@@ -4,6 +4,7 @@
 local config = require("src.data.config")
 local cards = require("src.game.cards")
 local abilities = require("src.game.abilities")
+local game_events = require("src.game.events")
 local game_state = require("src.game.state")
 local unit_stats = require("src.game.unit_stats")
 
@@ -23,36 +24,27 @@ local function copy_table(t)
   return out
 end
 
-local function is_undead(card_def)
-  if not card_def or not card_def.subtypes then return false end
-  for _, st in ipairs(card_def.subtypes) do
-    if st == "Undead" then return true end
-  end
-  return false
+local function is_activated_once_used(g, player_index, source_key, source, ability_index)
+  return abilities.is_activated_ability_used_this_turn(g, player_index, source_key, source, ability_index)
+end
+
+local function set_activated_once_used(g, player_index, source_key, source, ability_index, used)
+  abilities.set_activated_ability_used_this_turn(g, player_index, source_key, source, ability_index, used)
+end
+
+local function append_board_entry(g, player, entry)
+  abilities.ensure_board_entry_instance_id(g, entry)
+  player.board[#player.board + 1] = entry
+  return entry
 end
 
 local function fire_on_ally_death_triggers(player, game_state, dead_card_def)
-  for _, entry in ipairs(player.board) do
-    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
-    if ok and card_def and card_def.abilities then
-      for _, ab in ipairs(card_def.abilities) do
-        if ab.type == "triggered" and ab.trigger == "on_ally_death" then
-          local args = ab.effect_args or {}
-          local blocked = false
-          if args.condition == "non_undead" and is_undead(dead_card_def) then
-            blocked = true
-          elseif args.condition == "non_undead_orc" then
-            if is_undead(dead_card_def) or (dead_card_def and dead_card_def.faction ~= "Orc") then
-              blocked = true
-            end
-          end
-          if not blocked then
-            abilities.resolve(ab, player, game_state, { source_entry = entry })
-          end
-        end
-      end
-    end
-  end
+  local _, _, aggregate = game_events.emit(game_state, {
+    type = "ally_died",
+    player = player,
+    dead_card_def = dead_card_def,
+  })
+  return aggregate
 end
 
 local function get_faction_worker_def(faction)
@@ -117,12 +109,23 @@ end
 local function has_keyword(card_def, needle, state)
   if type(state) == "table" then
     local temp = state.temp_keywords
+    local perm = state.perm_keywords
     local want_state = string.lower(needle)
     if type(temp) == "table" then
       if temp[want_state] == true or temp[needle] == true then
         return true
       end
       for _, kw in pairs(temp) do
+        if type(kw) == "string" and string.lower(kw) == want_state then
+          return true
+        end
+      end
+    end
+    if type(perm) == "table" then
+      if perm[want_state] == true or perm[needle] == true then
+        return true
+      end
+      for _, kw in pairs(perm) do
         if type(kw) == "string" and string.lower(kw) == want_state then
           return true
         end
@@ -177,14 +180,13 @@ local function special_worker_multiplier(sw_card_id)
 end
 
 local function fire_on_play_triggers(player, game_state, played_card_id)
-  local ok, def = pcall(cards.get_card_def, played_card_id)
-  if ok and def and def.abilities then
-    for _, ab in ipairs(def.abilities) do
-      if ab.type == "triggered" and (ab.trigger == "on_play" or ab.trigger == "on_construct") then
-        abilities.resolve(ab, player, game_state)
-      end
-    end
-  end
+  local _, _, aggregate = game_events.emit(game_state, {
+    type = "card_played",
+    player = player,
+    card_id = played_card_id,
+    triggers = { "on_play", "on_construct" },
+  })
+  return aggregate
 end
 
 local function destroy_board_entry(player, game_state, board_index)
@@ -209,15 +211,12 @@ local function destroy_board_entry(player, game_state, board_index)
   end
 
   local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
-  if t_ok and t_def and t_def.abilities then
-    for _, ab in ipairs(t_def.abilities) do
-      if ab.type == "triggered" and ab.trigger == "on_destroyed" then
-        abilities.resolve(ab, player, game_state)
-      end
-    end
-  end
   if t_ok and t_def then
-    fire_on_ally_death_triggers(player, game_state, t_def)
+    game_events.emit(game_state, {
+      type = "card_destroyed",
+      player = player,
+      card_def = t_def,
+    })
   end
 
   player.graveyard[#player.graveyard + 1] = { card_id = target.card_id, state = copy_table(target.state or {}) }
@@ -295,20 +294,12 @@ end
 
 -- Get the monument_cost ability from a card def (returns ability or nil)
 local function get_monument_cost_ability(card_def)
-  if not card_def or not card_def.abilities then return nil end
-  for _, ab in ipairs(card_def.abilities) do
-    if ab.type == "static" and ab.effect == "monument_cost" then return ab end
-  end
-  return nil
+  return abilities.find_static_effect_ability(card_def, "monument_cost")
 end
 
 -- Get the play_cost_sacrifice ability from a card def (returns ability or nil)
 local function get_sacrifice_ability(card_def)
-  if not card_def or not card_def.abilities then return nil end
-  for _, ab in ipairs(card_def.abilities) do
-    if ab.type == "static" and ab.effect == "play_cost_sacrifice" then return ab end
-  end
-  return nil
+  return abilities.find_static_effect_ability(card_def, "play_cost_sacrifice")
 end
 
 -- Draw cards from deck to hand
@@ -537,37 +528,33 @@ function actions.activate_ability(g, player_index, card_def, source_key, ability
     source_entry = p.board[source.index]
   end
 
-  local key = tostring(player_index) .. ":" .. source_key
-  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
-  if not abilities.can_pay_cost(p.resources, ability.cost) then return false, "insufficient_resources" end
-
-  -- Check rest cost
-  if ability.rest and source_entry and source_entry.state and source_entry.state.rested then
-    return false, "unit_is_rested"
+  if ability.once_per_turn and is_activated_once_used(g, player_index, source_key, source, ability_index) then
+    return false, "ability_already_used"
   end
+  local can_pay, can_pay_reason = abilities.can_pay_activated_ability_costs(p.resources, ability, {
+    source_entry = source_entry,
+    require_variable_min = true,
+  })
+  if not can_pay then return false, can_pay_reason or "insufficient_resources" end
 
-  -- Pay resource costs
-  for _, c in ipairs(ability.cost or {}) do
-    p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-  end
-  g.activatedUsedThisTurn[key] = true
-
-  -- Pay rest cost
-  if ability.rest and source_entry then
-    source_entry.state = source_entry.state or {}
-    source_entry.state.rested = true
-  end
+  -- Pay activated costs (resources/x + rest)
+  local paid, pay_reason = abilities.pay_activated_ability_costs(p.resources, ability, {
+    source_entry = source_entry,
+  })
+  if not paid then return false, pay_reason or "insufficient_resources" end
+  set_activated_once_used(g, player_index, source_key, source, ability_index, true)
 
   -- Resolve effect
-  abilities.resolve(ability, p, g, {
+  local resolve_result = abilities.resolve(ability, p, g, {
     source = source,
     source_entry = source_entry,
     source_key = source_key,
     ability_index = ability_index,
     player_index = player_index,
+    activated_costs_paid = true,
   })
 
-  return true
+  return true, nil, resolve_result
 end
 
 -- Play a specific unit card from hand via a play_unit ability (two-step selection flow).
@@ -585,9 +572,11 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
     return false, "not_play_unit_ability"
   end
 
-  local key = tostring(player_index) .. ":" .. source_key
-  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
-  if not abilities.can_pay_cost(p.resources, ability.cost) then return false, "insufficient_resources" end
+  if ability.once_per_turn and is_activated_once_used(g, player_index, source_key, nil, ability_index) then
+    return false, "ability_already_used"
+  end
+  local can_pay, can_pay_reason = abilities.can_pay_activated_ability_cost(p.resources, ability)
+  if not can_pay then return false, can_pay_reason or "insufficient_resources" end
 
   -- Validate hand_index
   if not hand_index or hand_index < 1 or hand_index > #p.hand then return false, "invalid_hand_index" end
@@ -599,10 +588,9 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   if not is_eligible then return false, "hand_card_not_eligible" end
 
   -- Pay cost
-  for _, c in ipairs(ability.cost or {}) do
-    p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-  end
-  g.activatedUsedThisTurn[key] = true
+  local paid, pay_reason = abilities.pay_activated_ability_cost(p.resources, ability)
+  if not paid then return false, pay_reason or "insufficient_resources" end
+  set_activated_once_used(g, player_index, source_key, nil, ability_index, true)
 
   -- Remove card from hand and place on board
   local card_id = p.hand[hand_index]
@@ -612,15 +600,152 @@ function actions.play_unit_from_hand(g, player_index, card_def, source_key, abil
   if ok_played then
     played_def = maybe_played
   end
-  p.board[#p.board + 1] = {
+  append_board_entry(g, p, {
     card_id = card_id,
     state = entering_board_state(g, played_def, {}),
-  }
+  })
 
   -- Fire on_play triggered abilities
-  fire_on_play_triggers(p, g, card_id)
+  local trigger_result = fire_on_play_triggers(p, g, card_id)
 
-  return true
+  return true, nil, trigger_result
+end
+
+local function load_spell_from_hand_for_cast(player, hand_index, opts)
+  opts = opts or {}
+  if type(player) ~= "table" then return nil, nil, "invalid_player" end
+  if type(hand_index) ~= "number" or hand_index < 1 or hand_index > #(player.hand or {}) then
+    return nil, nil, "invalid_hand_index"
+  end
+  local spell_id = player.hand[hand_index]
+  if type(opts.expected_spell_id) == "string" and spell_id ~= opts.expected_spell_id then
+    return nil, nil, "spell_hand_changed"
+  end
+
+  local spell_def = opts.spell_def
+  if type(spell_def) ~= "table" then
+    local ok_spell, maybe_spell = pcall(cards.get_card_def, spell_id)
+    if not ok_spell or not maybe_spell then return nil, nil, "invalid_spell_card" end
+    spell_def = maybe_spell
+  end
+  return spell_id, spell_def, nil
+end
+
+local function finalize_spell_cast_from_hand(player, hand_index, spell_def, spell_id, resolve_on_cast)
+  if type(player) ~= "table" then return false, "invalid_player" end
+  if type(hand_index) ~= "number" or hand_index < 1 or hand_index > #(player.hand or {}) then
+    return false, "invalid_hand_index" end
+
+  table.remove(player.hand, hand_index)
+
+  local resolve_result = nil
+  if type(resolve_on_cast) == "function" then
+    resolve_result = resolve_on_cast(spell_def, spell_id)
+  end
+
+  player.graveyard = player.graveyard or {}
+  player.graveyard[#player.graveyard + 1] = { card_id = spell_id }
+
+  return true, nil, {
+    spell_id = spell_id,
+    spell_def = spell_def,
+    resolve_result = resolve_result,
+  }
+end
+
+-- Execute the mutation portion of casting a spell via an activated ability after
+-- command-side target/eligibility validation has already passed.
+function actions.activate_play_spell_via_ability(g, player_index, source_card_def, source_key, ability_index, source, hand_index, opts)
+  opts = opts or {}
+  local p = g and g.players and g.players[player_index + 1]
+  if not p then return false, "invalid_player" end
+  if type(source_card_def) ~= "table" or type(source_card_def.abilities) ~= "table" then
+    return false, "no_abilities"
+  end
+
+  local ability = source_card_def.abilities[ability_index]
+  local is_play_spell = ability and ability.type == "activated" and ability.effect == "play_spell"
+  local is_sac_cast_spell = ability and ability.type == "activated" and ability.effect == "sacrifice_cast_spell"
+  if not ability or not (is_play_spell or is_sac_cast_spell) then
+    return false, "not_play_spell_ability"
+  end
+
+  if ability.once_per_turn and is_activated_once_used(g, player_index, source_key, source, ability_index) then
+    return false, "ability_already_used"
+  end
+
+  local spell_id, spell_def, spell_err = load_spell_from_hand_for_cast(p, hand_index, opts)
+  if spell_err then return false, spell_err end
+
+  local source_entry = nil
+  if type(source) == "table" and source.type == "board" and type(source.index) == "number" then
+    source_entry = p.board[source.index]
+  end
+
+  local paid, pay_reason = abilities.pay_activated_ability_costs(p.resources, ability, {
+    source_entry = source_entry,
+  })
+  if not paid then return false, pay_reason or "insufficient_resources" end
+  if ability.once_per_turn then
+    set_activated_once_used(g, player_index, source_key, source, ability_index, true)
+  end
+
+  local selection_payment = nil
+  if is_sac_cast_spell then
+    local paid_sel, sel_reason, payment_info =
+      actions.pay_activated_selection_cost(g, player_index, ability, {
+        target_board_index = opts.sacrifice_target_board_index,
+      })
+    if not paid_sel then
+      return false, sel_reason or "sacrifice_failed"
+    end
+    selection_payment = payment_info
+  end
+
+  local ok_finish, finish_reason, finish_info = finalize_spell_cast_from_hand(
+    p,
+    hand_index,
+    spell_def,
+    spell_id,
+    function(cast_spell_def, cast_spell_id)
+      if type(opts.resolve_on_cast) == "function" then
+        return opts.resolve_on_cast(cast_spell_def, cast_spell_id, ability)
+      end
+      return nil
+    end
+  )
+  if not ok_finish then return false, finish_reason end
+
+  finish_info.selection_payment = selection_payment
+  return true, nil, finish_info
+end
+
+-- Execute the mutation portion of casting a spell directly from hand after
+-- command-side eligibility/target validation has already passed.
+function actions.play_spell_from_hand(g, player_index, hand_index, opts)
+  opts = opts or {}
+  if g.phase ~= "MAIN" then return false, "wrong_phase" end
+  if player_index ~= g.activePlayer then return false, "not_active_player" end
+  local p = g and g.players and g.players[player_index + 1]
+  if not p then return false, "invalid_player" end
+
+  local spell_id, spell_def, spell_err = load_spell_from_hand_for_cast(p, hand_index, opts)
+  if spell_err then return false, spell_err end
+  if spell_def.kind ~= "Spell" then return false, "not_a_spell" end
+
+  local monument_board_index = opts.monument_board_index
+  local mon_cost_ab = abilities.find_static_effect_ability(spell_def, "monument_cost")
+  if mon_cost_ab then
+    local paid_play_cost, pay_reason = actions.pay_card_play_cost(g, player_index, spell_def, {
+      monument_board_index = monument_board_index,
+    })
+    if not paid_play_cost then return false, pay_reason or "insufficient_monument_counters" end
+  else
+    local paid_card, pay_reason = abilities.pay_cost(p.resources, spell_def.costs)
+    if not paid_card then return false, pay_reason or "insufficient_resources" end
+  end
+
+  return finalize_spell_cast_from_hand(p, hand_index, spell_def, spell_id, opts.resolve_on_cast)
 end
 
 
@@ -641,7 +766,7 @@ function actions.deploy_worker_to_unit_row(g, player_index)
     restored_state = table.remove(p.workerStatePool)
   end
   local final_state = entering_board_state(g, worker_def, restored_state or {})
-  p.board[#p.board + 1] = { card_id = worker_def.id, state = final_state }
+  append_board_entry(g, p, { card_id = worker_def.id, state = final_state })
   return true
 end
 
@@ -680,7 +805,7 @@ end
 function actions.resolve_on_play_triggers(g, player_index, card_id)
   local p = g.players[player_index + 1]
   if not p then return end
-  fire_on_play_triggers(p, g, card_id)
+  return fire_on_play_triggers(p, g, card_id)
 end
 
 -- Build a structure from the blueprint deck
@@ -734,32 +859,26 @@ function actions.build_structure(g, player_index, card_id)
   end
 
   -- Pay costs
-  for _, c in ipairs(card_def.costs) do
-    p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-  end
+  local paid = abilities.pay_cost(p.resources, card_def.costs)
+  if not paid then return false end
 
   -- Consume one copy from blueprint deck.
   table.remove(p.blueprintDeck, blueprint_index)
 
   -- Place on board
-  p.board[#p.board + 1] = { card_id = card_id, workers = 0, state = { rested = false } }
+  append_board_entry(g, p, { card_id = card_id, workers = 0, state = { rested = false } })
 
   -- Fire on_play triggered abilities
-  if card_def.abilities then
-    for _, ab in ipairs(card_def.abilities) do
-      if ab.type == "triggered" and (ab.trigger == "on_play" or ab.trigger == "on_construct") then
-        abilities.resolve(ab, p, g)
-      end
-    end
-  end
+  local trigger_result = fire_on_play_triggers(p, g, card_id)
 
-  return true
+  return true, nil, trigger_result
 end
 
 -- Sacrifice a worker token to produce a resource.
 -- worker_kind: "worker_unassigned", "worker_left", "worker_right", "structure_worker", "unassigned_pool"
 -- worker_extra: board_index for structure_worker, nil otherwise
-function actions.sacrifice_worker(g, player_index, card_def, source_key, ability_index, worker_kind, worker_extra)
+function actions.activate_sacrifice_produce(g, player_index, card_def, source_key, ability_index, opts)
+  opts = opts or {}
   if g.phase ~= "MAIN" then return false, "wrong_phase" end
   if player_index ~= g.activePlayer then return false, "not_active_player" end
   local p = g.players[player_index + 1]
@@ -772,16 +891,21 @@ function actions.sacrifice_worker(g, player_index, card_def, source_key, ability
     return false, "not_sacrifice_ability"
   end
 
-  local key = tostring(player_index) .. ":" .. source_key
-  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
-
-  if not consume_worker_target(p, worker_kind, worker_extra) then
-    return false, "invalid_sacrifice_worker_target"
+  local source = opts.source
+  if ability.once_per_turn and is_activated_once_used(g, player_index, source_key, source, ability_index) then
+    return false, "ability_already_used"
   end
 
-  local worker_def = get_faction_worker_def(p.faction)
-  if worker_def then
-    fire_on_ally_death_triggers(p, g, worker_def)
+  local paid_sel, sel_reason, payment_info, selection_info = actions.pay_activated_selection_cost(g, player_index, ability, {
+    target_board_index = opts.target_board_index,
+    target_worker = opts.target_worker,
+    target_worker_extra = opts.target_worker_extra,
+  })
+  if not paid_sel then
+    if sel_reason == "target_not_eligible" then
+      sel_reason = "invalid_sacrifice_target"
+    end
+    return false, sel_reason or "sacrifice_failed"
   end
 
   local args = ability.effect_args or {}
@@ -791,7 +915,21 @@ function actions.sacrifice_worker(g, player_index, card_def, source_key, ability
     p.resources[res] = (p.resources[res] or 0) + amount
   end
 
-  g.activatedUsedThisTurn[key] = true
+  set_activated_once_used(g, player_index, source_key, source, ability_index, true)
+  return true, nil, {
+    payment = payment_info,
+    selection = selection_info,
+    resource = res,
+    amount = amount,
+  }
+end
+
+function actions.sacrifice_worker(g, player_index, card_def, source_key, ability_index, worker_kind, worker_extra)
+  local ok, reason = actions.activate_sacrifice_produce(g, player_index, card_def, source_key, ability_index, {
+    target_worker = worker_kind,
+    target_worker_extra = worker_extra,
+  })
+  if not ok then return false, reason end
   return true
 end
 
@@ -803,34 +941,91 @@ end
 
 -- Sacrifice a board entry to produce a resource
 function actions.sacrifice_unit(g, player_index, card_def, source_key, ability_index, target_board_index)
+  local ok, reason = actions.activate_sacrifice_produce(g, player_index, card_def, source_key, ability_index, {
+    target_board_index = target_board_index,
+  })
+  if not ok then return false, reason end
+  return true
+end
+
+function actions.activate_sacrifice_upgrade_play(g, player_index, card_def, source_key, ability_index, source, hand_index, opts)
+  opts = opts or {}
   if g.phase ~= "MAIN" then return false, "wrong_phase" end
   if player_index ~= g.activePlayer then return false, "not_active_player" end
   local p = g.players[player_index + 1]
+  if not p then return false, "invalid_player" end
 
   local ability
-  if ability_index and card_def.abilities then
+  if ability_index and card_def and card_def.abilities then
     ability = card_def.abilities[ability_index]
   end
-  if not ability or ability.type ~= "activated" or ability.effect ~= "sacrifice_produce" then
-    return false, "not_sacrifice_ability"
+  if not ability or ability.type ~= "activated" or ability.effect ~= "sacrifice_upgrade" then
+    return false, "not_sacrifice_upgrade_ability"
   end
 
-  local key = tostring(player_index) .. ":" .. source_key
-  if ability.once_per_turn and g.activatedUsedThisTurn[key] then return false, "ability_already_used" end
-
-  local removed = actions.sacrifice_board_entry(g, player_index, target_board_index)
-  if not removed then return false, "invalid_sacrifice_target" end
-
-  -- Produce the resource
-  local args = ability.effect_args or {}
-  local res = args.resource
-  local amount = args.amount or 1
-  if res then
-    p.resources[res] = (p.resources[res] or 0) + amount
+  if ability.once_per_turn and is_activated_once_used(g, player_index, source_key, source, ability_index) then
+    return false, "ability_already_used"
   end
 
-  g.activatedUsedThisTurn[key] = true
-  return true
+  if type(hand_index) ~= "number" or hand_index < 1 or hand_index > #p.hand then
+    return false, "invalid_hand_index"
+  end
+
+  local snapshot = {
+    totalWorkers = p.totalWorkers,
+    workersOn = { food = p.workersOn.food, wood = p.workersOn.wood, stone = p.workersOn.stone },
+    resources = {},
+    board = {},
+    specialWorkers = {},
+    activated = is_activated_once_used(g, player_index, source_key, source, ability_index),
+  }
+  for k, v in pairs(p.resources or {}) do snapshot.resources[k] = v end
+  for i, e in ipairs(p.board or {}) do snapshot.board[i] = copy_table(e) end
+  for i, sw in ipairs(p.specialWorkers or {}) do snapshot.specialWorkers[i] = copy_table(sw) end
+  snapshot.workerStatePool = copy_table(p.workerStatePool or {})
+
+  local ok_apply, apply_reason, payment_info = actions.pay_activated_selection_cost(g, player_index, ability, {
+    target_board_index = opts.target_board_index,
+    target_worker = opts.target_worker,
+    target_worker_extra = opts.target_worker_extra,
+  })
+
+  if ok_apply then
+    if hand_index < 1 or hand_index > #p.hand then ok_apply = false end
+  end
+  local resolve_result = nil
+  local played_card_id = nil
+  if ok_apply then
+    set_activated_once_used(g, player_index, source_key, source, ability_index, true)
+    played_card_id = p.hand[hand_index]
+    table.remove(p.hand, hand_index)
+    append_board_entry(g, p, {
+      card_id = played_card_id,
+      state = { rested = false, summoned_turn = g.turnNumber },
+    })
+    resolve_result = actions.resolve_on_play_triggers(g, player_index, played_card_id)
+  end
+
+  if not ok_apply then
+    p.totalWorkers = snapshot.totalWorkers
+    p.workersOn.food = snapshot.workersOn.food
+    p.workersOn.wood = snapshot.workersOn.wood
+    p.workersOn.stone = snapshot.workersOn.stone
+    for k, v in pairs(snapshot.resources) do p.resources[k] = v end
+    p.board = {}
+    for i, e in ipairs(snapshot.board) do p.board[i] = copy_table(e) end
+    p.specialWorkers = {}
+    for i, sw in ipairs(snapshot.specialWorkers) do p.specialWorkers[i] = copy_table(sw) end
+    p.workerStatePool = copy_table(snapshot.workerStatePool or {})
+    set_activated_once_used(g, player_index, source_key, source, ability_index, snapshot.activated)
+    return false, apply_reason or "upgrade_failed"
+  end
+
+  return true, nil, {
+    card_id = played_card_id,
+    resolve_result = resolve_result,
+    payment = payment_info,
+  }
 end
 
 -- Convenience: activate the base ability for a player
@@ -881,6 +1076,132 @@ function actions.sacrifice_worker_token(g, player_index, worker_kind, worker_ext
   return true
 end
 
+function actions.pay_activated_selection_cost(g, player_index, ability, opts)
+  opts = opts or {}
+  local valid, reason, info = abilities.validate_activated_selection_cost(g, player_index, ability, opts)
+  if not valid then return false, reason, nil, info end
+  if type(info) ~= "table" or info.requires_selection == false then
+    return true, nil, { requires_selection = false }, info
+  end
+
+  local p = g and g.players and g.players[player_index + 1]
+  if type(p) ~= "table" then return false, "invalid_player", nil, info end
+
+  local payment_info = {
+    kind = info.kind,
+    target_board_index = opts.target_board_index,
+    target_worker = opts.target_worker,
+    target_worker_extra = opts.target_worker_extra,
+  }
+
+  if type(opts.target_board_index) == "number" then
+    local entry = p.board and p.board[opts.target_board_index] or nil
+    if type(entry) ~= "table" then return false, "invalid_sacrifice_target", nil, info end
+    payment_info.sacrificed_card_id = entry.card_id
+    local ok_def, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok_def and card_def then
+      payment_info.sacrificed_tier = card_def.tier or 0
+      payment_info.sacrificed_kind = card_def.kind
+    end
+    local destroyed = actions.destroy_board_entry_any(g, player_index, opts.target_board_index)
+    if not destroyed then return false, "sacrifice_failed", nil, info end
+    return true, nil, payment_info, info
+  end
+
+  if type(opts.target_worker) == "string" and opts.target_worker ~= "" then
+    local sacrificed = actions.sacrifice_worker_token(g, player_index, opts.target_worker, opts.target_worker_extra)
+    if not sacrificed then
+      return false, "invalid_sacrifice_worker_target", nil, info
+    end
+    payment_info.sacrificed_tier = 0
+    payment_info.sacrificed_kind = "Worker"
+    return true, nil, payment_info, info
+  end
+
+  return false, "missing_sacrifice_target", nil, info
+end
+
+local function snapshot_worker_sacrifice_payment_state(p)
+  local snapshot = {
+    totalWorkers = p.totalWorkers,
+    workersOn = {
+      food = p.workersOn.food,
+      wood = p.workersOn.wood,
+      stone = p.workersOn.stone,
+    },
+    resources = {},
+    board_workers = {},
+  }
+  for k, v in pairs(p.resources or {}) do
+    snapshot.resources[k] = v
+  end
+  for bi, entry in ipairs(p.board or {}) do
+    snapshot.board_workers[bi] = entry.workers or 0
+  end
+  return snapshot
+end
+
+local function restore_worker_sacrifice_payment_state(p, snapshot)
+  if type(p) ~= "table" or type(snapshot) ~= "table" then return end
+  p.totalWorkers = snapshot.totalWorkers
+  p.workersOn.food = snapshot.workersOn.food
+  p.workersOn.wood = snapshot.workersOn.wood
+  p.workersOn.stone = snapshot.workersOn.stone
+  for k, v in pairs(snapshot.resources or {}) do
+    p.resources[k] = v
+  end
+  for bi, workers in pairs(snapshot.board_workers or {}) do
+    if p.board[bi] then p.board[bi].workers = workers end
+  end
+end
+
+function actions.pay_card_play_cost(g, player_index, card_def, opts)
+  opts = copy_table(opts or {})
+
+  local info, info_err = abilities.collect_card_play_cost_targets(g, player_index, card_def)
+  if not info then return false, info_err end
+
+  if info.play_cost and info.play_cost.kind == "monument_counter" then
+    return abilities.pay_card_play_cost(g, player_index, card_def, opts)
+  end
+
+  if not info.play_cost or info.play_cost.kind ~= "worker_sacrifice" then
+    return false, "unsupported_play_cost"
+  end
+
+  local p = g and g.players and g.players[player_index + 1]
+  if not p then return false, "invalid_player" end
+
+  if opts.sacrifice_targets == nil and opts.available_unassigned_workers == nil then
+    opts.available_unassigned_workers = actions.count_unassigned_workers(p)
+  end
+
+  local valid_sac_cost, reason = abilities.validate_card_play_cost_selection(g, player_index, card_def, opts)
+  if not valid_sac_cost then return false, reason end
+
+  local sacrifice_targets = opts.sacrifice_targets
+  local sacrifice_count = tonumber(info.required_count) or 0
+  if sacrifice_targets then
+    local snapshot = snapshot_worker_sacrifice_payment_state(p)
+    for _, t in ipairs(sacrifice_targets) do
+      if type(t) ~= "table" or not actions.sacrifice_worker_token(g, player_index, t.kind, t.extra) then
+        restore_worker_sacrifice_payment_state(p, snapshot)
+        return false, "sacrifice_payment_failed"
+      end
+    end
+    return true, nil, info
+  end
+
+  p.totalWorkers = p.totalWorkers - sacrifice_count
+  local worker_def = get_faction_worker_def(p.faction)
+  if worker_def then
+    for _ = 1, sacrifice_count do
+      fire_on_ally_death_triggers(p, g, worker_def)
+    end
+  end
+  return true, nil, info
+end
+
 -- Play a card from hand that has play_cost_sacrifice ability
 function actions.play_from_hand(g, player_index, hand_index, sacrifice_targets)
   if g.phase ~= "MAIN" or player_index ~= g.activePlayer then return false end
@@ -891,54 +1212,12 @@ function actions.play_from_hand(g, player_index, hand_index, sacrifice_targets)
   local card_def = cards.get_card_def(card_id)
   local sac_ab = get_sacrifice_ability(card_def)
   if not sac_ab then return false end
-
-  local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
-
-  if sacrifice_targets then
-    if #sacrifice_targets ~= sacrifice_count then return false end
-
-    local snapshot = {
-      totalWorkers = p.totalWorkers,
-      workersOn = {
-        food = p.workersOn.food,
-        wood = p.workersOn.wood,
-        stone = p.workersOn.stone,
-      },
-      resources = {},
-      board_workers = {},
-    }
-    for k, v in pairs(p.resources) do
-      snapshot.resources[k] = v
-    end
-    for bi, entry in ipairs(p.board) do
-      snapshot.board_workers[bi] = entry.workers or 0
-    end
-
-    for _, t in ipairs(sacrifice_targets) do
-      if type(t) ~= "table" or not actions.sacrifice_worker_token(g, player_index, t.kind, t.extra) then
-        p.totalWorkers = snapshot.totalWorkers
-        p.workersOn.food = snapshot.workersOn.food
-        p.workersOn.wood = snapshot.workersOn.wood
-        p.workersOn.stone = snapshot.workersOn.stone
-        for k, v in pairs(snapshot.resources) do
-          p.resources[k] = v
-        end
-        for bi, workers in pairs(snapshot.board_workers) do
-          if p.board[bi] then p.board[bi].workers = workers end
-        end
-        return false
-      end
-    end
-  else
-    if actions.count_unassigned_workers(p) < sacrifice_count then return false end
-    p.totalWorkers = p.totalWorkers - sacrifice_count
-    local worker_def = get_faction_worker_def(p.faction)
-    if worker_def then
-      for _ = 1, sacrifice_count do
-        fire_on_ally_death_triggers(p, g, worker_def)
-      end
-    end
-  end
+  local play_cost_info = abilities.collect_card_play_cost_targets(g, player_index, card_def)
+  if not play_cost_info or play_cost_info.effect ~= "play_cost_sacrifice" then return false end
+  local paid_cost = actions.pay_card_play_cost(g, player_index, card_def, {
+    sacrifice_targets = sacrifice_targets,
+  })
+  if not paid_cost then return false end
 
   -- Remove card from hand
   table.remove(p.hand, hand_index)
@@ -1002,7 +1281,7 @@ function actions.assign_special_worker(g, player_index, sw_index, target)
       sw_def = maybe_sw
     end
     local field_state = entering_board_state(g, sw_def, sw.state or {})
-    p.board[#p.board + 1] = { card_id = sw.card_id, special_worker_index = sw_index, state = field_state }
+    append_board_entry(g, p, { card_id = sw.card_id, special_worker_index = sw_index, state = field_state })
     sw.assigned_to = { type = "field", board_index = #p.board }
     return true
   end
@@ -1037,29 +1316,20 @@ function actions.play_monument_card(g, player_index, hand_index, monument_board_
 
   local mon_ab = get_monument_cost_ability(card_def)
   if not mon_ab then return false end
-  local min_counters = mon_ab.effect_args and mon_ab.effect_args.min_counters or 1
-
-  local monument_entry = p.board[monument_board_index]
-  if not monument_entry then return false end
-  local ok_mon, mon_def = pcall(cards.get_card_def, monument_entry.card_id)
-  if not ok_mon or not mon_def then return false end
-  if not has_keyword(mon_def, "monument") then return false end
-
-  monument_entry.state = monument_entry.state or {}
-  if unit_stats.counter_count(monument_entry.state, "wonder") < min_counters then return false end
-
-  -- Remove 1 wonder counter from the monument
-  unit_stats.remove_counter(monument_entry.state, "wonder", 1)
+  local paid_cost, _ = actions.pay_card_play_cost(g, player_index, card_def, {
+    monument_board_index = monument_board_index,
+  })
+  if not paid_cost then return false end
 
   -- Remove from hand and place on board
   table.remove(p.hand, hand_index)
-  p.board[#p.board + 1] = {
+  append_board_entry(g, p, {
     card_id = card_id,
     state = entering_board_state(g, card_def, {}),
-  }
-  fire_on_play_triggers(p, g, card_id)
+  })
+  local trigger_result = fire_on_play_triggers(p, g, card_id)
 
-  return true
+  return true, nil, trigger_result
 end
 
 -- Unassign a special worker (set assigned_to = nil)
@@ -1102,12 +1372,89 @@ function actions.apply_damage_to_unit(g, target_player_index, board_index, damag
   entry.state.damage = (entry.state.damage or 0) + damage_amount
 
   if card_def.health ~= nil then
-    local effective_hp = unit_stats.effective_health(card_def, entry.state)
+    local effective_hp = unit_stats.effective_health(card_def, entry.state, g, target_player_index)
     if effective_hp - (entry.state.damage or 0) <= 0 then
       destroy_board_entry(p, g, board_index)
+      shift_pending_combat_indices_after_destroy(g, target_player_index, board_index)
     end
   end
   return true
+end
+
+local function shift_pending_combat_indices_after_destroy(g, target_player_index, removed_index)
+  local c = g and g.pendingCombat
+  if not c or type(removed_index) ~= "number" then return end
+  local affects_atk = (c.attacker == target_player_index)
+  local affects_def = (c.defender == target_player_index)
+  if not affects_atk and not affects_def then return end
+
+  for _, attacker in ipairs(c.attackers or {}) do
+    if affects_atk and type(attacker.board_index) == "number" then
+      if attacker.board_index == removed_index then
+        attacker.invalidated = true
+        attacker.board_index = -1
+      elseif attacker.board_index > removed_index then
+        attacker.board_index = attacker.board_index - 1
+      end
+    end
+    if affects_def and attacker.target and attacker.target.type == "board" and type(attacker.target.index) == "number" then
+      if attacker.target.index == removed_index then
+        attacker.target.index = -1
+      elseif attacker.target.index > removed_index then
+        attacker.target.index = attacker.target.index - 1
+      end
+    end
+  end
+
+  for _, trig in ipairs(c.attack_triggers or {}) do
+    if affects_atk and type(trig.attacker_board_index) == "number" then
+      if trig.attacker_board_index == removed_index then
+        trig.attacker_board_index = -1
+        trig.resolved = true
+        trig.activate = false
+        trig.target_board_index = nil
+      elseif trig.attacker_board_index > removed_index then
+        trig.attacker_board_index = trig.attacker_board_index - 1
+      end
+    end
+    if affects_def and type(trig.target_board_index) == "number" and trig.target_board_index > 0 then
+      if trig.target_board_index == removed_index then
+        trig.target_board_index = -1
+      elseif trig.target_board_index > removed_index then
+        trig.target_board_index = trig.target_board_index - 1
+      end
+    end
+  end
+
+  for i = #(c.blockers or {}), 1, -1 do
+    local blk = c.blockers[i]
+    local remove_blk = false
+    if affects_def and type(blk.blocker_board_index) == "number" then
+      if blk.blocker_board_index == removed_index then
+        remove_blk = true
+      elseif blk.blocker_board_index > removed_index then
+        blk.blocker_board_index = blk.blocker_board_index - 1
+      end
+    end
+    if affects_atk and type(blk.attacker_board_index) == "number" then
+      if blk.attacker_board_index == removed_index then
+        remove_blk = true
+      elseif blk.attacker_board_index > removed_index then
+        blk.attacker_board_index = blk.attacker_board_index - 1
+      end
+    end
+    if remove_blk then table.remove(c.blockers, i) end
+  end
+end
+
+function actions.destroy_board_entry_any(g, target_player_index, board_index)
+  local p = g.players[target_player_index + 1]
+  if not p or type(board_index) ~= "number" then return false end
+  local destroyed = destroy_board_entry(p, g, board_index)
+  if destroyed then
+    shift_pending_combat_indices_after_destroy(g, target_player_index, board_index)
+  end
+  return destroyed
 end
 
 return actions

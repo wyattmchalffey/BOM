@@ -4,6 +4,7 @@
 -- submitted decklists, and provides default decks for first-time profiles.
 
 local cards = require("src.game.cards")
+local effect_specs = require("src.game.effect_specs")
 
 local deck_validation = {}
 
@@ -42,16 +43,34 @@ local function copy_array(values)
   return out
 end
 
+local function copy_table(t)
+  local out = {}
+  for k, v in pairs(t or {}) do out[k] = v end
+  return out
+end
+
+local function copy_warning_list(values)
+  local out = {}
+  for i = 1, #(values or {}) do
+    out[i] = copy_table(values[i])
+  end
+  return out
+end
+
 function deck_validation.deck_entries_for_faction(faction)
   local entries = {}
   for _, def in ipairs(cards.CARD_DEFS) do
     if is_pool_card(def, faction) then
+      local support_warnings = cards.get_support_warnings(def.id)
       entries[#entries + 1] = {
         card_id = def.id,
         name = def.name,
         max_copies = max_copies_for_card(def),
         tier = def.tier,
         kind = def.kind,
+        support_level = cards.get_card_support_level(def.id),
+        support_warning_count = #support_warnings,
+        support_warnings = copy_warning_list(support_warnings),
       }
     end
   end
@@ -162,11 +181,44 @@ function deck_validation.validate_decklist(faction, deck_payload)
     end
   end
 
+  local support_warnings = {}
+  local deck_support_level = "implemented"
+  local deck_support_sev = effect_specs.support_severity(deck_support_level)
+  for card_id, copies in pairs(counts) do
+    local card_level = cards.get_card_support_level(card_id)
+    local card_sev = effect_specs.support_severity(card_level)
+    if card_sev > deck_support_sev then
+      deck_support_sev = card_sev
+      deck_support_level = card_level
+    end
+    local card_warnings = cards.get_support_warnings(card_id)
+    for _, w in ipairs(card_warnings) do
+      local item = copy_table(w)
+      item.copies_in_deck = copies
+      support_warnings[#support_warnings + 1] = item
+    end
+  end
+  table.sort(support_warnings, function(a, b)
+    local sa = effect_specs.support_severity(a.level)
+    local sb = effect_specs.support_severity(b.level)
+    if sa ~= sb then return sa > sb end
+    if a.card_id ~= b.card_id then return tostring(a.card_id) < tostring(b.card_id) end
+    return (a.ability_index or 0) < (b.ability_index or 0)
+  end)
+
   return {
     ok = true,
     reason = "ok",
     deck = copy_array(deck),
-    meta = { faction = faction, deck_size = deck_size, min_size = 0, max_size = nil },
+    meta = {
+      faction = faction,
+      deck_size = deck_size,
+      min_size = 0,
+      max_size = nil,
+      support_level = deck_support_level,
+      support_warning_count = #support_warnings,
+      support_warnings = support_warnings,
+    },
   }
 end
 

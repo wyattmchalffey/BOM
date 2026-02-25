@@ -38,6 +38,7 @@ function adapter:connect()
       player_index = self.session and self.session.player_index,
       match_id = self.session and self.session.match_id,
       checksum = self.session and self.session.last_checksum,
+      state_seq = self.session and self.session.last_state_seq,
     })
   end
 
@@ -61,6 +62,7 @@ function adapter:connect()
     player_index = connected.meta.player_index,
     match_id = connected.meta.match_id,
     checksum = snap.meta.checksum,
+    state_seq = snap.meta.state_seq,
   })
 end
 
@@ -85,6 +87,7 @@ function adapter:reconnect()
     player_index = reconnected.meta.player_index,
     match_id = reconnected.meta.match_id,
     checksum = snap.meta.checksum,
+    state_seq = snap.meta.state_seq,
   })
 end
 
@@ -102,6 +105,7 @@ function adapter:sync_snapshot()
 
   return ok({
     checksum = snap.meta.checksum,
+    state_seq = snap.meta.state_seq,
     active_player = snap.meta.active_player,
     turn_number = snap.meta.turn_number,
   })
@@ -125,6 +129,7 @@ function adapter:submit(command)
     self.state = deep_copy(submitted.meta.state)
     return ok({
       checksum = submitted.meta.checksum,
+      state_seq = submitted.meta.state_seq,
       active_player = submitted.meta.active_player,
       turn_number = submitted.meta.turn_number,
     })
@@ -141,6 +146,7 @@ function adapter:submit(command)
 
   return ok({
     checksum = snap.meta.checksum,
+    state_seq = snap.meta.state_seq,
     active_player = snap.meta.active_player,
     turn_number = snap.meta.turn_number,
   })

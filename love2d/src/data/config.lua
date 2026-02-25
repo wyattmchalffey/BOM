@@ -22,9 +22,9 @@ return {
   -- Default player setup (used when no custom config is provided)
 
   -- Version gates for multiplayer compatibility checks
-  protocol_version = 1,
-  rules_version = "0.1.0",
-  content_version = "0.1.0",
+  protocol_version = 2,
+  rules_version = "0.1.1",
+  content_version = "0.1.1",
   default_factions = { "Human", "Orc" },
   default_first_player = 0,
 }

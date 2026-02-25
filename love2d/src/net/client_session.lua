@@ -29,6 +29,7 @@ function client_session.new(opts)
     session_token = nil,
     next_seq = 1,
     last_checksum = nil,
+    last_state_seq = 0,
     connected = false,
     player_name = opts.player_name or "Player",
     faction = opts.faction,
@@ -62,6 +63,7 @@ function client_session:connect()
     return fail("missing_session_token")
   end
   self.last_checksum = response.payload.checksum
+  self.last_state_seq = tonumber(response.payload.state_seq) or self.last_state_seq or 0
   self.next_seq = response.payload.next_expected_seq or 1
   self.connected = true
 
@@ -89,6 +91,7 @@ function client_session:reconnect()
 
   self.player_index = response.payload.player_index
   self.last_checksum = response.payload.checksum
+  self.last_state_seq = tonumber(response.payload.state_seq) or self.last_state_seq or 0
   self.next_seq = response.payload.next_expected_seq or self.next_seq
   if type(response.payload.session_token) == "string" and response.payload.session_token ~= "" then
     self.session_token = response.payload.session_token
@@ -116,11 +119,13 @@ function client_session:submit(command)
   if response.type == "command_ack" then
     self.next_seq = (response.payload and response.payload.next_expected_seq) or (self.next_seq + 1)
     self.last_checksum = response.payload and response.payload.checksum or self.last_checksum
+    self.last_state_seq = tonumber(response.payload and response.payload.state_seq) or self.last_state_seq or 0
     return ok(response.payload)
   end
 
   if response.type == "resync_required" then
     self.last_checksum = nil
+    self.last_state_seq = tonumber(response.payload and response.payload.state_seq) or self.last_state_seq or 0
     if response.payload and response.payload.next_expected_seq then
       self.next_seq = response.payload.next_expected_seq
     end
@@ -149,6 +154,7 @@ function client_session:submit_with_resync(command)
 
   return fail("resynced_retry_required", {
     checksum = self.last_checksum,
+    state_seq = self.last_state_seq,
     active_player = snap.meta.active_player,
     turn_number = snap.meta.turn_number,
   })
@@ -164,6 +170,7 @@ function client_session:request_snapshot()
     return fail("invalid_snapshot_response")
   end
   self.last_checksum = response.payload and response.payload.checksum or self.last_checksum
+  self.last_state_seq = tonumber(response.payload and response.payload.state_seq) or self.last_state_seq or 0
   return ok(response.payload)
 end
 

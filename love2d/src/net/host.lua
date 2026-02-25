@@ -41,6 +41,33 @@ local function extract_submit_envelope(player_index_or_envelope, maybe_envelope)
   return maybe_envelope
 end
 
+local function build_replay_append_opts(self)
+  local opts = {
+    post_state_hash_scope = "host_full",
+    host_state_seq = self.state_seq or 0,
+  }
+  if not self.game_started then
+    return opts
+  end
+
+  local visible_hashes = {}
+  for player_index, _ in pairs(self.slots or {}) do
+    if type(player_index) == "number" then
+      local ok_state, visible_state = pcall(function()
+        return self:get_state_snapshot_for_player(player_index)
+      end)
+      if ok_state and type(visible_state) == "table" then
+        local ok_hash, visible_hash = pcall(checksum.game_state, visible_state)
+        if ok_hash and type(visible_hash) == "string" then
+          visible_hashes[player_index] = visible_hash
+        end
+      end
+    end
+  end
+  opts.visible_state_hashes_by_player = visible_hashes
+  return opts
+end
+
 local HIDDEN_CARD_TOKEN = "__HIDDEN_CARD__"
 
 local function build_hidden_zone(count)
@@ -124,6 +151,7 @@ function host.new(opts)
     max_players = opts.max_players or 2,
     next_player_index = 0,
     last_seq_by_player = {},
+    state_seq = 0,
     _token_counter = 0,
     _host_session_token = nil,
     allowed_factions = allowed_factions,
@@ -156,6 +184,7 @@ function host.new(opts)
     self.state = game_state.create_initial_game_state(opts.setup)
     self.game_started = true
     commands.execute(self.state, { type = "START_TURN", player_index = self.state.activePlayer })
+    self.state_seq = self.state_seq + 1
   end
 
   return self
@@ -167,10 +196,20 @@ function host:_next_session_token(player_index)
 end
 
 function host:_resync_payload(extra, player_index)
+  local sync_checksum = nil
+  if player_index ~= nil then
+    local sync_state = self:get_state_snapshot_for_player(player_index)
+    sync_checksum = checksum.game_state(sync_state)
+  elseif self.state then
+    sync_checksum = checksum.game_state(self.state)
+  end
   local payload = {
     active_player = self.state.activePlayer,
     turn_number = self.state.turnNumber,
-    checksum = checksum.game_state(self.state),
+    checksum = sync_checksum,
+    state_seq = self.state_seq or 0,
+    checksum_algo = checksum.ALGORITHM,
+    checksum_version = checksum.VERSION,
   }
 
   if player_index ~= nil then
@@ -194,9 +233,13 @@ function host:_build_session_meta(player_index)
     next_expected_seq = (self.last_seq_by_player[player_index] or 0) + 1,
   }
   if self.state then
+    local sync_state = self:get_state_snapshot_for_player(player_index)
     meta.active_player = self.state.activePlayer
     meta.turn_number = self.state.turnNumber
-    meta.checksum = checksum.game_state(self.state)
+    meta.checksum = checksum.game_state(sync_state)
+    meta.state_seq = self.state_seq or 0
+    meta.checksum_algo = checksum.ALGORITHM
+    meta.checksum_version = checksum.VERSION
   end
   return meta
 end
@@ -285,6 +328,7 @@ function host:_start_game()
   })
   self.game_started = true
   commands.execute(self.state, { type = "START_TURN", player_index = self.state.activePlayer })
+  self.state_seq = self.state_seq + 1
 end
 
 function host:is_game_started()
@@ -374,7 +418,8 @@ function host:submit(player_index_or_envelope, maybe_envelope)
     return fail("session_not_found")
   end
 
-  local host_checksum_before = checksum.game_state(self.state)
+  local sync_state_before = self:get_state_snapshot_for_player(player_index)
+  local host_checksum_before = checksum.game_state(sync_state_before)
   if envelope.client_checksum ~= nil and envelope.client_checksum ~= host_checksum_before then
     return fail("checksum_mismatch", self:_resync_payload({
       received_checksum = envelope.client_checksum,
@@ -400,7 +445,7 @@ function host:submit(player_index_or_envelope, maybe_envelope)
   end
 
   local result = commands.execute(self.state, command)
-  replay.append(self.replay_log, command, result, self.state)
+  replay.append(self.replay_log, command, result, self.state, build_replay_append_opts(self))
 
   if not result.ok then
     return fail(result.reason, self:_resync_payload({
@@ -415,7 +460,7 @@ function host:submit(player_index_or_envelope, maybe_envelope)
   if command.type == "END_TURN" and not self.state.is_terminal then
     local start_cmd = { type = "START_TURN", player_index = self.state.activePlayer }
     local start_result = commands.execute(self.state, start_cmd)
-    replay.append(self.replay_log, start_cmd, start_result, self.state)
+    replay.append(self.replay_log, start_cmd, start_result, self.state, build_replay_append_opts(self))
     if start_result.ok then
       local events = result.events or {}
       if start_result.events then
@@ -428,15 +473,21 @@ function host:submit(player_index_or_envelope, maybe_envelope)
   end
 
   self.last_seq_by_player[player_index] = envelope.seq
+  self.state_seq = (self.state_seq or 0) + 1
+  local sync_state_after = self:get_state_snapshot_for_player(player_index)
+  local sync_checksum_after = checksum.game_state(sync_state_after)
 
   return ok({
     seq = envelope.seq,
     active_player = self.state.activePlayer,
     turn_number = self.state.turnNumber,
     events = result.events or {},
-    checksum = checksum.game_state(self.state),
+    checksum = sync_checksum_after,
+    state_seq = self.state_seq,
+    checksum_algo = checksum.ALGORITHM,
+    checksum_version = checksum.VERSION,
     next_expected_seq = self.last_seq_by_player[player_index] + 1,
-    state = self:get_state_snapshot_for_player(player_index),
+    state = sync_state_after,
   })
 end
 
@@ -500,11 +551,15 @@ function host:get_state_snapshot_message(snapshot_payload)
     return protocol.error_message(self.match_id, "session_not_found")
   end
 
+  local visible_state = self:get_state_snapshot_for_player(player_index)
   local payload = {
     active_player = self.state.activePlayer,
     turn_number = self.state.turnNumber,
-    checksum = checksum.game_state(self.state),
-    state = self:get_state_snapshot_for_player(player_index),
+    checksum = checksum.game_state(visible_state),
+    state_seq = self.state_seq or 0,
+    checksum_algo = checksum.ALGORITHM,
+    checksum_version = checksum.VERSION,
+    state = visible_state,
   }
 
   return protocol.state_snapshot(self.match_id, payload)
@@ -516,11 +571,15 @@ function host:generate_state_push(player_index)
     return nil
   end
 
+  local visible_state = self:get_state_snapshot_for_player(player_index)
   local payload = {
     active_player = self.state.activePlayer,
     turn_number = self.state.turnNumber,
-    checksum = checksum.game_state(self.state),
-    state = self:get_state_snapshot_for_player(player_index),
+    checksum = checksum.game_state(visible_state),
+    state_seq = self.state_seq or 0,
+    checksum_algo = checksum.ALGORITHM,
+    checksum_version = checksum.VERSION,
+    state = visible_state,
   }
   return protocol.state_push(self.match_id, payload)
 end

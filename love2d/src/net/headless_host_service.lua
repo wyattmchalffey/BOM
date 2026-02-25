@@ -64,14 +64,23 @@ function service:handle_frame(frame)
 
     for _, target_player_index in ipairs(joined_players) do
       if source_player_index == nil or target_player_index ~= source_player_index then
-        local push_msg = self._host:generate_state_push(target_player_index)
-        if push_msg then
-          local ok_push_encode, push_frame = pcall(json.encode, push_msg)
-          if ok_push_encode then
-            self._pending_pushes[#self._pending_pushes + 1] = {
-              player_index = target_player_index,
-              frame = push_frame,
-            }
+        local ok_push_build, push_or_err = pcall(function()
+          return self._host:generate_state_push(target_player_index)
+        end)
+        if not ok_push_build then
+          print("[headless_host_service] generate_state_push failed for player " .. tostring(target_player_index) .. ": " .. tostring(push_or_err))
+        else
+          local push_msg = push_or_err
+          if push_msg then
+            local ok_push_encode, push_frame = pcall(json.encode, push_msg)
+            if ok_push_encode then
+              self._pending_pushes[#self._pending_pushes + 1] = {
+                player_index = target_player_index,
+                frame = push_frame,
+              }
+            else
+              print("[headless_host_service] push encode failed for player " .. tostring(target_player_index) .. ": " .. tostring(push_frame))
+            end
           end
         end
       end

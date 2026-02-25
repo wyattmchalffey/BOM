@@ -10,6 +10,7 @@
 --   -- adapter.connected / adapter.connect_error / adapter.state_changed
 
 local json = require("src.net.json_codec")
+local checksum = require("src.game.checksum")
 
 local THREAD_CODE = [[
 require("love.filesystem")
@@ -134,14 +135,17 @@ result_ch:push(json.encode({
     session_token = session.session_token,
     state = snap.meta.state,
     checksum = snap.meta.checksum,
+    state_seq = snap.meta.state_seq,
 }))
 
 -- Access raw socket for non-blocking receive in push-listening loop
 local raw_sock = conn.sock
 local use_select = raw_sock ~= nil
 if use_select then
-    local sel_ok = pcall(socket.select, {raw_sock}, nil, 0)
-    if not sel_ok then use_select = false end
+    local sel_ok, sel_readable = pcall(socket.select, {raw_sock}, nil, 0)
+    if (not sel_ok) or sel_readable == nil then
+        use_select = false
+    end
 end
 
 local fallback_poll_timer = 0
@@ -156,7 +160,13 @@ while true do
     local cmd_json = cmd_ch:pop()
     if cmd_json then
         local ok_cmd, cmd_err = pcall(function()
-            local cmd = json.decode(cmd_json)
+            local cmd_payload = json.decode(cmd_json)
+            local local_submit_id = nil
+            local cmd = cmd_payload
+            if type(cmd_payload) == "table" and type(cmd_payload.command) == "table" then
+                cmd = cmd_payload.command
+                local_submit_id = cmd_payload.local_submit_id
+            end
             local submit_result = session:submit_with_resync(cmd)
 
             if not submit_result.ok and submit_result.reason == "resynced_retry_required" then
@@ -167,6 +177,10 @@ while true do
                 ok = submit_result.ok,
                 reason = submit_result.reason,
                 checksum = submit_result.meta and submit_result.meta.checksum,
+                state_seq = submit_result.meta and submit_result.meta.state_seq,
+                next_expected_seq = submit_result.meta and submit_result.meta.next_expected_seq,
+                submit_seq = submit_result.meta and submit_result.meta.seq,
+                local_submit_id = local_submit_id,
             }))
         end)
         if not ok_cmd then
@@ -179,26 +193,30 @@ while true do
     -- Try to receive unsolicited messages (state_push) from server
     local received_push = false
     if use_select then
-        local ok_sel, readable_or_err = pcall(function()
+        local ok_sel, readable_or_err, select_err = pcall(function()
             return socket.select({raw_sock}, nil, 0.05)
         end)
-        if not ok_sel then
-            result_ch:push(json.encode({ ok = false, reason = "receive_error: select failed - " .. tostring(readable_or_err) }))
-            return
-        end
-        local readable = readable_or_err
-        if readable and #readable > 0 then
-            if raw_sock.settimeout then raw_sock:settimeout(0.1) end
-            local ok_recv, frame_or_err = pcall(function() return conn:receive() end)
-            if ok_recv and frame_or_err then
-                local ok_dec, decoded = pcall(json.decode, frame_or_err)
-                if ok_dec and type(decoded) == "table" and decoded.type == "state_push" then
-                    push_ch:push(frame_or_err)
-                    received_push = true
+        if (not ok_sel) or (readable_or_err == nil and select_err ~= nil) then
+            -- Some Windows/SSL socket combinations intermittently fail select().
+            -- Fall back to direct timed receive() instead of disconnecting.
+            use_select = false
+            received_push = false
+            love.timer.sleep(0.01)
+        else
+            local readable = readable_or_err
+            if readable and #readable > 0 then
+                if raw_sock.settimeout then raw_sock:settimeout(0.1) end
+                local ok_recv, frame_or_err = pcall(function() return conn:receive() end)
+                if ok_recv and frame_or_err then
+                    local ok_dec, decoded = pcall(json.decode, frame_or_err)
+                    if ok_dec and type(decoded) == "table" and decoded.type == "state_push" then
+                        push_ch:push(frame_or_err)
+                        received_push = true
+                    end
+                elseif not ok_recv and not tostring(frame_or_err):find("timeout") then
+                    result_ch:push(json.encode({ ok = false, reason = "receive_error: " .. tostring(frame_or_err) }))
+                    return
                 end
-            elseif not ok_recv and not tostring(frame_or_err):find("timeout") then
-                result_ch:push(json.encode({ ok = false, reason = "receive_error: " .. tostring(frame_or_err) }))
-                return
             end
         end
     else
@@ -232,6 +250,7 @@ while true do
                     payload = {
                         state = poll_snap.meta.state,
                         checksum = poll_snap.meta.checksum,
+                        state_seq = poll_snap.meta.state_seq,
                         active_player = poll_snap.meta.active_player,
                         turn_number = poll_snap.meta.turn_number,
                     },
@@ -279,10 +298,15 @@ function threaded_client_adapter.start(opts)
     -- Internal
     _state = nil,
     _checksum = nil,
+    _state_seq = 0,
     _session_token = nil,
     _disconnect_reason = nil,
     _disconnected = false,
     _reconnecting = false,
+    _next_local_submit_id = 0,
+    _pending_local_predictions = {},
+    _desync_reports = {},
+    _submit_acks = {},
     _connect_opts = {
       url = opts.url,
       player_name = opts.player_name or "Player",
@@ -317,6 +341,9 @@ function threaded_client_adapter:_start_thread(reconnect_opts)
 
   self:_clear_channels()
   self.connect_error = nil
+  self._pending_local_predictions = {}
+  self._desync_reports = {}
+  self._submit_acks = {}
 
   self._thread = love.thread.newThread(THREAD_CODE)
   self._args_ch:push(json.encode({
@@ -356,6 +383,7 @@ function threaded_client_adapter:poll()
         end
         self._state = result.state
         self._checksum = result.checksum
+        self._state_seq = tonumber(result.state_seq) or self._state_seq or 0
         self.state_changed = true
         self._reconnecting = false
         self._disconnected = false
@@ -399,8 +427,29 @@ function threaded_client_adapter:poll()
     local ok_dec, push = pcall(json.decode, push_json)
     if ok_dec and push.type == "state_push" and push.payload then
       if push.payload.state then
+        local payload_checksum = push.payload.checksum
+        local local_push_checksum = nil
+        local ok_hash, hash_or_err = pcall(checksum.game_state, push.payload.state)
+        if ok_hash then
+          local_push_checksum = hash_or_err
+        else
+          print("[threaded_client_adapter] push hash compute failed: " .. tostring(hash_or_err))
+        end
+        if type(payload_checksum) == "string" and type(local_push_checksum) == "string"
+          and payload_checksum ~= local_push_checksum
+        then
+          self._desync_reports[#self._desync_reports + 1] = {
+            kind = "push_payload_hash_mismatch",
+            authoritative_hash = payload_checksum,
+            local_hash = local_push_checksum,
+            state_seq = tonumber(push.payload.state_seq) or nil,
+          }
+          print("[threaded_client_adapter] state_push hash mismatch local="
+            .. tostring(local_push_checksum) .. " host=" .. tostring(payload_checksum))
+        end
         self._state = push.payload.state
         self._checksum = push.payload.checksum
+        self._state_seq = tonumber(push.payload.state_seq) or self._state_seq or 0
         self.state_changed = true
       end
     end
@@ -414,10 +463,54 @@ function threaded_client_adapter:poll()
 
       local ok_dec, resp = pcall(json.decode, resp_json)
       if ok_dec then
+        local submit_ack = {
+          ok = resp.ok == true,
+          reason = resp.reason,
+          checksum = resp.checksum,
+          state_seq = tonumber(resp.state_seq) or nil,
+          submit_seq = tonumber(resp.submit_seq) or nil,
+          local_submit_id = tonumber(resp.local_submit_id) or nil,
+        }
+        self._submit_acks[#self._submit_acks + 1] = submit_ack
+
+        if type(submit_ack.checksum) == "string" then
+          self._checksum = submit_ack.checksum
+        end
+        if submit_ack.state_seq ~= nil then
+          self._state_seq = submit_ack.state_seq
+        end
+
+        local submit_id = submit_ack.local_submit_id
+        if submit_id ~= nil then
+          local predicted = self._pending_local_predictions[submit_id]
+          if predicted ~= nil then
+            self._pending_local_predictions[submit_id] = nil
+            if submit_ack.ok
+              and type(predicted.hash) == "string"
+              and type(submit_ack.checksum) == "string"
+              and predicted.hash ~= submit_ack.checksum
+            then
+              local report = {
+                kind = "optimistic_hash_mismatch",
+                local_submit_id = submit_id,
+                command_type = predicted.command_type,
+                local_hash = predicted.hash,
+                authoritative_hash = submit_ack.checksum,
+                state_seq = submit_ack.state_seq,
+                submit_seq = submit_ack.submit_seq,
+              }
+              self._desync_reports[#self._desync_reports + 1] = report
+              print("[threaded_client_adapter] optimistic desync detected on submit "
+                .. tostring(submit_id) .. " (" .. tostring(predicted.command_type) .. ")")
+            end
+          end
+        end
+
         -- Update state from successful submit response
         if resp.state then
           self._state = resp.state
           self._checksum = resp.checksum
+          self._state_seq = tonumber(resp.state_seq) or self._state_seq or 0
           self.state_changed = true
         end
         if not resp.ok then
@@ -462,6 +555,7 @@ function threaded_client_adapter:connect()
         match_id = self.match_id,
         session_token = self._session_token,
         checksum = self._checksum,
+        state_seq = self._state_seq,
       },
     }
   end
@@ -479,20 +573,49 @@ function threaded_client_adapter:submit(command)
     return { ok = false, reason = "not_connected", meta = {} }
   end
 
-  self._cmd_ch:push(json.encode(command))
+  self._next_local_submit_id = (self._next_local_submit_id or 0) + 1
+  local local_submit_id = self._next_local_submit_id
+  self._cmd_ch:push(json.encode({
+    local_submit_id = local_submit_id,
+    command = command,
+  }))
 
   -- Return optimistic success; real state arrives via state_push
-  return { ok = true, reason = "ok", meta = { checksum = self._checksum } }
+  return {
+    ok = true,
+    reason = "ok",
+    meta = {
+      checksum = self._checksum,
+      state_seq = self._state_seq,
+      local_submit_id = local_submit_id,
+    }
+  }
 end
 
 -- No-op for threaded adapter: state is kept fresh via pushes
 function threaded_client_adapter:sync_snapshot()
-  return { ok = true, reason = "ok", meta = { checksum = self._checksum } }
+  return { ok = true, reason = "ok", meta = { checksum = self._checksum, state_seq = self._state_seq } }
 end
 
 -- Return deep copy of cached state
 function threaded_client_adapter:get_state()
   return deep_copy(self._state)
+end
+
+function threaded_client_adapter:record_local_prediction(local_submit_id, local_hash, meta)
+  if type(local_submit_id) ~= "number" or local_submit_id < 1 then return false end
+  if type(local_hash) ~= "string" or local_hash == "" then return false end
+  self._pending_local_predictions[local_submit_id] = {
+    hash = local_hash,
+    command_type = type(meta) == "table" and meta.command_type or nil,
+  }
+  return true
+end
+
+function threaded_client_adapter:pop_desync_reports()
+  local out = self._desync_reports or {}
+  self._desync_reports = {}
+  return out
 end
 
 function threaded_client_adapter:reconnect()
@@ -504,6 +627,7 @@ function threaded_client_adapter:reconnect()
         player_index = self.local_player_index,
         match_id = self.match_id,
         checksum = self._checksum,
+        state_seq = self._state_seq,
       },
     }
   end

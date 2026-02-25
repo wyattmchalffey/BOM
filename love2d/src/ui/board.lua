@@ -886,7 +886,7 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     love.graphics.setFont(util.get_font(10))
     love.graphics.printf("HP " .. tostring(life), tx + 4, stat_y + stat_h / 2 - 6, badge_w, "center")
   elseif (sdef.kind == "Structure" or sdef.kind == "Artifact") and sdef.health then
-    local effective_health = unit_stats.effective_health(sdef, st)
+    local effective_health = unit_stats.effective_health(sdef, st, game_state, pi)
     local damage_taken = (st and st.damage) or 0
     local life = math.max(0, effective_health - damage_taken)
     local stat_h = 20
@@ -909,8 +909,8 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
   elseif (sdef.kind == "Unit" or sdef.kind == "Worker") and sdef.attack and sdef.health then
     local attack_bonus = unit_stats.attack_bonus(st)
     local health_bonus = unit_stats.health_bonus(st)
-    local effective_attack = unit_stats.effective_attack(sdef, st)
-    local effective_health = unit_stats.effective_health(sdef, st)
+    local effective_attack = unit_stats.effective_attack(sdef, st, game_state, pi)
+    local effective_health = unit_stats.effective_health(sdef, st, game_state, pi)
     local stat_h = 20
     local stat_y = ty + th - stat_h - 4
     local half_w = (tw - 12) / 2
@@ -990,18 +990,23 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
   if sdef.abilities then
     for ai, ab in ipairs(sdef.abilities) do
       if ab.type == "activated" then
-        local key
+        local source_key
+        local source_ref
         if is_base then
-          key = tostring(pi) .. ":base:" .. ai
+          source_key = "base:" .. ai
+          source_ref = { type = "base" }
         else
-          key = tostring(pi) .. ":board:" .. si .. ":" .. ai
+          source_key = "board:" .. si .. ":" .. ai
+          source_ref = { type = "board", index = si }
         end
-        local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
+        local used = abilities.is_activated_ability_used_this_turn(game_state, pi, source_key, source_ref, ai)
         local source_entry = (not is_base) and player.board[si] or nil
-        local can_act = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost) and abilities.can_pay_counter_cost(ab, source_entry)
+        local can_pay_ab = abilities.can_pay_activated_ability_costs(player.resources, ab, {
+          source_entry = source_entry,
+          require_variable_min = true,
+        })
+        local can_act = (not used or not ab.once_per_turn) and can_pay_ab
           and (is_active or (ab.fast and _in_blocker_window_rnd))
-          and (not ab.rest or not (source_entry and source_entry.state and source_entry.state.rested))
-          and (ab.effect ~= "deal_damage_x" or (player.resources[(ab.effect_args and ab.effect_args.resource) or "stone"] or 0) >= 1)
           and (ab.effect ~= "play_spell" or #abilities.find_matching_spell_hand_indices(player, ab.effect_args or {}) > 0)
           and (ab.effect ~= "discard_draw" or #player.hand >= (ab.effect_args and ab.effect_args.discard or 2))
         local ab_hovered = hover and hover.kind == "activate_ability" and hover.pi == pi
@@ -1975,13 +1980,21 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
         for ai, ab in ipairs(base_def.abilities) do
           if ab.type == "activated" then
             if util.point_in_rect(mx, my, base_tx + 4, ab_btn_y, BFIELD_TILE_W - 8, 24) then
-              local key = tostring(pi) .. ":base:" .. ai
-              local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
+              local source_key = "base:" .. ai
+              local used = abilities.is_activated_ability_used_this_turn(game_state, pi, source_key, { type = "base" }, ai)
               local _c_base = game_state.pendingCombat
               local _in_blk_base = _c_base and _c_base.stage == "DECLARED"
                 and (pi == _c_base.attacker or pi == _c_base.defender)
+              local can_pay_ab = abilities.can_pay_activated_ability_costs(player.resources, ab, {
+                require_variable_min = true,
+              })
+              local sel_info = abilities.collect_activated_selection_cost_targets(game_state, pi, ab)
+              local has_sel_targets = true
+              if sel_info and sel_info.requires_selection then
+                has_sel_targets = sel_info.has_any_target == true
+              end
               local can_act = (pi == game_state.activePlayer or (ab.fast and _in_blk_base))
-                and (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
+                and (not ab.once_per_turn or not used) and can_pay_ab and has_sel_targets
               if can_act then
                 return "activate_ability", pi, { source = "base", ability_index = ai }
               else
@@ -2009,16 +2022,24 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
             for ai, ab in ipairs(sdef.abilities) do
               if ab.type == "activated" then
                 if util.point_in_rect(mx, my, tx + 4, ab_btn_y, tw - 8, 24) then
-                  local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
-                  local used = game_state.activatedUsedThisTurn and game_state.activatedUsedThisTurn[key]
+                  local source_key = "board:" .. si .. ":" .. ai
+                  local used = abilities.is_activated_ability_used_this_turn(game_state, pi, source_key, { type = "board", index = si }, ai)
                   local board_entry = player.board[si]
                   local _c_brd = game_state.pendingCombat
                   local _in_blk_brd = _c_brd and _c_brd.stage == "DECLARED"
                     and (pi == _c_brd.attacker or pi == _c_brd.defender)
-                  local can_act = (not ab.once_per_turn or not used) and abilities.can_pay_cost(player.resources, ab.cost)
+                  local can_pay_ab = abilities.can_pay_activated_ability_costs(player.resources, ab, {
+                    source_entry = board_entry,
+                    require_variable_min = true,
+                  })
+                  local sel_info = abilities.collect_activated_selection_cost_targets(game_state, pi, ab)
+                  local has_sel_targets = true
+                  if sel_info and sel_info.requires_selection then
+                    has_sel_targets = sel_info.has_any_target == true
+                  end
+                  local can_act = (not ab.once_per_turn or not used) and can_pay_ab
                     and (pi == game_state.activePlayer or (ab.fast and _in_blk_brd))
-                    and (not ab.rest or not (board_entry and board_entry.state and board_entry.state.rested))
-                    and (ab.effect ~= "deal_damage_x" or (player.resources[(ab.effect_args and ab.effect_args.resource) or "stone"] or 0) >= 1)
+                    and has_sel_targets
                     and (ab.effect ~= "play_spell" or #abilities.find_matching_spell_hand_indices(player, ab.effect_args or {}) > 0)
                     and (ab.effect ~= "discard_draw" or #player.hand >= (ab.effect_args and ab.effect_args.discard or 2))
                   if can_act then

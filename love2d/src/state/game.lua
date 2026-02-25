@@ -1,8 +1,11 @@
 -- In-game screen: game state, board, blueprint modal, drag-drop, End turn button, hand UI
 
 local game_state_module = require("src.game.state")
+local game_checksum = require("src.game.checksum")
 local commands = require("src.game.commands")
 local replay = require("src.game.replay")
+local json = require("src.net.json_codec")
+local settings_store = require("src.settings")
 local board = require("src.ui.board")
 local blueprint_modal = require("src.ui.blueprint_modal")
 local deck_viewer = require("src.ui.deck_viewer")
@@ -24,9 +27,17 @@ local deck_profiles = require("src.game.deck_profiles")
 
 local GameState = {}
 GameState.__index = GameState
+local validate_prompt_defs_static
+local validate_prompt_metadata_runtime
+local PROMPT_PAYLOAD_FIELD_SCHEMAS
+local prompt_metadata_runtime_validated = false
 
 function GameState.new(opts)
   opts = opts or {}
+  if not prompt_metadata_runtime_validated and type(validate_prompt_metadata_runtime) == "function" then
+    validate_prompt_metadata_runtime(GameState)
+    prompt_metadata_runtime_validated = true
+  end
   local setup = opts.setup or nil
   if not setup then
     local settings = require("src.settings")
@@ -75,6 +86,7 @@ function GameState.new(opts)
     pending_damage_x = nil,          -- { source, ability_index, effect_args, eligible_player_index, eligible_board_indices, x_amount, max_x }
     pending_spell_target = nil,      -- { hand_index, effect_args, eligible_player_index, eligible_board_indices, monument_board_index?, via_ability_source?, via_ability_ability_index? }
     pending_play_spell = nil,        -- { source, ability_index, cost, effect_args, eligible_indices }
+    prompt_stack = {},               -- generic interaction prompts (phase 2 migration; legacy pending_* aliases preserved)
     hand_y_offsets = {},          -- per-card animated y offset (negative = raised)
     command_log = replay.new_log({
       command_schema_version = commands.SCHEMA_VERSION,
@@ -89,6 +101,7 @@ function GameState.new(opts)
     multiplayer_error = nil,
     multiplayer_status = nil,
     reconnect_pending = false,
+    reconnect_reason = nil,
     reconnect_attempts = 0,
     reconnect_timer = 0,
     pending_attack_declarations = {}, -- { { attacker_board_index, target={type="base"|"board", index?} } }
@@ -98,6 +111,12 @@ function GameState.new(opts)
     sync_poll_timer = 0,
     sync_poll_interval = 1.0,
     _terminal_announced = false,
+    _last_desync_report = nil,
+    in_game_settings_open = false,
+    in_game_settings_status = nil,
+    in_game_settings_status_kind = "info",
+    in_game_settings_dragging_slider = false,
+    in_game_settings_settings_dirty = false,
   }, GameState)
   -- Cache the hand cursor once
   self._cursor_hand = love.mouse.getSystemCursor("hand")
@@ -156,6 +175,1339 @@ function GameState:player_to_panel(pi)
   return self.local_player_index == 0 and pi or (1 - pi)
 end
 
+local PROMPT_DEFS = {
+  play_unit = {
+    alias_field = "pending_play_unit",
+    cancel = { empty_click = true, escape = true },
+    hand_card_click_method = "_handle_prompt_play_unit_hand_click",
+    payload_normalize_method = "_normalize_prompt_play_unit_payload",
+    payload_validate_method = "_validate_prompt_play_unit_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "optional_table", field = "effect_args" },
+      { normalize = "index_list", op = "required_index_list", field = "eligible_indices" },
+      { op = "optional_cost", field = "cost" },
+      { op = "optional_bool", field = "fast" },
+    },
+    activated_start_method = "_start_activated_play_unit_prompt",
+    activated_start_effects = { "play_unit" },
+    board_draw = {
+      eligible_hand_indices = { order = 1, field = "eligible_indices" },
+    },
+  },
+  sacrifice = {
+    alias_field = "pending_sacrifice",
+    cancel = { empty_click = true, escape = true },
+    worker_click_method = "_handle_prompt_sacrifice_worker_click",
+    structure_click_method = "_handle_prompt_sacrifice_structure_click",
+    payload_normalize_method = "_normalize_prompt_sacrifice_payload",
+    payload_validate_method = "_validate_prompt_sacrifice_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "optional_table", field = "effect_args" },
+      { normalize = "index_list", op = "required_index_list", field = "eligible_board_indices" },
+      { op = "optional_string", field = "next" },
+      { normalize = "index_list", op = "optional_index_list", field = "spell_eligible_indices" },
+      { op = "optional_cost", field = "spell_cost" },
+      { op = "optional_bool", field = "fast" },
+      { op = "optional_bool", field = "allow_worker_tokens" },
+    },
+    activated_start_method = "_start_activated_sacrifice_produce_prompt",
+    activated_start_effects = { "sacrifice_produce" },
+    board_draw = {
+      sacrifice_eligible_indices = { order = 1, field = "eligible_board_indices" },
+    },
+  },
+  upgrade = {
+    alias_field = "pending_upgrade",
+    cancel = { empty_click = true, escape = true },
+    payload_normalize_method = "_normalize_prompt_upgrade_payload",
+    payload_validate_method = "_validate_prompt_upgrade_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "optional_table", field = "effect_args" },
+      { normalize = "index_list", op = "optional_index_list", field = "eligible_hand_indices" },
+      { normalize = "index_list", op = "optional_index_list", field = "eligible_board_indices" },
+      { op = "optional_bool", field = "eligible_worker_sacrifice" },
+      post_validate = "_post_validate_prompt_upgrade_payload",
+    },
+    activated_start_method = "_start_activated_sacrifice_upgrade_prompt",
+    activated_start_effects = { "sacrifice_upgrade" },
+    board_draw = {
+      eligible_hand_indices = { order = 2, when = function(p) return p.stage == "hand" end, field = "eligible_hand_indices" },
+      sacrifice_eligible_indices = { order = 2, when = function(p) return p.stage == "sacrifice" end, field = "eligible_board_indices" },
+    },
+  },
+  hand_sacrifice = {
+    alias_field = "pending_hand_sacrifice",
+    cancel = { empty_click = true, escape = true },
+    overlay = { order = 1, method = "_draw_pending_hand_sacrifice_overlay" },
+    worker_click_method = "_handle_prompt_hand_sacrifice_worker_click",
+    payload_validate_method = "_validate_prompt_hand_sacrifice_payload",
+    payload_schema = {
+      { op = "required_index", field = "hand_index" },
+      { op = "required_count", field = "required_count" },
+      post_validate = "_post_validate_prompt_hand_sacrifice_payload",
+    },
+    board_draw = {
+      sacrifice_eligible_indices = { order = 3, value = function() return {} end },
+    },
+  },
+  monument = {
+    alias_field = "pending_monument",
+    cancel = { empty_click = true, escape = true },
+    overlay = { order = 2, method = "_draw_pending_monument_overlay" },
+    structure_click_method = "_handle_prompt_monument_structure_click",
+    payload_normalize_method = "_normalize_prompt_monument_payload",
+    payload_validate_method = "_validate_prompt_monument_payload",
+    payload_schema = {
+      { op = "required_index", field = "hand_index" },
+      { op = "required_count", field = "min_counters" },
+      { normalize = "index_list", op = "required_index_list", field = "eligible_indices" },
+    },
+    board_draw = {
+      monument_eligible_indices = { order = 1, field = "eligible_indices" },
+    },
+  },
+  graveyard_return = {
+    alias_field = "pending_graveyard_return",
+    -- managed mostly via deck_viewer callbacks
+    payload_normalize_method = "_normalize_prompt_graveyard_return_payload",
+    payload_validate_method = "_validate_prompt_graveyard_return_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "required_count", field = "max_count" },
+      { op = "optional_table", field = "effect_args" },
+      { normalize = "index_list", op = "required_index_list", field = "selected_graveyard_indices" },
+    },
+    activated_start_method = "_start_activated_graveyard_return_prompt",
+    activated_start_effects = { "return_from_graveyard" },
+  },
+  discard_draw = {
+    alias_field = "pending_discard_draw",
+    cancel = { empty_click = true, escape = true },
+    overlay = { order = 5, method = "_draw_pending_discard_draw_overlay" },
+    hand_card_click_method = "_handle_prompt_discard_draw_hand_click",
+    payload_normalize_method = "_normalize_prompt_discard_draw_payload",
+    payload_validate_method = "_validate_prompt_discard_draw_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "required_count", field = "required_count" },
+      { op = "required_count", field = "draw_count" },
+      { normalize = "int_keyed_set", op = "required_int_keyed_set", field = "selected_set" },
+    },
+    activated_start_method = "_start_activated_discard_draw_prompt",
+    activated_start_effects = { "discard_draw" },
+    board_draw = {
+      discard_selected_set = { order = 1, field = "selected_set" },
+    },
+  },
+  play_spell = {
+    alias_field = "pending_play_spell",
+    cancel = { empty_click = true },
+    hand_card_click_method = "_handle_prompt_play_spell_hand_click",
+    payload_normalize_method = "_normalize_prompt_play_spell_payload",
+    payload_validate_method = "_validate_prompt_play_spell_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "optional_cost", field = "cost" },
+      { op = "optional_table", field = "effect_args" },
+      { normalize = "index_list", op = "required_index_list", field = "eligible_indices" },
+      { op = "optional_bool", field = "fast" },
+      { op = "optional_index", field = "sacrifice_target_board_index" },
+    },
+    activated_start_method = "_start_activated_play_spell_prompt",
+    activated_start_effects = { "play_spell", "sacrifice_cast_spell" },
+    board_draw = {
+      eligible_hand_indices = { order = 3, field = "eligible_indices" },
+    },
+  },
+  spell_target = {
+    alias_field = "pending_spell_target",
+    cancel = {
+      empty_click = true,
+      on_cancel = function(self)
+        self.hand_selected_index = nil
+      end,
+    },
+    overlay = { order = 4, method = "_draw_pending_spell_target_prompt" },
+    structure_click_method = "_handle_prompt_spell_target_structure_click",
+    payload_normalize_method = "_normalize_prompt_spell_target_payload",
+    payload_validate_method = "_validate_prompt_spell_target_payload",
+    payload_schema = {
+      { op = "required_index", field = "hand_index" },
+      { op = "optional_table", field = "effect_args" },
+      { op = "optional_player_index", field = "eligible_player_index" },
+      { normalize = "index_list", op = "required_index_list", field = "eligible_board_indices" },
+      { op = "optional_index", field = "monument_board_index" },
+      { op = "optional_index", field = "sacrifice_target_board_index" },
+      { op = "optional_source_ref", field = "via_ability_source" },
+      { op = "optional_index", field = "via_ability_ability_index" },
+      { op = "optional_bool", field = "fast" },
+    },
+    board_draw = {
+      damage_target_eligible_player_index = { order = 3, field = "eligible_player_index" },
+      damage_target_eligible_indices = { order = 3, field = "eligible_board_indices" },
+    },
+  },
+  damage_target = {
+    alias_field = "pending_damage_target",
+    cancel = { empty_click = true },
+    structure_click_method = "_handle_prompt_damage_target_structure_click",
+    payload_normalize_method = "_normalize_prompt_damage_target_payload",
+    payload_validate_method = "_validate_prompt_damage_target_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "optional_table", field = "effect_args" },
+      { op = "optional_bool", field = "fast" },
+      { op = "optional_player_index", field = "eligible_player_index" },
+      { normalize = "index_list", op = "optional_index_list", field = "eligible_board_indices" },
+      { normalize = "player_indexed_index_lists", op = "optional_player_indexed_index_lists", field = "eligible_board_indices_by_player" },
+      { normalize = "player_bool_set", op = "optional_player_bool_set", field = "eligible_base_player_indices" },
+      post_validate = "_post_validate_prompt_damage_target_payload",
+    },
+    activated_start_method = "_start_activated_deal_damage_prompt",
+    activated_start_effects = { "deal_damage" },
+    board_draw = {
+      damage_target_eligible_player_index = { order = 1, field = "eligible_player_index" },
+      damage_target_eligible_indices = { order = 1, field = "eligible_board_indices" },
+      damage_target_board_indices_by_player = { order = 1, field = "eligible_board_indices_by_player" },
+      damage_target_base_player_indices = { order = 1, field = "eligible_base_player_indices" },
+    },
+  },
+  damage_x = {
+    alias_field = "pending_damage_x",
+    cancel = { empty_click = true },
+    overlay = { order = 3, method = "_draw_pending_damage_x_overlay" },
+    structure_click_method = "_handle_prompt_damage_x_structure_click",
+    pre_hit_test_click_method = "_handle_prompt_damage_x_pre_hit_test_click",
+    payload_normalize_method = "_normalize_prompt_damage_x_payload",
+    payload_validate_method = "_validate_prompt_damage_x_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "optional_table", field = "effect_args" },
+      { op = "optional_bool", field = "fast" },
+      { op = "optional_player_index", field = "eligible_player_index" },
+      { normalize = "index_list", op = "optional_index_list", field = "eligible_board_indices" },
+      { normalize = "player_indexed_index_lists", op = "optional_player_indexed_index_lists", field = "eligible_board_indices_by_player" },
+      { normalize = "player_bool_set", op = "optional_player_bool_set", field = "eligible_base_player_indices" },
+      { normalize = "nonnegative_int", op = "required_count", field = "x_amount" },
+      { normalize = "nonnegative_int", op = "required_count", field = "max_x" },
+      post_normalize = "_post_normalize_prompt_damage_x_payload",
+      post_validate = "_post_validate_prompt_damage_x_payload",
+    },
+    activated_start_method = "_start_activated_damage_x_prompt",
+    activated_start_effects = { "deal_damage_x" },
+    board_draw = {
+      damage_target_eligible_player_index = { order = 2, field = "eligible_player_index" },
+      damage_target_eligible_indices = { order = 2, field = "eligible_board_indices" },
+    },
+  },
+  counter_placement = {
+    alias_field = "pending_counter_placement",
+    cancel = { empty_click = true },
+    structure_click_method = "_handle_prompt_counter_placement_structure_click",
+    payload_normalize_method = "_normalize_prompt_counter_placement_payload",
+    payload_validate_method = "_validate_prompt_counter_placement_payload",
+    payload_schema = {
+      { op = "required_source", field = "source" },
+      { op = "required_ability_index", field = "ability_index" },
+      { op = "optional_table", field = "effect_args" },
+      { normalize = "index_list", op = "required_index_list", field = "eligible_board_indices" },
+      { op = "optional_bool", field = "fast" },
+    },
+    activated_start_method = "_start_activated_counter_placement_prompt",
+    activated_start_effects = { "place_counter_on_target" },
+    board_draw = {
+      counter_target_eligible_indices = { order = 1, field = "eligible_board_indices" },
+    },
+  },
+}
+
+local function is_prompt_method_name(value)
+  return type(value) == "string" and value:match("^_[%a_][%w_]*$") ~= nil
+end
+
+validate_prompt_defs_static = function(prompt_defs)
+  if type(prompt_defs) ~= "table" then
+    error("PROMPT_DEFS must be a table")
+  end
+  local direct_method_keys = {
+    "hand_card_click_method",
+    "worker_click_method",
+    "structure_click_method",
+    "pre_hit_test_click_method",
+    "payload_normalize_method",
+    "payload_validate_method",
+    "activated_start_method",
+  }
+  for kind, def in pairs(prompt_defs) do
+    if type(kind) ~= "string" or kind == "" then
+      error("invalid prompt kind in PROMPT_DEFS")
+    end
+    if type(def) ~= "table" then
+      error("PROMPT_DEFS[" .. kind .. "] must be a table")
+    end
+
+    if def.alias_field ~= nil then
+      if type(def.alias_field) ~= "string" or def.alias_field == "" then
+        error("PROMPT_DEFS[" .. kind .. "].alias_field must be a non-empty string")
+      end
+      if not def.alias_field:match("^pending_[%w_]+$") then
+        error("PROMPT_DEFS[" .. kind .. "].alias_field must look like pending_*")
+      end
+    end
+
+    if def.cancel ~= nil then
+      if type(def.cancel) ~= "table" then
+        error("PROMPT_DEFS[" .. kind .. "].cancel must be a table")
+      end
+      if def.cancel.empty_click ~= nil and type(def.cancel.empty_click) ~= "boolean" then
+        error("PROMPT_DEFS[" .. kind .. "].cancel.empty_click must be boolean")
+      end
+      if def.cancel.escape ~= nil and type(def.cancel.escape) ~= "boolean" then
+        error("PROMPT_DEFS[" .. kind .. "].cancel.escape must be boolean")
+      end
+      if def.cancel.on_cancel ~= nil and type(def.cancel.on_cancel) ~= "function" then
+        error("PROMPT_DEFS[" .. kind .. "].cancel.on_cancel must be a function")
+      end
+    end
+
+    if def.overlay ~= nil then
+      if type(def.overlay) ~= "table" then
+        error("PROMPT_DEFS[" .. kind .. "].overlay must be a table")
+      end
+      if not is_prompt_method_name(def.overlay.method) then
+        error("PROMPT_DEFS[" .. kind .. "].overlay.method must be a private method name string")
+      end
+      if def.overlay.order ~= nil and tonumber(def.overlay.order) == nil then
+        error("PROMPT_DEFS[" .. kind .. "].overlay.order must be numeric")
+      end
+    end
+
+    for _, key in ipairs(direct_method_keys) do
+      local method_name = def[key]
+      if method_name ~= nil and not is_prompt_method_name(method_name) then
+        error("PROMPT_DEFS[" .. kind .. "]." .. key .. " must be a private method name string")
+      end
+    end
+
+    local has_start_method = def.activated_start_method ~= nil
+    local has_start_effects = def.activated_start_effects ~= nil
+    if has_start_method ~= has_start_effects then
+      error("PROMPT_DEFS[" .. kind .. "] activated_start_method/effects must be defined together")
+    end
+    if has_start_effects then
+      if type(def.activated_start_effects) ~= "table" then
+        error("PROMPT_DEFS[" .. kind .. "].activated_start_effects must be a table")
+      end
+      for i, effect in ipairs(def.activated_start_effects) do
+        if type(effect) ~= "string" or effect == "" then
+          error("PROMPT_DEFS[" .. kind .. "].activated_start_effects[" .. i .. "] must be a non-empty string")
+        end
+      end
+    end
+
+    if def.board_draw ~= nil then
+      if type(def.board_draw) ~= "table" then
+        error("PROMPT_DEFS[" .. kind .. "].board_draw must be a table")
+      end
+      for field_name, spec in pairs(def.board_draw) do
+        if type(field_name) ~= "string" or field_name == "" then
+          error("PROMPT_DEFS[" .. kind .. "].board_draw has invalid field name")
+        end
+        if type(spec) ~= "table" then
+          error("PROMPT_DEFS[" .. kind .. "].board_draw[" .. field_name .. "] must be a table")
+        end
+        local has_field = spec.field ~= nil
+        local has_value = spec.value ~= nil
+        if not has_field and not has_value then
+          error("PROMPT_DEFS[" .. kind .. "].board_draw[" .. field_name .. "] must define field or value")
+        end
+        if has_field and (type(spec.field) ~= "string" or spec.field == "") then
+          error("PROMPT_DEFS[" .. kind .. "].board_draw[" .. field_name .. "].field must be a non-empty string")
+        end
+        if has_value and type(spec.value) ~= "function" then
+          error("PROMPT_DEFS[" .. kind .. "].board_draw[" .. field_name .. "].value must be a function")
+        end
+        if spec.when ~= nil and type(spec.when) ~= "function" then
+          error("PROMPT_DEFS[" .. kind .. "].board_draw[" .. field_name .. "].when must be a function")
+        end
+        if spec.order ~= nil and tonumber(spec.order) == nil then
+          error("PROMPT_DEFS[" .. kind .. "].board_draw[" .. field_name .. "].order must be numeric")
+        end
+      end
+    end
+  end
+end
+
+validate_prompt_metadata_runtime = function(game_state_class)
+  if type(game_state_class) ~= "table" then
+    error("validate_prompt_metadata_runtime requires GameState table")
+  end
+  local missing = {}
+  local function require_method(kind, key_name, method_name)
+    if type(method_name) == "string" and type(game_state_class[method_name]) ~= "function" then
+      missing[#missing + 1] = "PROMPT_DEFS[" .. kind .. "]." .. key_name .. " -> " .. method_name
+    end
+  end
+  for kind, def in pairs(PROMPT_DEFS) do
+    require_method(kind, "hand_card_click_method", def.hand_card_click_method)
+    require_method(kind, "worker_click_method", def.worker_click_method)
+    require_method(kind, "structure_click_method", def.structure_click_method)
+    require_method(kind, "pre_hit_test_click_method", def.pre_hit_test_click_method)
+    require_method(kind, "payload_normalize_method", def.payload_normalize_method)
+    require_method(kind, "payload_validate_method", def.payload_validate_method)
+    require_method(kind, "activated_start_method", def.activated_start_method)
+    if type(def.overlay) == "table" then
+      require_method(kind, "overlay.method", def.overlay.method)
+    end
+  end
+  for kind, def in pairs(PROMPT_DEFS) do
+    local schema = type(def) == "table" and def.payload_schema or nil
+    if type(schema) == "table" then
+      if type(schema.post_normalize) == "string" and type(game_state_class[schema.post_normalize]) ~= "function" then
+        missing[#missing + 1] = "PROMPT_DEFS[" .. kind .. "].payload_schema.post_normalize -> " .. schema.post_normalize
+      end
+      if type(schema.post_validate) == "string" and type(game_state_class[schema.post_validate]) ~= "function" then
+        missing[#missing + 1] = "PROMPT_DEFS[" .. kind .. "].payload_schema.post_validate -> " .. schema.post_validate
+      end
+    end
+  end
+  if #missing > 0 then
+    table.sort(missing)
+    error("missing prompt handler methods:\n  " .. table.concat(missing, "\n  "))
+  end
+end
+
+local function build_prompt_alias_fields(prompt_defs)
+  local out = {}
+  local seen_fields = {}
+  for kind, def in pairs(prompt_defs) do
+    local field = type(def) == "table" and def.alias_field or nil
+    if type(field) == "string" and field ~= "" then
+      local prev_kind = seen_fields[field]
+      if prev_kind and prev_kind ~= kind then
+        error("duplicate prompt alias field mapping for field: " .. field)
+      end
+      seen_fields[field] = kind
+      out[kind] = field
+    end
+  end
+  return out
+end
+
+local function build_prompt_cancel_behavior(prompt_defs)
+  local out = {}
+  for kind, def in pairs(prompt_defs) do
+    if type(def) == "table" and type(def.cancel) == "table" then
+      out[kind] = def.cancel
+    end
+  end
+  return out
+end
+
+local function build_prompt_overlay_tables(prompt_defs)
+  local order_entries = {}
+  local methods = {}
+  for kind, def in pairs(prompt_defs) do
+    local overlay = type(def) == "table" and def.overlay or nil
+    if type(overlay) == "table" and type(overlay.method) == "string" then
+      methods[kind] = overlay.method
+      order_entries[#order_entries + 1] = {
+        kind = kind,
+        order = tonumber(overlay.order) or math.huge,
+      }
+    end
+  end
+  table.sort(order_entries, function(a, b)
+    if a.order == b.order then
+      return a.kind < b.kind
+    end
+    return a.order < b.order
+  end)
+  local order = {}
+  for i, item in ipairs(order_entries) do
+    order[i] = item.kind
+  end
+  return order, methods
+end
+
+local function build_prompt_click_method_map(prompt_defs, key_name)
+  local out = {}
+  for kind, def in pairs(prompt_defs) do
+    local method_name = type(def) == "table" and def[key_name] or nil
+    if type(method_name) == "string" then
+      out[kind] = method_name
+    end
+  end
+  return out
+end
+
+local function build_prompt_board_draw_field_specs(prompt_defs)
+  local out = {}
+  for kind, def in pairs(prompt_defs) do
+    local board_draw = type(def) == "table" and def.board_draw or nil
+    if type(board_draw) == "table" then
+      for field_name, spec in pairs(board_draw) do
+        if type(spec) == "table" then
+          local list = out[field_name]
+          if not list then
+            list = {}
+            out[field_name] = list
+          end
+          list[#list + 1] = {
+            kind = kind,
+            field = spec.field,
+            when = spec.when,
+            value = spec.value,
+            order = tonumber(spec.order) or math.huge,
+          }
+        end
+      end
+    end
+  end
+  for _, list in pairs(out) do
+    table.sort(list, function(a, b)
+      if a.order == b.order then
+        return a.kind < b.kind
+      end
+      return a.order < b.order
+    end)
+  end
+  return out
+end
+
+local function build_activated_prompt_start_methods(prompt_defs)
+  local out = {}
+  for _, def in pairs(prompt_defs) do
+    local method_name = type(def) == "table" and def.activated_start_method or nil
+    local effects = type(def) == "table" and def.activated_start_effects or nil
+    if type(method_name) == "string" and type(effects) == "table" then
+      for _, effect in ipairs(effects) do
+        if type(effect) == "string" then
+          local prev = out[effect]
+          if prev and prev ~= method_name then
+            error("duplicate activated prompt start mapping for effect: " .. effect)
+          end
+          out[effect] = method_name
+        end
+      end
+    end
+  end
+  return out
+end
+
+validate_prompt_defs_static(PROMPT_DEFS)
+local PROMPT_ALIAS_FIELDS = build_prompt_alias_fields(PROMPT_DEFS)
+local PROMPT_CANCEL_BEHAVIOR = build_prompt_cancel_behavior(PROMPT_DEFS)
+local PROMPT_OVERLAY_DRAW_ORDER, PROMPT_OVERLAY_DRAW_METHODS = build_prompt_overlay_tables(PROMPT_DEFS)
+local PROMPT_HAND_CARD_CLICK_METHODS = build_prompt_click_method_map(PROMPT_DEFS, "hand_card_click_method")
+local PROMPT_WORKER_CLICK_METHODS = build_prompt_click_method_map(PROMPT_DEFS, "worker_click_method")
+local PROMPT_STRUCTURE_CLICK_METHODS = build_prompt_click_method_map(PROMPT_DEFS, "structure_click_method")
+local PROMPT_PRE_HIT_TEST_CLICK_METHODS = build_prompt_click_method_map(PROMPT_DEFS, "pre_hit_test_click_method")
+local PROMPT_PAYLOAD_NORMALIZE_METHODS = build_prompt_click_method_map(PROMPT_DEFS, "payload_normalize_method")
+local PROMPT_PAYLOAD_VALIDATE_METHODS = build_prompt_click_method_map(PROMPT_DEFS, "payload_validate_method")
+local PROMPT_BOARD_DRAW_FIELD_SPECS = build_prompt_board_draw_field_specs(PROMPT_DEFS)
+local ACTIVATED_PROMPT_START_METHODS = build_activated_prompt_start_methods(PROMPT_DEFS)
+
+local function resolve_prompt_board_draw_field(self, field_specs)
+  if type(field_specs) ~= "table" then return nil end
+  for _, spec in ipairs(field_specs) do
+    local payload = self:_prompt_payload(spec.kind)
+    if payload ~= nil and (not spec.when or spec.when(payload)) then
+      local value
+      if type(spec.value) == "function" then
+        value = spec.value(payload, self)
+      elseif type(spec.field) == "string" then
+        value = payload[spec.field]
+      else
+        value = payload
+      end
+      if value ~= nil then
+        return value
+      end
+    end
+  end
+  return nil
+end
+
+function GameState:_prompt_stack_ensure()
+  if type(self.prompt_stack) ~= "table" then
+    self.prompt_stack = {}
+  end
+end
+
+function GameState:_prompt_index(kind)
+  self:_prompt_stack_ensure()
+  for i = #self.prompt_stack, 1, -1 do
+    local item = self.prompt_stack[i]
+    if type(item) == "table" and item.kind == kind then
+      return i, item
+    end
+  end
+  return nil, nil
+end
+
+function GameState:_prompt_payload(kind)
+  local _, item = self:_prompt_index(kind)
+  return item and item.payload or nil
+end
+
+function GameState:_top_prompt()
+  self:_prompt_stack_ensure()
+  local item = self.prompt_stack[#self.prompt_stack]
+  if type(item) ~= "table" then return nil, nil end
+  if type(item.kind) ~= "string" or item.kind == "" then return nil, nil end
+  return item.kind, item.payload
+end
+
+function GameState:_dispatch_prompt_click_from_top(method_map, ...)
+  if type(method_map) ~= "table" then return false end
+  local prompt_kind = self:_top_prompt()
+  if type(prompt_kind) ~= "string" then return false end
+  local method_name = method_map[prompt_kind]
+  local method = method_name and self[method_name] or nil
+  if type(method) ~= "function" then return false end
+  return method(self, ...)
+end
+
+local function prompt_validate_error(msg)
+  return false, msg
+end
+
+local function is_integer_number(value)
+  return type(value) == "number" and value == math.floor(value)
+end
+
+local function is_positive_index(value)
+  return is_integer_number(value) and value >= 1
+end
+
+local function is_nonnegative_integer(value)
+  return is_integer_number(value) and value >= 0
+end
+
+local function is_bool(value)
+  return type(value) == "boolean"
+end
+
+local function is_array_of_positive_indices(value)
+  if type(value) ~= "table" then return false end
+  for i, v in ipairs(value) do
+    if not is_positive_index(v) then
+      return false, "entry " .. tostring(i) .. " must be a positive integer index"
+    end
+  end
+  return true
+end
+
+local function is_cost_list(value)
+  if value == nil then return true end
+  if type(value) ~= "table" then return false, "cost must be a table" end
+  for i, c in ipairs(value) do
+    if type(c) ~= "table" then
+      return false, "cost[" .. tostring(i) .. "] must be a table"
+    end
+    if type(c.type) ~= "string" or c.type == "" then
+      return false, "cost[" .. tostring(i) .. "].type must be a non-empty string"
+    end
+    if not is_nonnegative_integer(c.amount or 0) then
+      return false, "cost[" .. tostring(i) .. "].amount must be a non-negative integer"
+    end
+  end
+  return true
+end
+
+local function is_source_ref(value)
+  if type(value) ~= "table" then return false, "source must be a table" end
+  if value.type ~= "base" and value.type ~= "board" then
+    return false, "source.type must be 'base' or 'board'"
+  end
+  if value.type == "board" and not is_positive_index(value.index) then
+    return false, "source.index must be a positive integer for board sources"
+  end
+  if value.type == "base" and value.index ~= nil and not is_positive_index(value.index) then
+    return false, "source.index must be nil or a positive integer for base sources"
+  end
+  return true
+end
+
+local function is_int_keyed_set(value)
+  if type(value) ~= "table" then return false, "must be a table" end
+  for k, v in pairs(value) do
+    if not is_positive_index(k) then
+      return false, "set key must be a positive integer index"
+    end
+    if v ~= nil and not is_bool(v) and v ~= 0 and v ~= 1 then
+      return false, "set values must be boolean-like"
+    end
+  end
+  return true
+end
+
+local function is_player_bool_set(value)
+  if type(value) ~= "table" then return false, "must be a table" end
+  for k, v in pairs(value) do
+    if k ~= 0 and k ~= 1 then
+      return false, "player set keys must be 0 or 1"
+    end
+    if v ~= nil and not is_bool(v) and v ~= 0 and v ~= 1 then
+      return false, "player set values must be boolean-like"
+    end
+  end
+  return true
+end
+
+local function is_player_indexed_index_lists(value)
+  if type(value) ~= "table" then return false, "must be a table" end
+  for k, list in pairs(value) do
+    if k ~= 0 and k ~= 1 then
+      return false, "player map keys must be 0 or 1"
+    end
+    local ok, err = is_array_of_positive_indices(list)
+    if not ok then
+      return false, "player " .. tostring(k) .. " list invalid: " .. tostring(err)
+    end
+  end
+  return true
+end
+
+local function validate_prompt_payload_table(payload)
+  if type(payload) ~= "table" then
+    return prompt_validate_error("payload must be a table")
+  end
+  return true
+end
+
+local function validate_required_index(payload, field_name)
+  if not is_positive_index(payload[field_name]) then
+    return prompt_validate_error(field_name .. " must be a positive integer index")
+  end
+  return true
+end
+
+local function validate_required_count(payload, field_name)
+  if not is_nonnegative_integer(payload[field_name]) then
+    return prompt_validate_error(field_name .. " must be a non-negative integer")
+  end
+  return true
+end
+
+local function validate_optional_bool(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil and not is_bool(v) then
+    return prompt_validate_error(field_name .. " must be a boolean")
+  end
+  return true
+end
+
+local function validate_optional_string(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil and (type(v) ~= "string" or v == "") then
+    return prompt_validate_error(field_name .. " must be a non-empty string")
+  end
+  return true
+end
+
+local function validate_optional_table(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil and type(v) ~= "table" then
+    return prompt_validate_error(field_name .. " must be a table")
+  end
+  return true
+end
+
+local function validate_optional_index(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil and not is_positive_index(v) then
+    return prompt_validate_error(field_name .. " must be a positive integer index")
+  end
+  return true
+end
+
+local function validate_optional_index_list(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil then
+    local ok, err = is_array_of_positive_indices(v)
+    if not ok then
+      return prompt_validate_error(field_name .. " must be an index list (" .. tostring(err) .. ")")
+    end
+  end
+  return true
+end
+
+local function validate_required_index_list(payload, field_name)
+  local v = payload[field_name]
+  local ok, err = is_array_of_positive_indices(v)
+  if not ok then
+    return prompt_validate_error(field_name .. " must be an index list (" .. tostring(err) .. ")")
+  end
+  return true
+end
+
+local function validate_required_source(payload)
+  local ok, err = is_source_ref(payload.source)
+  if not ok then
+    return prompt_validate_error(err)
+  end
+  return true
+end
+
+local function validate_required_ability_index(payload)
+  return validate_required_index(payload, "ability_index")
+end
+
+local function validate_optional_cost(payload, field_name)
+  local ok, err = is_cost_list(payload[field_name])
+  if not ok then
+    return prompt_validate_error(err)
+  end
+  return true
+end
+
+local function validate_optional_player_index(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil and v ~= 0 and v ~= 1 then
+    return prompt_validate_error(field_name .. " must be 0 or 1")
+  end
+  return true
+end
+
+local function validate_optional_source_ref(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil then
+    local ok, err = is_source_ref(v)
+    if not ok then
+      return prompt_validate_error(field_name .. " invalid (" .. tostring(err) .. ")")
+    end
+  end
+  return true
+end
+
+local function validate_optional_player_indexed_index_lists(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil then
+    local ok, err = is_player_indexed_index_lists(v)
+    if not ok then
+      return prompt_validate_error(field_name .. " invalid (" .. tostring(err) .. ")")
+    end
+  end
+  return true
+end
+
+local function validate_optional_player_bool_set(payload, field_name)
+  local v = payload[field_name]
+  if v ~= nil then
+    local ok, err = is_player_bool_set(v)
+    if not ok then
+      return prompt_validate_error(field_name .. " invalid (" .. tostring(err) .. ")")
+    end
+  end
+  return true
+end
+
+local function validate_required_int_keyed_set(payload, field_name)
+  local set_ok, set_err = is_int_keyed_set(payload[field_name])
+  if not set_ok then
+    return prompt_validate_error(field_name .. " invalid (" .. tostring(set_err) .. ")")
+  end
+  return true
+end
+
+local function normalize_unique_sorted_positive_indices_in_place(list)
+  if type(list) ~= "table" then return list end
+  local seen = {}
+  local out = {}
+  for _, v in ipairs(list) do
+    if is_positive_index(v) and not seen[v] then
+      seen[v] = true
+      out[#out + 1] = v
+    end
+  end
+  table.sort(out)
+  for i = #list, 1, -1 do
+    list[i] = nil
+  end
+  for i, v in ipairs(out) do
+    list[i] = v
+  end
+  return list
+end
+
+local function normalize_index_list_field(payload, field_name)
+  if type(payload) ~= "table" then return payload end
+  if payload[field_name] ~= nil then
+    normalize_unique_sorted_positive_indices_in_place(payload[field_name])
+  end
+  return payload
+end
+
+local function normalize_player_index_list_map_field(payload, field_name)
+  if type(payload) ~= "table" then return payload end
+  local map = payload[field_name]
+  if type(map) ~= "table" then return payload end
+  for _, list in pairs(map) do
+    if type(list) == "table" then
+      normalize_unique_sorted_positive_indices_in_place(list)
+    end
+  end
+  return payload
+end
+
+local function normalize_player_bool_set_field(payload, field_name)
+  if type(payload) ~= "table" then return payload end
+  local set = payload[field_name]
+  if type(set) ~= "table" then return payload end
+  local normalized = {}
+  for k, v in pairs(set) do
+    if (k == 0 or k == 1) and (v == true or v == 1) then
+      normalized[k] = true
+    end
+  end
+  payload[field_name] = normalized
+  return payload
+end
+
+local function normalize_int_keyed_set_field(payload, field_name)
+  if type(payload) ~= "table" then return payload end
+  local set = payload[field_name]
+  if type(set) ~= "table" then return payload end
+  local normalized = {}
+  for k, v in pairs(set) do
+    if is_positive_index(k) and (v == true or v == 1) then
+      normalized[k] = true
+    end
+  end
+  payload[field_name] = normalized
+  return payload
+end
+
+local function clamp_nonnegative_integer_field(payload, field_name)
+  if type(payload) ~= "table" then return payload end
+  local v = payload[field_name]
+  if type(v) ~= "number" then return payload end
+  if v < 0 then
+    payload[field_name] = 0
+    return payload
+  end
+  payload[field_name] = math.floor(v)
+  return payload
+end
+
+local function clamp_min_max_fields(payload, min_field, max_field)
+  if type(payload) ~= "table" then return payload end
+  local min_v = payload[min_field]
+  local max_v = payload[max_field]
+  if type(min_v) == "number" and type(max_v) == "number" then
+    if min_v > max_v then
+      payload[min_field] = max_v
+    end
+  end
+  return payload
+end
+
+local PROMPT_PAYLOAD_FIELD_NORMALIZE_OPS = {
+  index_list = normalize_index_list_field,
+  player_indexed_index_lists = normalize_player_index_list_map_field,
+  player_bool_set = normalize_player_bool_set_field,
+  int_keyed_set = normalize_int_keyed_set_field,
+  nonnegative_int = clamp_nonnegative_integer_field,
+}
+
+local PROMPT_PAYLOAD_FIELD_VALIDATE_OPS = {
+  required_index = validate_required_index,
+  required_count = validate_required_count,
+  required_index_list = validate_required_index_list,
+  required_source = function(payload, _field_name)
+    return validate_required_source(payload)
+  end,
+  required_ability_index = function(payload, _field_name)
+    return validate_required_ability_index(payload)
+  end,
+  required_int_keyed_set = validate_required_int_keyed_set,
+  optional_index = validate_optional_index,
+  optional_bool = validate_optional_bool,
+  optional_string = validate_optional_string,
+  optional_table = validate_optional_table,
+  optional_index_list = validate_optional_index_list,
+  optional_cost = validate_optional_cost,
+  optional_player_index = validate_optional_player_index,
+  optional_source_ref = validate_optional_source_ref,
+  optional_player_indexed_index_lists = validate_optional_player_indexed_index_lists,
+  optional_player_bool_set = validate_optional_player_bool_set,
+}
+
+local function validate_prompt_payload_field_schemas_static(prompt_defs, schemas, normalize_ops, validate_ops)
+  if type(prompt_defs) ~= "table" then
+    error("PROMPT_DEFS must be a table for schema validation")
+  end
+  if type(schemas) ~= "table" then
+    error("PROMPT_PAYLOAD_FIELD_SCHEMAS must be a table")
+  end
+  if type(normalize_ops) ~= "table" then
+    error("PROMPT_PAYLOAD_FIELD_NORMALIZE_OPS must be a table")
+  end
+  if type(validate_ops) ~= "table" then
+    error("PROMPT_PAYLOAD_FIELD_VALIDATE_OPS must be a table")
+  end
+
+  for kind, schema in pairs(schemas) do
+    if type(kind) ~= "string" or kind == "" then
+      error("PROMPT_PAYLOAD_FIELD_SCHEMAS has invalid prompt kind key")
+    end
+    if type(prompt_defs[kind]) ~= "table" then
+      error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "] has no matching PROMPT_DEFS entry")
+    end
+    if type(schema) ~= "table" then
+      error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "] must be a table")
+    end
+
+    local seq_count = 0
+    for i, spec in ipairs(schema) do
+      seq_count = i
+      if type(spec) ~= "table" then
+        error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "][" .. i .. "] must be a table")
+      end
+      if type(spec.field) ~= "string" or spec.field == "" then
+        error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "][" .. i .. "].field must be a non-empty string")
+      end
+      if type(spec.op) ~= "string" or spec.op == "" then
+        error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "][" .. i .. "].op must be a non-empty string")
+      end
+      if type(validate_ops[spec.op]) ~= "function" then
+        error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "][" .. i .. "] unknown validate op: " .. tostring(spec.op))
+      end
+      if spec.normalize ~= nil then
+        if type(spec.normalize) ~= "string" or spec.normalize == "" then
+          error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "][" .. i .. "].normalize must be a non-empty string")
+        end
+        if type(normalize_ops[spec.normalize]) ~= "function" then
+          error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "][" .. i .. "] unknown normalize op: " .. tostring(spec.normalize))
+        end
+      end
+      for key, _ in pairs(spec) do
+        if key ~= "field" and key ~= "op" and key ~= "normalize" then
+          error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "][" .. i .. "] has unsupported key: " .. tostring(key))
+        end
+      end
+    end
+
+    if schema.post_normalize ~= nil then
+      if not is_prompt_method_name(schema.post_normalize) then
+        error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "].post_normalize must be a private method name string")
+      end
+    end
+    if schema.post_validate ~= nil then
+      if not is_prompt_method_name(schema.post_validate) then
+        error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "].post_validate must be a private method name string")
+      end
+    end
+
+    for key, _ in pairs(schema) do
+      if key ~= "post_normalize" and key ~= "post_validate" then
+        if type(key) ~= "number" or key < 1 or key > seq_count or key ~= math.floor(key) then
+          error("PROMPT_PAYLOAD_FIELD_SCHEMAS[" .. kind .. "] must be a dense array")
+        end
+      end
+    end
+  end
+end
+
+local function build_prompt_payload_field_schemas(prompt_defs)
+  local out = {}
+  if type(prompt_defs) ~= "table" then return out end
+  for kind, def in pairs(prompt_defs) do
+    local schema = type(def) == "table" and def.payload_schema or nil
+    if type(schema) == "table" then
+      out[kind] = schema
+    end
+  end
+  return out
+end
+
+local function normalize_prompt_payload_by_schema(payload, schema, self)
+  if type(payload) ~= "table" or type(schema) ~= "table" then return payload end
+  for _, spec in ipairs(schema) do
+    if type(spec) == "table" and type(spec.normalize) == "string" and type(spec.field) == "string" then
+      local fn = PROMPT_PAYLOAD_FIELD_NORMALIZE_OPS[spec.normalize]
+      if fn then
+        fn(payload, spec.field)
+      end
+    end
+  end
+  if type(self) == "table" and type(schema.post_normalize) == "string" then
+    local hook = self[schema.post_normalize]
+    if type(hook) == "function" then
+      local out_payload, out_err = hook(self, payload, schema)
+      if out_payload ~= nil then
+        payload = out_payload
+      elseif out_err ~= nil then
+        return nil, out_err
+      end
+    end
+  end
+  return payload
+end
+
+local function validate_prompt_payload_by_schema(payload, schema, self)
+  local ok, err = validate_prompt_payload_table(payload)
+  if not ok then return ok, err end
+  if type(schema) ~= "table" then return true end
+  for _, spec in ipairs(schema) do
+    if type(spec) == "table" and type(spec.op) == "string" then
+      local fn = PROMPT_PAYLOAD_FIELD_VALIDATE_OPS[spec.op]
+      if type(fn) ~= "function" then
+        return prompt_validate_error("unknown payload field validation op: " .. spec.op)
+      end
+      ok, err = fn(payload, spec.field)
+      if not ok then return ok, err end
+    end
+  end
+  if type(self) == "table" and type(schema.post_validate) == "string" then
+    local hook = self[schema.post_validate]
+    if type(hook) == "function" then
+      ok, err = hook(self, payload, schema)
+      if not ok then return ok, err end
+    end
+  end
+  return true
+end
+
+PROMPT_PAYLOAD_FIELD_SCHEMAS = build_prompt_payload_field_schemas(PROMPT_DEFS)
+validate_prompt_payload_field_schemas_static(
+  PROMPT_DEFS,
+  PROMPT_PAYLOAD_FIELD_SCHEMAS,
+  PROMPT_PAYLOAD_FIELD_NORMALIZE_OPS,
+  PROMPT_PAYLOAD_FIELD_VALIDATE_OPS
+)
+
+local PROMPT_PAYLOAD_SCHEMA_CUSTOM_NORMALIZE_KINDS = {}
+
+local PROMPT_PAYLOAD_SCHEMA_CUSTOM_VALIDATE_KINDS = {}
+
+local function install_schema_prompt_payload_methods(game_state_class, prompt_defs, schemas)
+  if type(game_state_class) ~= "table" or type(prompt_defs) ~= "table" or type(schemas) ~= "table" then
+    return
+  end
+  for kind, def in pairs(prompt_defs) do
+    local schema = (type(def) == "table" and def.payload_schema) or schemas[kind]
+    if type(def) == "table" and type(schema) == "table" then
+      local normalize_method_name = def.payload_normalize_method
+      if type(normalize_method_name) == "string" and not PROMPT_PAYLOAD_SCHEMA_CUSTOM_NORMALIZE_KINDS[kind] then
+        if type(game_state_class[normalize_method_name]) ~= "function" then
+          local schema_ref = schema
+          game_state_class[normalize_method_name] = function(state_self, prompt_payload)
+            return normalize_prompt_payload_by_schema(prompt_payload, schema_ref, state_self)
+          end
+        end
+      end
+
+      local validate_method_name = def.payload_validate_method
+      if type(validate_method_name) == "string" and not PROMPT_PAYLOAD_SCHEMA_CUSTOM_VALIDATE_KINDS[kind] then
+        if type(game_state_class[validate_method_name]) ~= "function" then
+          local schema_ref = schema
+          game_state_class[validate_method_name] = function(state_self, prompt_payload)
+            return validate_prompt_payload_by_schema(prompt_payload, schema_ref, state_self)
+          end
+        end
+      end
+    end
+  end
+end
+
+install_schema_prompt_payload_methods(GameState, PROMPT_DEFS, PROMPT_PAYLOAD_FIELD_SCHEMAS)
+
+function GameState:_post_normalize_prompt_damage_x_payload(payload)
+  clamp_min_max_fields(payload, "x_amount", "max_x")
+  return payload
+end
+
+function GameState:_post_validate_prompt_upgrade_payload(payload)
+  if payload.stage ~= "sacrifice" and payload.stage ~= "hand" then
+    return prompt_validate_error("stage must be 'sacrifice' or 'hand'")
+  end
+  if payload.sacrifice_target ~= nil and type(payload.sacrifice_target) ~= "table" then
+    return prompt_validate_error("sacrifice_target must be a table when present")
+  end
+  return true
+end
+
+function GameState:_post_validate_prompt_hand_sacrifice_payload(payload)
+  if type(payload.selected_targets) ~= "table" then
+    return prompt_validate_error("selected_targets must be a table")
+  end
+  for i, target in ipairs(payload.selected_targets) do
+    if type(target) ~= "table" then
+      return prompt_validate_error("selected_targets[" .. tostring(i) .. "] must be a table")
+    end
+    if target.kind ~= "worker_left" and target.kind ~= "worker_right" then
+      return prompt_validate_error("selected_targets[" .. tostring(i) .. "].kind must be worker_left/worker_right")
+    end
+    if not is_positive_index(target.extra) then
+      return prompt_validate_error("selected_targets[" .. tostring(i) .. "].extra must be a positive integer index")
+    end
+  end
+  return true
+end
+
+function GameState:_post_validate_prompt_damage_target_payload(payload)
+  local has_single = payload.eligible_player_index ~= nil and type(payload.eligible_board_indices) == "table"
+  local has_global = payload.eligible_board_indices_by_player ~= nil or payload.eligible_base_player_indices ~= nil
+  if not has_single and not has_global then
+    return prompt_validate_error("payload must define either single-target or global target eligibility fields")
+  end
+  return true
+end
+
+function GameState:_post_validate_prompt_damage_x_payload(payload)
+  local ok, err = self:_post_validate_prompt_damage_target_payload(payload)
+  if not ok then return ok, err end
+  if payload.x_amount > payload.max_x then
+    return prompt_validate_error("x_amount cannot exceed max_x")
+  end
+  return true
+end
+
+function GameState:_sync_prompt_aliases()
+  for kind, field in pairs(PROMPT_ALIAS_FIELDS) do
+    self[field] = self:_prompt_payload(kind)
+  end
+end
+
+function GameState:_set_prompt(kind, payload)
+  if type(kind) ~= "string" or kind == "" then return nil end
+  local normalizer_name = PROMPT_PAYLOAD_NORMALIZE_METHODS[kind]
+  if type(normalizer_name) == "string" then
+    local normalizer = self[normalizer_name]
+    if type(normalizer) == "function" then
+      local normalized_payload, norm_err = normalizer(self, payload)
+      if normalized_payload ~= nil then
+        payload = normalized_payload
+      elseif norm_err ~= nil then
+        error("failed to normalize prompt payload for '" .. kind .. "': " .. tostring(norm_err))
+      end
+    end
+  end
+  local validator_name = PROMPT_PAYLOAD_VALIDATE_METHODS[kind]
+  if type(validator_name) == "string" then
+    local validator = self[validator_name]
+    if type(validator) == "function" then
+      local ok, err = validator(self, payload)
+      if not ok then
+        error("invalid prompt payload for '" .. kind .. "': " .. tostring(err or "validation failed"))
+      end
+    end
+  end
+  self:_prompt_stack_ensure()
+  for i = #self.prompt_stack, 1, -1 do
+    local item = self.prompt_stack[i]
+    if type(item) == "table" and item.kind == kind then
+      table.remove(self.prompt_stack, i)
+    end
+  end
+  self.prompt_stack[#self.prompt_stack + 1] = {
+    kind = kind,
+    payload = payload,
+  }
+  self:_sync_prompt_aliases()
+  return payload
+end
+
+function GameState:_clear_prompt(kind)
+  if type(kind) ~= "string" or kind == "" then return end
+  self:_prompt_stack_ensure()
+  local changed = false
+  for i = #self.prompt_stack, 1, -1 do
+    local item = self.prompt_stack[i]
+    if type(item) == "table" and item.kind == kind then
+      table.remove(self.prompt_stack, i)
+      changed = true
+    end
+  end
+  if changed then
+    self:_sync_prompt_aliases()
+  end
+end
+
+function GameState:_clear_prompt_stack()
+  self.prompt_stack = {}
+  self:_sync_prompt_aliases()
+end
+
+function GameState:_cancel_prompt(kind, reason)
+  if type(kind) ~= "string" or kind == "" then return false end
+  local payload = self:_prompt_payload(kind)
+  if payload == nil then return false end
+  local behavior = PROMPT_CANCEL_BEHAVIOR[kind]
+  self:_clear_prompt(kind)
+  if behavior and type(behavior.on_cancel) == "function" then
+    behavior.on_cancel(self, payload, reason)
+  end
+  return true
+end
+
+function GameState:_cancel_top_prompt_for_context(context)
+  if type(context) ~= "string" or context == "" then return nil end
+  self:_prompt_stack_ensure()
+  for i = #self.prompt_stack, 1, -1 do
+    local item = self.prompt_stack[i]
+    local kind = type(item) == "table" and item.kind or nil
+    if type(kind) == "string" then
+      local behavior = PROMPT_CANCEL_BEHAVIOR[kind]
+      if behavior and behavior[context] == true then
+        if self:_cancel_prompt(kind, context) then
+          return kind
+        end
+      end
+    end
+  end
+  return nil
+end
+
+function GameState:_draw_prompt_overlays()
+  for _, kind in ipairs(PROMPT_OVERLAY_DRAW_ORDER) do
+    if self:_prompt_payload(kind) ~= nil then
+      local method_name = PROMPT_OVERLAY_DRAW_METHODS[kind]
+      local method = method_name and self[method_name] or nil
+      if type(method) == "function" then
+        method(self)
+      end
+    end
+  end
+end
+
+function GameState:_build_prompt_board_draw_fields()
+  local upgrade = self:_prompt_payload("upgrade")
+  local pending_upgrade_sacrifice = (upgrade and upgrade.stage == "sacrifice") and upgrade or nil
+
+  local sacrifice = self:_prompt_payload("sacrifice")
+  local hand_sacrifice = self:_prompt_payload("hand_sacrifice")
+
+  local sacrifice_allow_workers = nil
+  if sacrifice or hand_sacrifice then
+    sacrifice_allow_workers = true
+  elseif pending_upgrade_sacrifice then
+    sacrifice_allow_workers = pending_upgrade_sacrifice.eligible_worker_sacrifice == true
+  end
+
+  local fields = {
+    sacrifice_allow_workers = sacrifice_allow_workers,
+  }
+  for field_name, field_specs in pairs(PROMPT_BOARD_DRAW_FIELD_SPECS) do
+    fields[field_name] = resolve_prompt_board_draw_field(self, field_specs)
+  end
+  return fields
+end
+
 local function should_trigger_reconnect(reason)
   if type(reason) ~= "string" then
     return false
@@ -187,11 +1539,13 @@ end
 function GameState:_queue_reconnect(reason)
   if not self.authoritative_adapter then return end
   if self.reconnect_pending then return end
+  local cause = tostring(reason or "unknown")
   self.reconnect_pending = true
   self.reconnect_attempts = 0
   self.reconnect_timer = 0
-  self.multiplayer_error = reason
-  self.multiplayer_status = "Reconnecting: " .. tostring(reason)
+  self.reconnect_reason = cause
+  self.multiplayer_error = cause
+  self.multiplayer_status = "Reconnecting...\nCause: " .. cause
 end
 
 function GameState:_attempt_reconnect()
@@ -204,6 +1558,7 @@ function GameState:_attempt_reconnect()
     self.reconnect_pending = false
     self.reconnect_attempts = 0
     self.reconnect_timer = 0
+    self.reconnect_reason = nil
     self.multiplayer_error = nil
     self.multiplayer_status = "Connected"
     return true
@@ -219,7 +1574,8 @@ function GameState:_attempt_reconnect()
   if reconnected.ok then
     if reconnected.meta and reconnected.meta.pending then
       self.reconnect_timer = 0.25
-      self.multiplayer_status = "Reconnecting..."
+      local cause = tostring(self.reconnect_reason or self.multiplayer_error or "unknown")
+      self.multiplayer_status = "Reconnecting...\nCause: " .. cause
       return false
     end
 
@@ -230,6 +1586,7 @@ function GameState:_attempt_reconnect()
     self.reconnect_pending = false
     self.reconnect_attempts = 0
     self.reconnect_timer = 0
+    self.reconnect_reason = nil
     self.multiplayer_error = nil
     self.multiplayer_status = "Connected"
     return true
@@ -238,8 +1595,12 @@ function GameState:_attempt_reconnect()
   self.reconnect_attempts = self.reconnect_attempts + 1
   local wait = math.min(6, 0.5 * (2 ^ math.min(self.reconnect_attempts, 4)))
   self.reconnect_timer = wait
-  self.multiplayer_error = reconnected.reason
-  self.multiplayer_status = "Reconnect failed (retrying): " .. tostring(reconnected.reason)
+  self.multiplayer_error = tostring(reconnected.reason or "unknown")
+  local cause = tostring(self.reconnect_reason or self.multiplayer_error or "unknown")
+  self.multiplayer_status = "Reconnect failed (retrying): " .. self.multiplayer_error
+  if cause ~= self.multiplayer_error then
+    self.multiplayer_status = self.multiplayer_status .. "\nCause: " .. cause
+  end
   return false
 end
 
@@ -257,6 +1618,8 @@ function GameState:_handle_disconnect(message)
   end
   self.authoritative_adapter = nil
   self.reconnect_pending = false
+  self.reconnect_reason = nil
+  self:_clear_prompt_stack()
   -- Show popup and return to menu after a moment
   self._disconnect_message = message
   self._disconnect_timer = 3.0
@@ -379,18 +1742,19 @@ function GameState:_sync_terminal_state()
   -- Clear mutable UI state when match ends.
   self.drag = nil
   self.hand_selected_index = nil
-  self.pending_play_unit = nil
-  self.pending_sacrifice = nil
-  self.pending_upgrade = nil
-  self.pending_hand_sacrifice = nil
-  self.pending_monument = nil
-  self.pending_graveyard_return = nil
-  self.pending_counter_placement = nil
-  self.pending_damage_target = nil
-  self.pending_damage_x = nil
-  self.pending_spell_target = nil
-  self.pending_play_spell = nil
-  self.pending_discard_draw = nil
+  self:_clear_prompt("play_unit")
+  self:_clear_prompt("sacrifice")
+  self:_clear_prompt("upgrade")
+  self:_clear_prompt("hand_sacrifice")
+  self:_clear_prompt("monument")
+  self:_clear_prompt("graveyard_return")
+  self:_clear_prompt("counter_placement")
+  self:_clear_prompt("damage_target")
+  self:_clear_prompt("damage_x")
+  self:_clear_prompt("spell_target")
+  self:_clear_prompt("play_spell")
+  self:_clear_prompt("discard_draw")
+  self:_clear_prompt_stack()
   self:_clear_pending_attack_declarations()
   self.pending_attack_trigger_targets = {}
   self.pending_block_assignments = {}
@@ -416,10 +1780,11 @@ function GameState:dispatch_command(command)
         self:_queue_reconnect(submit_reason)
         return { ok = false, reason = submit_reason, meta = {} }
       end
-      self:_handle_disconnect("Connection lost")
+      self:_handle_disconnect("Connection lost: " .. submit_reason)
       return { ok = false, reason = "disconnected" }
     end
     result = submit_result
+    local submit_meta = type(submit_result) == "table" and submit_result.meta or nil
 
     if not result.ok and result.reason == "resynced_retry_required" then
       result = self.authoritative_adapter:submit(command)
@@ -429,7 +1794,33 @@ function GameState:dispatch_command(command)
       if self.authoritative_adapter.poll then
         -- Threaded adapter (joiner): apply command locally for instant feedback.
         -- The authoritative state arrives via state_push shortly after.
-        result = commands.execute(self.game_state, command)
+        local ok_local, local_result = pcall(function()
+          return commands.execute(self.game_state, command)
+        end)
+        if ok_local then
+          local local_submit_id = submit_meta and submit_meta.local_submit_id
+          if type(local_submit_id) == "number"
+            and self.authoritative_adapter.record_local_prediction
+            and type(self.game_state) == "table"
+          then
+            local ok_hash, local_hash = pcall(game_checksum.game_state, self.game_state)
+            if ok_hash and type(local_hash) == "string" then
+              pcall(function()
+                self.authoritative_adapter:record_local_prediction(local_submit_id, local_hash, {
+                  command_type = command and command.type,
+                })
+              end)
+            else
+              print("[game] local prediction hash failed: " .. tostring(local_hash))
+            end
+          end
+          result = local_result
+        else
+          -- Don't crash the client on optimistic-sim errors; keep the
+          -- authoritative submit result and wait for the incoming state_push.
+          print("[game] optimistic local apply failed for " .. tostring(command.type) .. ": " .. tostring(local_result))
+          self.multiplayer_status = "Connected (syncing after local sim error)"
+        end
       else
         -- In-process adapter (host): state is already updated server-side.
         local remote_state = self.authoritative_adapter:get_state()
@@ -456,7 +1847,10 @@ function GameState:dispatch_command(command)
   end
 
   self:_sync_terminal_state()
-  replay.append(self.command_log, command, result, self.game_state)
+  replay.append(self.command_log, command, result, self.game_state, {
+    post_state_hash_scope = self.authoritative_adapter and "client_visible" or "local_full",
+    post_state_viewer_player_index = self.local_player_index,
+  })
   if not result.ok then
     sound.play("error")
   end
@@ -603,7 +1997,7 @@ function GameState:update(dt)
       if should_trigger_reconnect(poll_reason) then
         self:_queue_reconnect(poll_reason)
       else
-        self:_handle_disconnect("Connection lost")
+        self:_handle_disconnect("Connection lost: " .. poll_reason)
       end
     elseif self.authoritative_adapter._disconnected then
       local disconnect_reason = tostring(self.authoritative_adapter._disconnect_reason or "transport_receive_failed")
@@ -612,9 +2006,36 @@ function GameState:update(dt)
       if should_trigger_reconnect(disconnect_reason) then
         self:_queue_reconnect(disconnect_reason)
       else
-        self:_handle_disconnect("Opponent disconnected")
+        self:_handle_disconnect("Opponent disconnected: " .. disconnect_reason)
       end
     else
+      if self.authoritative_adapter.pop_desync_reports then
+        local ok_reports, reports = pcall(function() return self.authoritative_adapter:pop_desync_reports() end)
+        if ok_reports and type(reports) == "table" then
+          for _, report in ipairs(reports) do
+            if type(report) == "table" then
+              self._last_desync_report = report
+              local detail = tostring(report.kind or "hash_mismatch")
+              if report.command_type then
+                detail = detail .. " (" .. tostring(report.command_type) .. ")"
+              end
+              if report.state_seq then
+                detail = detail .. " seq=" .. tostring(report.state_seq)
+              end
+              print("[game] desync detected: " .. detail
+                .. " local=" .. tostring(report.local_hash)
+                .. " host=" .. tostring(report.authoritative_hash))
+              if not self.reconnect_pending then
+                self.multiplayer_status = "Desync detected (resyncing)..."
+                self:_queue_reconnect("desync_hash_mismatch: " .. detail)
+              end
+              break
+            end
+          end
+        elseif not ok_reports then
+          print("[game] pop_desync_reports error: " .. tostring(reports))
+        end
+      end
       if self.authoritative_adapter.state_changed then
         self.authoritative_adapter.state_changed = false
         local remote_state = self.authoritative_adapter:get_state()
@@ -635,7 +2056,7 @@ function GameState:update(dt)
         if should_trigger_reconnect(sync_reason) then
           self:_queue_reconnect(sync_reason)
         else
-          self:_handle_disconnect("Connection lost")
+          self:_handle_disconnect("Connection lost: " .. sync_reason)
         end
       elseif snap.ok then
         local remote_state = self.authoritative_adapter:get_state()
@@ -702,6 +2123,19 @@ local function can_attack_multiple_times(card_def)
   return false
 end
 
+local function find_targeted_spell_on_cast_ability(spell_def)
+  return abilities.find_targeted_spell_on_cast_ability(spell_def)
+end
+
+local function collect_targeted_spell_eligible_indices(game_state, caster_pi, targeted_ab)
+  local spell_def = { abilities = { targeted_ab } }
+  local info = abilities.collect_spell_target_candidates(game_state, caster_pi, spell_def)
+  if not info then
+    return 1 - caster_pi, {}
+  end
+  return info.target_player_index, info.eligible_board_indices
+end
+
 function GameState:_set_pending_attack(attacker_board_index, target)
   local local_player = self.game_state.players[self.local_player_index + 1]
   local attacker_entry = local_player and local_player.board and local_player.board[attacker_board_index]
@@ -710,7 +2144,7 @@ function GameState:_set_pending_attack(attacker_board_index, target)
   local ok_def, attacker_def = pcall(cards.get_card_def, attacker_entry.card_id)
   if not ok_def or not attacker_def then return end
   if attacker_def.kind ~= "Unit" and attacker_def.kind ~= "Worker" then return end
-  if unit_stats.effective_attack(attacker_def, attacker_entry.state) <= 0 then return end
+  if unit_stats.effective_attack(attacker_def, attacker_entry.state, self.game_state, self.local_player_index) <= 0 then return end
 
   local ast = attacker_entry.state or {}
   if ast.rested then return end
@@ -874,7 +2308,7 @@ function GameState:_prune_invalid_pending_attacks()
       local ok_def, def = pcall(cards.get_card_def, entry.card_id)
       local st = entry.state or {}
       local already_attacked = (st.attacked_turn == self.game_state.turnNumber) and (not can_attack_multiple_times(def))
-      if ok_def and def and (def.kind == "Unit" or def.kind == "Worker") and unit_stats.effective_attack(def, st) > 0 and not st.rested and not already_attacked then
+      if ok_def and def and (def.kind == "Unit" or def.kind == "Worker") and unit_stats.effective_attack(def, st, self.game_state, self.local_player_index) > 0 and not st.rested and not already_attacked then
         kept[#kept + 1] = decl
       end
     end
@@ -1245,7 +2679,7 @@ function GameState:_draw_combat_priority_overlay()
 end
 
 function GameState:_draw_pending_hand_sacrifice_overlay()
-  local pending = self.pending_hand_sacrifice
+  local pending = self:_prompt_payload("hand_sacrifice") or self.pending_hand_sacrifice
   if not pending then
     return
   end
@@ -1275,7 +2709,7 @@ function GameState:_draw_pending_hand_sacrifice_overlay()
 end
 
 function GameState:_draw_pending_monument_overlay()
-  local pending = self.pending_monument
+  local pending = self:_prompt_payload("monument") or self.pending_monument
   if not pending then return end
 
   local local_p = self.game_state and self.game_state.players and self.game_state.players[self.local_player_index + 1]
@@ -1293,7 +2727,7 @@ function GameState:_draw_pending_monument_overlay()
 end
 
 function GameState:_draw_pending_damage_x_overlay()
-  local pending = self.pending_damage_x
+  local pending = self:_prompt_payload("damage_x") or self.pending_damage_x
   if not pending then return end
 
   local gw = love.graphics.getWidth()
@@ -1335,7 +2769,7 @@ function GameState:_draw_pending_damage_x_overlay()
 end
 
 function GameState:_draw_pending_discard_draw_overlay()
-  local pending = self.pending_discard_draw
+  local pending = self:_prompt_payload("discard_draw") or self.pending_discard_draw
   if not pending then return end
   local selected_count = 0
   for _ in pairs(pending.selected_set) do selected_count = selected_count + 1 end
@@ -1350,7 +2784,7 @@ function GameState:_draw_pending_discard_draw_overlay()
 end
 
 function GameState:_draw_pending_spell_target_prompt()
-  local pending = self.pending_spell_target
+  local pending = self:_prompt_payload("spell_target") or self.pending_spell_target
   if not pending then return end
   local p = self.game_state and self.game_state.players[self.local_player_index + 1]
   local spell_name = "Spell"
@@ -1364,48 +2798,417 @@ function GameState:_draw_pending_spell_target_prompt()
   self:_draw_top_combat_prompt(spell_name .. ": select a target", { 0.7, 0.4, 0.9, 0.85 }, { 0.9, 0.8, 1.0, 1.0 })
 end
 
+function GameState:_has_in_game_settings_blocker()
+  if deck_viewer.is_open() then return true end
+  if self.show_blueprint_for_player ~= nil then return true end
+  if self.hand_selected_index ~= nil then return true end
+  if self.drag ~= nil then return true end
+  if type(self.prompt_stack) == "table" and #self.prompt_stack > 0 then return true end
+  if #self.pending_attack_declarations > 0 then return true end
+  if #self.pending_attack_trigger_targets > 0 then return true end
+  if #self.pending_block_assignments > 0 then return true end
+  if next(self.pending_damage_orders or {}) ~= nil then return true end
+  return false
+end
+
+function GameState:_in_game_settings_layout()
+  local gw, gh = love.graphics.getDimensions()
+  local panel_w = math.max(280, math.min(460, gw - 32))
+  local title_font = util.get_title_font(20)
+  local body_font = util.get_font(12)
+  local status_font = util.get_font(11)
+  local value_font = util.get_font(12)
+  local save_dir = (love.filesystem.getSaveDirectory and love.filesystem.getSaveDirectory()) or ""
+  local default_status = "Replay exports are saved to " .. save_dir .. "/replays/"
+  local status_text = tostring(self.in_game_settings_status or default_status)
+  local status_wrap_w = math.max(80, panel_w - 28)
+  local _, status_lines = status_font:getWrap(status_text, status_wrap_w)
+  if #status_lines == 0 then status_lines = { status_text } end
+
+  local volume_pct = util.clamp(tonumber(settings_store.values.sfx_volume) or 1.0, 0, 1)
+  local fullscreen_on = settings_store.values.fullscreen == true
+
+  local content_x = 14
+  local content_w = panel_w - 28
+  local label_w = 104
+  local row_h = 34
+  local control_y = 52
+  local volume_row_y = control_y
+  local slider_h = 8
+  local slider_knob_r = 10
+  local pct_w = 44
+  local slider_x = content_x + label_w + 8
+  local slider_w = math.max(80, content_w - label_w - 8 - pct_w)
+  local slider_y = volume_row_y + math.floor((row_h - slider_h) / 2) + 1
+  local slider_hit = {
+    x = slider_x - slider_knob_r,
+    y = slider_y - slider_knob_r,
+    w = slider_w + slider_knob_r * 2,
+    h = slider_h + slider_knob_r * 2,
+  }
+
+  local fullscreen_row_y = volume_row_y + row_h + 10
+  local toggle_w, toggle_h = 84, 30
+  local toggle_x = content_x + label_w + 8
+  local toggle_y = fullscreen_row_y + math.floor((row_h - toggle_h) / 2)
+
+  local button_h = 34
+  local button_gap = 10
+  local button_count = self.return_to_menu and 3 or 2
+  local buttons_top = fullscreen_row_y + row_h + 14
+  local panel_h = buttons_top + button_count * button_h + (button_count - 1) * button_gap + 20
+    + 1 + 8 + (#status_lines * (status_font:getHeight() + 1)) + 14
+  local panel_x = math.floor((gw - panel_w) / 2)
+  local panel_y = math.floor((gh - panel_h) / 2)
+  local button_x = panel_x + 14
+  local button_w = panel_w - 28
+  local button_y = panel_y + buttons_top
+
+  local buttons = {
+    export_replay = { x = button_x, y = button_y, w = button_w, h = button_h, label = "Export Replay JSON" },
+  }
+  button_y = button_y + button_h + button_gap
+
+  if self.return_to_menu then
+    buttons.return_to_menu = { x = button_x, y = button_y, w = button_w, h = button_h, label = "Return to Menu" }
+    button_y = button_y + button_h + button_gap
+  end
+
+  buttons.close = { x = button_x, y = button_y, w = button_w, h = button_h, label = "Close" }
+  button_y = button_y + button_h
+
+  local status_y = button_y + 14
+  return {
+    panel = { x = panel_x, y = panel_y, w = panel_w, h = panel_h },
+    title_font = title_font,
+    body_font = body_font,
+    status_font = status_font,
+    value_font = value_font,
+    controls = {
+      volume = {
+        label = "SFX Volume",
+        row = { x = panel_x + content_x, y = panel_y + volume_row_y, w = content_w, h = row_h },
+        slider = { x = panel_x + slider_x, y = panel_y + slider_y, w = slider_w, h = slider_h },
+        slider_hit = { x = panel_x + slider_hit.x, y = panel_y + slider_hit.y, w = slider_hit.w, h = slider_hit.h },
+        knob_r = slider_knob_r,
+        pct = volume_pct,
+        pct_text = tostring(math.floor(volume_pct * 100 + 0.5)) .. "%",
+        pct_x = panel_x + slider_x + slider_w + 10,
+      },
+      fullscreen = {
+        label = "Fullscreen",
+        row = { x = panel_x + content_x, y = panel_y + fullscreen_row_y, w = content_w, h = row_h },
+        toggle = { x = panel_x + toggle_x, y = panel_y + toggle_y, w = toggle_w, h = toggle_h },
+        value = fullscreen_on,
+      },
+    },
+    buttons = buttons,
+    status = {
+      x = panel_x + 14,
+      y = status_y + 9,
+      w = panel_w - 28,
+      text = status_text,
+      lines = status_lines,
+    },
+  }
+end
+
+function GameState:_set_in_game_settings_status(text, kind)
+  self.in_game_settings_status = tostring(text or "")
+  self.in_game_settings_status_kind = kind or "info"
+end
+
+function GameState:_save_in_game_settings_if_dirty()
+  if not self.in_game_settings_settings_dirty then return true end
+  local ok_save, save_err = pcall(function() settings_store.save() end)
+  if not ok_save then
+    self:_set_in_game_settings_status("Settings save failed: " .. tostring(save_err), "error")
+    return false
+  end
+  self.in_game_settings_settings_dirty = false
+  return true
+end
+
+function GameState:_close_in_game_settings()
+  self:_save_in_game_settings_if_dirty()
+  self.in_game_settings_open = false
+  self.in_game_settings_dragging_slider = false
+end
+
+function GameState:_open_in_game_settings()
+  self.in_game_settings_open = true
+  self.in_game_settings_dragging_slider = false
+  self.in_game_settings_settings_dirty = false
+  self.in_game_settings_status = nil
+  self.in_game_settings_status_kind = "info"
+end
+
+function GameState:_set_in_game_settings_volume(pct)
+  pct = util.clamp(tonumber(pct) or 0, 0, 1)
+  settings_store.values.sfx_volume = pct
+  sound.set_master_volume(pct)
+  self.in_game_settings_settings_dirty = true
+end
+
+function GameState:_set_in_game_settings_volume_from_mouse_x(x, layout)
+  local slider = layout and layout.controls and layout.controls.volume and layout.controls.volume.slider
+  if not slider then return end
+  local pct = (x - slider.x) / math.max(1, slider.w)
+  self:_set_in_game_settings_volume(pct)
+end
+
+function GameState:_toggle_in_game_settings_fullscreen()
+  local next_value = not (settings_store.values.fullscreen == true)
+  local ok_fs, fs_err = pcall(function() love.window.setFullscreen(next_value) end)
+  if not ok_fs then
+    self:_set_in_game_settings_status("Fullscreen toggle failed: " .. tostring(fs_err), "error")
+    return false
+  end
+  settings_store.values.fullscreen = next_value
+  self.in_game_settings_settings_dirty = true
+  self:_save_in_game_settings_if_dirty()
+  return true
+end
+
+function GameState:_export_replay_json()
+  local snapshot = self:get_command_log_snapshot()
+  if type(snapshot) ~= "table" then
+    self:_set_in_game_settings_status("Export failed: replay snapshot unavailable", "error")
+    return false
+  end
+
+  local stamp = os.date("!%Y%m%d_%H%M%S")
+  local source_tag = self.authoritative_adapter and "client" or "local"
+  local filename = string.format("replays/replay_%s_p%d_%s.json", source_tag, tonumber(self.local_player_index) or 0, stamp)
+
+  local ok_dir, dir_err = pcall(function() return love.filesystem.createDirectory("replays") end)
+  if not ok_dir then
+    self:_set_in_game_settings_status("Export failed: " .. tostring(dir_err), "error")
+    return false
+  end
+
+  local ok_enc, encoded = pcall(json.encode, snapshot)
+  if not ok_enc or type(encoded) ~= "string" then
+    self:_set_in_game_settings_status("Export failed: could not encode replay JSON", "error")
+    return false
+  end
+
+  local ok_write, write_ok_or_err = pcall(function()
+    return love.filesystem.write(filename, encoded)
+  end)
+  if (not ok_write) or not write_ok_or_err then
+    self:_set_in_game_settings_status("Export failed: " .. tostring(write_ok_or_err), "error")
+    return false
+  end
+
+  local save_dir = (love.filesystem.getSaveDirectory and love.filesystem.getSaveDirectory()) or ""
+  local full_path = (save_dir ~= "" and (save_dir .. "/" .. filename)) or filename
+  self:_set_in_game_settings_status("Replay exported: " .. full_path, "ok")
+  return true
+end
+
+function GameState:_draw_in_game_settings_overlay()
+  if not self.in_game_settings_open then return end
+
+  local layout = self:_in_game_settings_layout()
+  local panel = layout.panel
+  local mx, my = love.mouse.getPosition()
+
+  love.graphics.setColor(0, 0, 0, 0.55)
+  love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+
+  love.graphics.setColor(0.08, 0.09, 0.12, 0.97)
+  love.graphics.rectangle("fill", panel.x, panel.y, panel.w, panel.h, 10, 10)
+  love.graphics.setColor(0.34, 0.38, 0.5, 0.8)
+  love.graphics.rectangle("line", panel.x, panel.y, panel.w, panel.h, 10, 10)
+  love.graphics.setColor(0.25, 0.75, 0.95, 0.65)
+  love.graphics.rectangle("fill", panel.x + 1, panel.y + 1, panel.w - 2, 3, 10, 10)
+
+  love.graphics.setFont(layout.title_font)
+  love.graphics.setColor(0.95, 0.97, 1.0, 1)
+  love.graphics.print("Settings", panel.x + 14, panel.y + 12)
+
+  love.graphics.setFont(layout.body_font)
+  love.graphics.setColor(0.7, 0.74, 0.84, 0.95)
+  love.graphics.print("Press Esc to close", panel.x + panel.w - 130, panel.y + 18)
+
+  local controls = layout.controls
+  if controls then
+    local v = controls.volume
+    local f = controls.fullscreen
+    love.graphics.setFont(layout.body_font)
+    love.graphics.setColor(0.85, 0.88, 0.96, 1)
+    love.graphics.print(v.label, v.row.x, v.row.y + 8)
+    love.graphics.print(f.label, f.row.x, f.row.y + 8)
+
+    -- Volume slider
+    love.graphics.setColor(0.18, 0.2, 0.28, 1)
+    love.graphics.rectangle("fill", v.slider.x, v.slider.y, v.slider.w, v.slider.h, 4, 4)
+    local fill_w = math.floor(v.slider.w * v.pct + 0.5)
+    love.graphics.setColor(0.25, 0.75, 0.95, 0.85)
+    love.graphics.rectangle("fill", v.slider.x, v.slider.y, fill_w, v.slider.h, 4, 4)
+    local knob_x = v.slider.x + fill_w
+    local knob_y = v.slider.y + v.slider.h / 2
+    love.graphics.setColor(0.25, 0.75, 0.95, 1)
+    love.graphics.circle("fill", knob_x, knob_y, v.knob_r)
+    love.graphics.setColor(1, 1, 1, 0.28)
+    love.graphics.circle("line", knob_x, knob_y, v.knob_r)
+    love.graphics.setFont(layout.value_font)
+    love.graphics.setColor(0.73, 0.77, 0.87, 1)
+    love.graphics.print(v.pct_text, v.pct_x, v.row.y + 8)
+
+    -- Fullscreen toggle
+    if f.value then
+      love.graphics.setColor(0.15, 0.55, 0.25, 1)
+    else
+      love.graphics.setColor(0.25, 0.25, 0.32, 1)
+    end
+    love.graphics.rectangle("fill", f.toggle.x, f.toggle.y, f.toggle.w, f.toggle.h, 6, 6)
+    love.graphics.setColor(1, 1, 1, 0.22)
+    love.graphics.rectangle("line", f.toggle.x, f.toggle.y, f.toggle.w, f.toggle.h, 6, 6)
+    love.graphics.setFont(layout.value_font)
+    love.graphics.setColor(0.95, 0.96, 1.0, 1)
+    love.graphics.printf(f.value and "On" or "Off", f.toggle.x, f.toggle.y + 8, f.toggle.w, "center")
+  end
+
+  local function draw_button(r, accent)
+    local hovered = util.point_in_rect(mx, my, r.x, r.y, r.w, r.h)
+    local fill = hovered and { accent[1], accent[2], accent[3], 0.24 } or { 0.16, 0.18, 0.24, 0.95 }
+    local line = hovered and { accent[1], accent[2], accent[3], 0.95 } or { 0.35, 0.4, 0.52, 0.75 }
+    love.graphics.setColor(fill[1], fill[2], fill[3], fill[4])
+    love.graphics.rectangle("fill", r.x, r.y, r.w, r.h, 7, 7)
+    love.graphics.setColor(line[1], line[2], line[3], line[4])
+    love.graphics.rectangle("line", r.x, r.y, r.w, r.h, 7, 7)
+    love.graphics.setFont(util.get_font(12))
+    love.graphics.setColor(0.93, 0.95, 1.0, 1)
+    love.graphics.printf(r.label, r.x, r.y + 9, r.w, "center")
+  end
+
+  draw_button(layout.buttons.export_replay, { 0.25, 0.75, 0.95 })
+  if layout.buttons.return_to_menu then
+    draw_button(layout.buttons.return_to_menu, { 0.95, 0.55, 0.28 })
+  end
+  draw_button(layout.buttons.close, { 0.62, 0.66, 0.78 })
+
+  love.graphics.setColor(1, 1, 1, 0.08)
+  love.graphics.rectangle("fill", panel.x + 14, layout.status.y - 8, panel.w - 28, 1)
+
+  local status_color = { 0.74, 0.78, 0.86, 0.95 }
+  if self.in_game_settings_status_kind == "ok" then
+    status_color = { 0.58, 0.95, 0.68, 0.98 }
+  elseif self.in_game_settings_status_kind == "error" then
+    status_color = { 1.0, 0.5, 0.5, 0.98 }
+  end
+  love.graphics.setFont(layout.status_font)
+  love.graphics.setColor(status_color[1], status_color[2], status_color[3], status_color[4])
+  love.graphics.printf(layout.status.text, layout.status.x, layout.status.y, layout.status.w, "left")
+end
+
+function GameState:_handle_in_game_settings_click(x, y)
+  if not self.in_game_settings_open then return false end
+  local layout = self:_in_game_settings_layout()
+  local panel = layout.panel
+
+  if not util.point_in_rect(x, y, panel.x, panel.y, panel.w, panel.h) then
+    self:_close_in_game_settings()
+    sound.play("click")
+    return true
+  end
+
+  local controls = layout.controls
+  if controls then
+    if util.point_in_rect(
+        x, y,
+        controls.volume.slider_hit.x, controls.volume.slider_hit.y,
+        controls.volume.slider_hit.w, controls.volume.slider_hit.h
+      ) then
+      self.in_game_settings_dragging_slider = true
+      self:_set_in_game_settings_volume_from_mouse_x(x, layout)
+      sound.play("click", 0.5)
+      return true
+    end
+    if util.point_in_rect(
+        x, y,
+        controls.fullscreen.toggle.x, controls.fullscreen.toggle.y,
+        controls.fullscreen.toggle.w, controls.fullscreen.toggle.h
+      ) then
+      if self:_toggle_in_game_settings_fullscreen() then
+        sound.play("click")
+      else
+        sound.play("error")
+      end
+      return true
+    end
+  end
+
+  if util.point_in_rect(x, y, layout.buttons.export_replay.x, layout.buttons.export_replay.y, layout.buttons.export_replay.w, layout.buttons.export_replay.h) then
+    if self:_export_replay_json() then
+      sound.play("coin")
+    else
+      sound.play("error")
+    end
+    return true
+  end
+
+  if layout.buttons.return_to_menu and util.point_in_rect(
+      x, y,
+      layout.buttons.return_to_menu.x, layout.buttons.return_to_menu.y,
+      layout.buttons.return_to_menu.w, layout.buttons.return_to_menu.h
+    ) then
+    self:_close_in_game_settings()
+    if self.server_cleanup then
+      pcall(self.server_cleanup)
+      self.server_step = nil
+      self.server_cleanup = nil
+    end
+    if self.return_to_menu then
+      sound.play("click")
+      self.return_to_menu()
+    else
+      sound.play("error")
+    end
+    return true
+  end
+
+  if util.point_in_rect(x, y, layout.buttons.close.x, layout.buttons.close.y, layout.buttons.close.w, layout.buttons.close.h) then
+    self:_close_in_game_settings()
+    sound.play("click")
+    return true
+  end
+
+  return true -- click inside modal, swallow it
+end
+
 function GameState:draw()
   shake.apply()
 
   self:_prune_invalid_pending_attacks()
-
-  local pending_upgrade_sacrifice = (self.pending_upgrade and self.pending_upgrade.stage == "sacrifice") and self.pending_upgrade or nil
-  local pending_upgrade_hand = (self.pending_upgrade and self.pending_upgrade.stage == "hand") and self.pending_upgrade or nil
-  local sacrifice_allow_workers = nil
-  if self.pending_sacrifice or self.pending_hand_sacrifice then
-    sacrifice_allow_workers = true
-  elseif pending_upgrade_sacrifice then
-    sacrifice_allow_workers = pending_upgrade_sacrifice.eligible_worker_sacrifice == true
-  end
+  local prompt_board_draw = self:_build_prompt_board_draw_fields()
 
   -- Build hand_state for board.draw
   local hand_state = {
     hover_index = self.hand_hover_index,
     selected_index = self.hand_selected_index,
     y_offsets = self.hand_y_offsets,
-    eligible_hand_indices = self.pending_play_unit and self.pending_play_unit.eligible_indices or (pending_upgrade_hand and pending_upgrade_hand.eligible_hand_indices) or (self.pending_play_spell and self.pending_play_spell.eligible_indices) or nil,
-    sacrifice_eligible_indices = (self.pending_sacrifice and self.pending_sacrifice.eligible_board_indices) or (pending_upgrade_sacrifice and pending_upgrade_sacrifice.eligible_board_indices) or (self.pending_hand_sacrifice and {}) or nil,
-    sacrifice_allow_workers = sacrifice_allow_workers,
-    monument_eligible_indices = self.pending_monument and self.pending_monument.eligible_indices or nil,
-    counter_target_eligible_indices = self.pending_counter_placement and self.pending_counter_placement.eligible_board_indices or nil,
-    damage_target_eligible_player_index = (self.pending_damage_target and self.pending_damage_target.eligible_player_index) or (self.pending_damage_x and self.pending_damage_x.eligible_player_index) or (self.pending_spell_target and self.pending_spell_target.eligible_player_index) or nil,
-    damage_target_eligible_indices = (self.pending_damage_target and self.pending_damage_target.eligible_board_indices) or (self.pending_damage_x and self.pending_damage_x.eligible_board_indices) or (self.pending_spell_target and self.pending_spell_target.eligible_board_indices) or nil,
-    damage_target_board_indices_by_player = self.pending_damage_target and self.pending_damage_target.eligible_board_indices_by_player or nil,
-    damage_target_base_player_indices = self.pending_damage_target and self.pending_damage_target.eligible_base_player_indices or nil,
+    eligible_hand_indices = prompt_board_draw.eligible_hand_indices,
+    sacrifice_eligible_indices = prompt_board_draw.sacrifice_eligible_indices,
+    sacrifice_allow_workers = prompt_board_draw.sacrifice_allow_workers,
+    monument_eligible_indices = prompt_board_draw.monument_eligible_indices,
+    counter_target_eligible_indices = prompt_board_draw.counter_target_eligible_indices,
+    damage_target_eligible_player_index = prompt_board_draw.damage_target_eligible_player_index,
+    damage_target_eligible_indices = prompt_board_draw.damage_target_eligible_indices,
+    damage_target_board_indices_by_player = prompt_board_draw.damage_target_board_indices_by_player,
+    damage_target_base_player_indices = prompt_board_draw.damage_target_base_player_indices,
     pending_attack_declarations = self.pending_attack_declarations,
     pending_block_assignments = self.pending_block_assignments,
     pending_attack_trigger_targets = self.pending_attack_trigger_targets,
-    discard_selected_set = self.pending_discard_draw and self.pending_discard_draw.selected_set or nil,
+    discard_selected_set = prompt_board_draw.discard_selected_set,
   }
   board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
   self:_draw_attack_declaration_arrows()
   self:_draw_attack_trigger_targeting_overlay()
   self:_draw_combat_priority_overlay()
-  self:_draw_pending_hand_sacrifice_overlay()
-  self:_draw_pending_monument_overlay()
-  self:_draw_pending_damage_x_overlay()
-  self:_draw_pending_spell_target_prompt()
-  self:_draw_pending_discard_draw_overlay()
+  self:_draw_prompt_overlays()
 
   -- Ambient particles (drawn on top of panels but below UI overlays)
   local active_player = self.game_state.players[self.game_state.activePlayer + 1]
@@ -1482,8 +3285,8 @@ function GameState:draw()
           local preview_health = def.health or def.baseHealth
           if si ~= 0 and (def.kind == "Unit" or def.kind == "Worker") then
             local est = entry.state or {}
-            preview_attack = unit_stats.effective_attack(def, est)
-            preview_health = unit_stats.effective_health(def, est)
+            preview_attack = unit_stats.effective_attack(def, est, self.game_state, pi)
+            preview_health = unit_stats.effective_health(def, est, self.game_state, pi)
           end
           local mx, my = love.mouse.getPosition()
           local gw, gh = love.graphics.getDimensions()
@@ -1511,18 +3314,32 @@ function GameState:draw()
           if def.abilities then
             for ai, ab in ipairs(def.abilities) do
               if ab.type == "activated" then
-                local key = tostring(pi) .. ":board:" .. si .. ":" .. ai
-                local used = self.game_state.activatedUsedThisTurn and self.game_state.activatedUsedThisTurn[key]
+                local source_key = "board:" .. si .. ":" .. ai
+                local used = abilities.is_activated_ability_used_this_turn(
+                  self.game_state,
+                  pi,
+                  source_key,
+                  { type = "board", index = si },
+                  ai
+                )
                 used_abs[ai] = used or false
                 local board_entry = player.board[si]
                 local _cbt_tt = self.game_state.pendingCombat
                 local _in_blk_tt = _cbt_tt and _cbt_tt.stage == "DECLARED"
                   and (pi == _cbt_tt.attacker or pi == _cbt_tt.defender)
-                can_act_abs[ai] = (not used or not ab.once_per_turn) and abilities.can_pay_cost(player.resources, ab.cost)
+                local can_pay_ab = abilities.can_pay_activated_ability_costs(player.resources, ab, {
+                  source_entry = board_entry,
+                  require_variable_min = true,
+                })
+                local sel_info = abilities.collect_activated_selection_cost_targets(self.game_state, pi, ab)
+                local has_sel_targets = true
+                if sel_info and sel_info.requires_selection then
+                  has_sel_targets = sel_info.has_any_target == true
+                end
+                can_act_abs[ai] = (not used or not ab.once_per_turn) and can_pay_ab
                   and (pi == self.game_state.activePlayer or (ab.fast and _in_blk_tt))
-                  and (not ab.rest or not (board_entry and board_entry.state and board_entry.state.rested))
-                  and (ab.effect ~= "deal_damage_x" or (player.resources[(ab.effect_args and ab.effect_args.resource) or "stone"] or 0) >= 1)
                   and (ab.effect ~= "discard_draw" or #player.hand >= (ab.effect_args and ab.effect_args.discard or 2))
+                  and has_sel_targets
               end
             end
           end
@@ -1938,7 +3755,7 @@ function GameState:draw()
 
     local reason = tostring(self.game_state.reason or "base_destroyed"):gsub("_", " ")
     local subtitle = "Reason: " .. reason
-    local hint = self.return_to_menu and "Press Esc to return to menu" or "Match complete"
+    local hint = self.return_to_menu and "Press Esc for settings (Return to Menu is inside)" or "Match complete"
 
     love.graphics.setColor(0, 0, 0, 0.6)
     love.graphics.rectangle("fill", 0, gh / 2 - 70, gw, 140)
@@ -1958,10 +3775,18 @@ function GameState:draw()
     if self.room_code then
       status_text = status_text .. "  |  Room: " .. self.room_code
     end
-    local text_w = status_font:getWidth(status_text)
     local pad_x, pad_y = 10, 6
-    local box_w = math.min(420, text_w + pad_x * 2)
-    local box_h = status_font:getHeight() + pad_y * 2
+    local max_box_w = math.min(460, love.graphics.getWidth() - 24)
+    if max_box_w < 180 then max_box_w = love.graphics.getWidth() - 24 end
+    local min_box_w = math.min(96, max_box_w)
+    local _, wrapped_lines = status_font:getWrap(status_text, math.max(1, max_box_w - pad_x * 2))
+    local widest_line = 0
+    for _, line in ipairs(wrapped_lines or {}) do
+      widest_line = math.max(widest_line, status_font:getWidth(line))
+    end
+    local box_w = math.min(max_box_w, math.max(min_box_w, widest_line + pad_x * 2))
+    local line_count = math.max(1, #(wrapped_lines or {}))
+    local box_h = status_font:getHeight() * line_count + pad_y * 2
     local box_x = 12
     local box_y = love.graphics.getHeight() - box_h - 12
     love.graphics.setColor(0.08, 0.09, 0.13, 0.7)
@@ -1973,6 +3798,7 @@ function GameState:draw()
 
   -- Vignette: drawn last, on top of everything
   textures.draw_vignette()
+  self:_draw_in_game_settings_overlay()
 end
 
 
@@ -2087,7 +3913,7 @@ local function is_attack_unit_board_entry(game_state, pi, board_index, require_a
     end
     local summoning_sickness = (st.summoned_turn == game_state.turnNumber) and not immediate_attack
     local already_attacked = (st.attacked_turn == game_state.turnNumber) and (not can_attack_multiple_times(def))
-    return unit_stats.effective_attack(def, st) > 0 and not st.rested and not summoning_sickness and not already_attacked
+    return unit_stats.effective_attack(def, st, game_state, pi) > 0 and not st.rested and not summoning_sickness and not already_attacked
   end
   return true
 end
@@ -2113,7 +3939,7 @@ local function can_stage_attack_target(game_state, attacker_pi, attacker_board_i
   if not atk_ok or not atk_def then return false end
   if atk_def.kind ~= "Unit" and atk_def.kind ~= "Worker" then return false end
   local atk_state = atk_entry.state or {}
-  if unit_stats.effective_attack(atk_def, atk_state) <= 0 then return false end
+  if unit_stats.effective_attack(atk_def, atk_state, game_state, attacker_pi) <= 0 then return false end
   if atk_state.rested then return false end
   if atk_state.attacked_turn == game_state.turnNumber and not can_attack_multiple_times(atk_def) then
     return false
@@ -2185,8 +4011,1277 @@ local function get_special_field_index(game_state, pi, board_index)
   return nil
 end
 
+function GameState:_handle_prompt_play_unit_hand_click(idx)
+  local pending = self:_prompt_payload("play_unit")
+  if not pending then return false end
+
+  local is_eligible = false
+  for _, ei in ipairs(pending.eligible_indices or {}) do
+    if ei == idx then is_eligible = true; break end
+  end
+  if is_eligible then
+    local p = self.game_state.players[self.local_player_index + 1]
+    local before_res = {}
+    for k, v in pairs(p.resources) do before_res[k] = v end
+    local result = self:dispatch_command({
+      type = "PLAY_UNIT_FROM_HAND",
+      player_index = self.local_player_index,
+      source = pending.source,
+      ability_index = pending.ability_index,
+      hand_index = idx,
+      fast_ability = pending.fast or false,
+    })
+    if result.ok then
+      sound.play("coin")
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      for _, c in ipairs(pending.cost or {}) do
+        if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+          local rb_x, rb_y = board.resource_bar_rect(pi_panel)
+          popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
+        end
+      end
+      local card_id = result.meta and result.meta.card_id
+      local unit_name = "Unit"
+      if card_id then
+        local ok_d, udef = pcall(cards.get_card_def, card_id)
+        if ok_d and udef then unit_name = udef.name end
+      end
+      popup.create(unit_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.4, 0.9, 1.0 })
+      self.hand_selected_index = nil
+      self:_clear_prompt("play_unit")
+      while #self.hand_y_offsets > #p.hand do
+        table.remove(self.hand_y_offsets)
+      end
+    else
+      sound.play("error")
+    end
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_play_spell_hand_click(idx)
+  local pending = self:_prompt_payload("play_spell")
+  if not pending then return false end
+
+  local is_eligible = false
+  for _, ei in ipairs(pending.eligible_indices or {}) do
+    if ei == idx then is_eligible = true; break end
+  end
+  if is_eligible then
+    local p = self.game_state.players[self.local_player_index + 1]
+    local spell_id = p.hand[idx]
+    local spell_def = nil
+    if spell_id then
+      local ok_s, sd = pcall(cards.get_card_def, spell_id)
+      if ok_s and sd then spell_def = sd end
+    end
+    -- Check if this spell has a targeted on_cast ability
+    local targeted_ab = find_targeted_spell_on_cast_ability(spell_def)
+    if targeted_ab then
+      local args = targeted_ab.effect_args or {}
+      local opponent_pi, eligible = collect_targeted_spell_eligible_indices(self.game_state, self.local_player_index, targeted_ab)
+      if #eligible == 0 then
+        sound.play("error")
+        return true
+      end
+      self:_set_prompt("spell_target", {
+        hand_index = idx,
+        effect_args = args,
+        eligible_player_index = opponent_pi,
+        eligible_board_indices = eligible,
+        via_ability_source = pending.source,
+        via_ability_ability_index = pending.ability_index,
+        sacrifice_target_board_index = pending.sacrifice_target_board_index,
+        fast = pending.fast or false,
+      })
+      self:_clear_prompt("play_spell")
+      sound.play("click")
+    else
+      -- Non-targeted: cast immediately via ability
+      local before_res = {}
+      for k, v in pairs(p.resources) do before_res[k] = v end
+      local result = self:dispatch_command({
+        type = "PLAY_SPELL_VIA_ABILITY",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        hand_index = idx,
+        sacrifice_target_board_index = pending.sacrifice_target_board_index,
+        fast_ability = pending.fast or false,
+      })
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        for _, c in ipairs(pending.cost or {}) do
+          if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+            local rb_x, rb_y = board.resource_bar_rect(pi_panel)
+            popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
+          end
+        end
+        local sname = spell_def and spell_def.name or "Spell"
+        popup.create(sname .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
+        self:_clear_prompt("play_spell")
+        while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+      else
+        sound.play("error")
+      end
+    end
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_discard_draw_hand_click(idx)
+  local pending = self:_prompt_payload("discard_draw")
+  if not pending then return false end
+
+  local selected = pending.selected_set
+  -- Toggle selection
+  if selected[idx] then
+    selected[idx] = nil
+    sound.play("click")
+  else
+    local count = 0
+    for _ in pairs(selected) do count = count + 1 end
+    if count >= pending.required_count then
+      sound.play("error")
+    else
+      selected[idx] = true
+      sound.play("click")
+      -- Auto-dispatch when required count reached
+      count = count + 1
+      if count == pending.required_count then
+        local indices = {}
+        for hi in pairs(selected) do indices[#indices + 1] = hi end
+        local p = self.game_state.players[self.local_player_index + 1]
+        local result = self:dispatch_command({
+          type = "DISCARD_DRAW_HAND",
+          player_index = self.local_player_index,
+          source = pending.source,
+          ability_index = pending.ability_index,
+          hand_indices = indices,
+        })
+        if result.ok then
+          sound.play("coin")
+          local pi_panel = self:player_to_panel(self.local_player_index)
+          local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+          popup.create("Drew " .. pending.draw_count .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.65, 0.3 })
+          self:_clear_prompt("discard_draw")
+          while #self.hand_y_offsets > #p.hand do
+            table.remove(self.hand_y_offsets)
+          end
+        else
+          sound.play("error")
+          self:_clear_prompt("discard_draw")
+        end
+      end
+    end
+  end
+  return true
+end
+
+function GameState:_handle_prompt_hand_card_click(idx)
+  if type(idx) ~= "number" then return false end
+  return self:_dispatch_prompt_click_from_top(PROMPT_HAND_CARD_CLICK_METHODS, idx)
+end
+
+local function is_worker_click_kind(kind)
+  return kind == "worker_unassigned"
+    or kind == "worker_left"
+    or kind == "worker_right"
+    or kind == "structure_worker"
+    or kind == "unassigned_pool"
+end
+
+function GameState:_handle_prompt_hand_sacrifice_worker_click(worker_kind, idx)
+  local pending = self:_prompt_payload("hand_sacrifice")
+  if not pending then return false end
+
+  pending.selected_targets[#pending.selected_targets + 1] = { kind = worker_kind, extra = idx }
+  if #pending.selected_targets >= pending.required_count then
+    local p = self.game_state.players[self.local_player_index + 1]
+    local result = self:dispatch_command({
+      type = "PLAY_FROM_HAND_WITH_SACRIFICES",
+      player_index = self.local_player_index,
+      hand_index = pending.hand_index,
+      sacrifice_targets = pending.selected_targets,
+    })
+    if result.ok then
+      sound.play("coin")
+      shake.trigger(4, 0.15)
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      popup.create("-" .. pending.required_count .. " Workers", px_b + pw_b * 0.5, py_b + ph_b - 80, { 1.0, 0.5, 0.25 })
+      popup.create("Loving Family played!", px_b + pw_b * 0.5, py_b + ph_b - 110, { 0.9, 0.8, 0.2 })
+      self.hand_selected_index = nil
+      self:_clear_prompt("hand_sacrifice")
+      while #self.hand_y_offsets > #p.hand do
+        table.remove(self.hand_y_offsets)
+      end
+    else
+      self:_clear_prompt("hand_sacrifice")
+      sound.play("error")
+    end
+  else
+    sound.play("click")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_sacrifice_worker_click(worker_kind, idx)
+  local pending = self:_prompt_payload("sacrifice")
+  if not pending then return false end
+  if pending.allow_worker_tokens == false then
+    sound.play("error")
+    return true
+  end
+  local p = self.game_state.players[self.local_player_index + 1]
+  local result = self:dispatch_command({
+    type = "SACRIFICE_UNIT",
+    player_index = self.local_player_index,
+    source = pending.source,
+    ability_index = pending.ability_index,
+    target_worker = worker_kind,
+    target_worker_extra = idx,
+  })
+  if result.ok then
+    sound.play("coin")
+    local pi_panel = self:player_to_panel(self.local_player_index)
+    local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+    local args = pending.effect_args or {}
+    if args.resource then
+      popup.create("+" .. (args.amount or 1) .. " " .. args.resource, px_b + pw_b / 2, py_b + 8, { 0.9, 0.2, 0.3 })
+    end
+    popup.create("Worker sacrificed!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.3, 0.3 })
+    self:_clear_prompt("sacrifice")
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_worker_click(kind, idx)
+  if not is_worker_click_kind(kind) then return false end
+  return self:_dispatch_prompt_click_from_top(PROMPT_WORKER_CLICK_METHODS, kind, idx)
+end
+
+function GameState:_handle_prompt_monument_structure_click(target_pi, target_si)
+  local pending = self:_prompt_payload("monument")
+  if not pending then return false end
+  local _ = target_pi
+  local is_eligible = false
+  for _, ei in ipairs(pending.eligible_indices or {}) do
+    if ei == target_si then is_eligible = true; break end
+  end
+  if is_eligible then
+    local p = self.game_state.players[self.local_player_index + 1]
+    local hand_card_id = p.hand[pending.hand_index]
+    local hand_card_def = nil
+    local card_name = "Card"
+    if hand_card_id then
+      local ok_c, cdef = pcall(cards.get_card_def, hand_card_id)
+      if ok_c and cdef then card_name = cdef.name; hand_card_def = cdef end
+    end
+
+    -- If the hand card is a Spell, use the spell cast flow (not board placement)
+    if hand_card_def and hand_card_def.kind == "Spell" then
+      local targeted_ab = find_targeted_spell_on_cast_ability(hand_card_def)
+      if targeted_ab then
+        local args = targeted_ab.effect_args or {}
+        local opponent_pi, eligible = collect_targeted_spell_eligible_indices(self.game_state, self.local_player_index, targeted_ab)
+        if #eligible == 0 then
+          sound.play("error")
+          return true
+        end
+        self:_set_prompt("spell_target", {
+          hand_index = pending.hand_index,
+          effect_args = args,
+          eligible_player_index = opponent_pi,
+          eligible_board_indices = eligible,
+          monument_board_index = target_si,
+        })
+        self:_clear_prompt("monument")
+        sound.play("click")
+        return true
+      else
+        -- Non-targeted monument spell
+        local result = self:dispatch_command({
+          type = "PLAY_SPELL_FROM_HAND",
+          player_index = self.local_player_index,
+          hand_index = pending.hand_index,
+          monument_board_index = target_si,
+        })
+        if result.ok then
+          sound.play("coin")
+          local pi_panel = self:player_to_panel(self.local_player_index)
+          local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+          popup.create(card_name .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
+          self:_clear_prompt("monument")
+          self.hand_selected_index = nil
+          while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+        else
+          sound.play("error")
+        end
+        return true
+      end
+    end
+
+    -- Default: non-spell monument card (place on board)
+    local result = self:dispatch_command({
+      type = "PLAY_MONUMENT_FROM_HAND",
+      player_index = self.local_player_index,
+      hand_index = pending.hand_index,
+      monument_board_index = target_si,
+    })
+    if result.ok then
+      sound.play("coin")
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      popup.create(card_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.95, 0.78, 0.2 })
+      self:_clear_prompt("monument")
+      self.hand_selected_index = nil
+      while #self.hand_y_offsets > #p.hand do
+        table.remove(self.hand_y_offsets)
+      end
+    else
+      sound.play("error")
+    end
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_sacrifice_structure_click(target_pi, target_si)
+  local pending = self:_prompt_payload("sacrifice")
+  if not pending then return false end
+  local _ = target_pi
+  local is_eligible = false
+  for _, ei in ipairs(pending.eligible_board_indices or {}) do
+    if ei == target_si then is_eligible = true; break end
+  end
+  if is_eligible then
+    if pending.next == "play_spell" then
+      self:_set_prompt("play_spell", {
+        source = pending.source,
+        ability_index = pending.ability_index,
+        cost = pending.spell_cost or {},
+        effect_args = pending.effect_args or {},
+        eligible_indices = pending.spell_eligible_indices or {},
+        fast = pending.fast or false,
+        sacrifice_target_board_index = target_si,
+      })
+      self:_clear_prompt("sacrifice")
+      self.hand_selected_index = nil
+      sound.play("click")
+      return true
+    end
+    local p = self.game_state.players[self.local_player_index + 1]
+    local sacrificed_entry = p.board[target_si]
+    local sacrificed_name = "Unit"
+    if sacrificed_entry then
+      local s_ok, s_def = pcall(cards.get_card_def, sacrificed_entry.card_id)
+      if s_ok and s_def then sacrificed_name = s_def.name end
+    end
+    local result = self:dispatch_command({
+      type = "SACRIFICE_UNIT",
+      player_index = self.local_player_index,
+      source = pending.source,
+      ability_index = pending.ability_index,
+      target_board_index = target_si,
+    })
+    if result.ok then
+      sound.play("coin")
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      local args = pending.effect_args or {}
+      if args.resource then
+        popup.create("+" .. (args.amount or 1) .. " " .. args.resource, px_b + pw_b / 2, py_b + 8, { 0.9, 0.2, 0.3 })
+      end
+      popup.create(sacrificed_name .. " sacrificed!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.3, 0.3 })
+      self:_clear_prompt("sacrifice")
+    else
+      sound.play("error")
+    end
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_counter_placement_structure_click(target_pi, target_si)
+  local pending = self:_prompt_payload("counter_placement")
+  if not pending then return false end
+  local _ = target_pi
+  local is_eligible = false
+  for _, ei in ipairs(pending.eligible_board_indices or {}) do
+    if ei == target_si then is_eligible = true; break end
+  end
+  if is_eligible then
+    local result = self:dispatch_command({
+      type = "PLACE_COUNTER_ON_TARGET",
+      player_index = self.local_player_index,
+      source = pending.source,
+      ability_index = pending.ability_index,
+      target_board_index = target_si,
+      fast_ability = pending.fast or false,
+    })
+    local cp_args = pending.effect_args or {}
+    if result.ok then
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      local amount = cp_args.amount or 2
+      local cname = cp_args.counter or "knowledge"
+      popup.create("+" .. amount .. " " .. cname, px_b + pw_b / 2, py_b + ph_b - 80, { 0.35, 0.55, 0.95 })
+      sound.play("coin")
+    else
+      sound.play("error")
+    end
+    self:_clear_prompt("counter_placement")
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_damage_target_structure_click(target_pi, target_si)
+  local pending = self:_prompt_payload("damage_target")
+  if not pending then return false end
+
+  local is_global = pending.eligible_board_indices_by_player ~= nil
+
+  local function fire_damage(target_pi2, board_idx, is_base)
+    local result = self:dispatch_command({
+      type = "DEAL_DAMAGE_TO_TARGET",
+      player_index = self.local_player_index,
+      source = pending.source,
+      ability_index = pending.ability_index,
+      target_player_index = target_pi2,
+      target_board_index = board_idx,
+      target_is_base = is_base or false,
+      fast_ability = pending.fast or false,
+    })
+    if result.ok then
+      local damage = (pending.effect_args and pending.effect_args.damage) or 0
+      local tgt_panel = self:player_to_panel(target_pi2)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(tgt_panel)
+      popup.create("-" .. damage, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
+      sound.play("coin")
+    else
+      sound.play("error")
+    end
+    self:_clear_prompt("damage_target")
+  end
+
+  -- Base click (idx == 0)
+  if target_si == 0 then
+    if pending.eligible_base_player_indices and pending.eligible_base_player_indices[target_pi] then
+      fire_damage(target_pi, nil, true)
+    else
+      sound.play("error")
+    end
+    return true
+  end
+
+  -- Board card click
+  if is_global then
+    local eligible = pending.eligible_board_indices_by_player[target_pi] or {}
+    local is_eligible = false
+    for _, ei in ipairs(eligible) do
+      if ei == target_si then is_eligible = true; break end
+    end
+    if is_eligible then
+      fire_damage(target_pi, target_si, false)
+    else
+      sound.play("error")
+    end
+    return true
+  end
+
+  -- Legacy single-player targeting; allow fallthrough if wrong player was clicked.
+  if target_pi ~= pending.eligible_player_index then
+    return false
+  end
+
+  local is_eligible = false
+  for _, ei in ipairs(pending.eligible_board_indices or {}) do
+    if ei == target_si then is_eligible = true; break end
+  end
+  if is_eligible then
+    fire_damage(pending.eligible_player_index, target_si, false)
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_spell_target_structure_click(target_pi, target_si)
+  local pending = self:_prompt_payload("spell_target")
+  if not pending then return false end
+  if target_pi ~= pending.eligible_player_index then return false end
+
+  local is_eligible = false
+  for _, ei in ipairs(pending.eligible_board_indices or {}) do
+    if ei == target_si then is_eligible = true; break end
+  end
+  if is_eligible then
+    local cmd_type = pending.via_ability_source and "PLAY_SPELL_VIA_ABILITY" or "PLAY_SPELL_FROM_HAND"
+    local result = self:dispatch_command({
+      type = cmd_type,
+      player_index = self.local_player_index,
+      source = pending.via_ability_source,
+      ability_index = pending.via_ability_ability_index,
+      hand_index = pending.hand_index,
+      target_player_index = pending.eligible_player_index,
+      target_board_index = target_si,
+      sacrifice_target_board_index = pending.sacrifice_target_board_index,
+      monument_board_index = pending.monument_board_index,
+      fast_ability = pending.fast or false,
+    })
+    if result.ok then
+      local opp_panel = self:player_to_panel(pending.eligible_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(opp_panel)
+      local damage = pending.effect_args and pending.effect_args.damage
+      if damage and damage > 0 then
+        popup.create("-" .. damage, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
+      else
+        popup.create("Spell!", px_b + pw_b / 2, py_b + ph_b / 2, { 0.85, 0.75, 0.95 })
+      end
+      sound.play("coin")
+    else
+      sound.play("error")
+    end
+    self:_clear_prompt("spell_target")
+    self.hand_selected_index = nil
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_damage_x_structure_click(target_pi, target_si)
+  local pending = self:_prompt_payload("damage_x")
+  if not pending then return false end
+  if target_pi ~= pending.eligible_player_index then return false end
+
+  local is_eligible = false
+  for _, ei in ipairs(pending.eligible_board_indices or {}) do
+    if ei == target_si then is_eligible = true; break end
+  end
+  if is_eligible then
+    local result = self:dispatch_command({
+      type = "DEAL_DAMAGE_X_TO_TARGET",
+      player_index = self.local_player_index,
+      source = pending.source,
+      ability_index = pending.ability_index,
+      target_player_index = pending.eligible_player_index,
+      target_board_index = target_si,
+      x_amount = pending.x_amount,
+      fast_ability = pending.fast or false,
+    })
+    if result.ok then
+      local opp_panel = self:player_to_panel(pending.eligible_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(opp_panel)
+      popup.create("-" .. pending.x_amount, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
+      sound.play("coin")
+    else
+      sound.play("error")
+    end
+    self:_clear_prompt("damage_x")
+  else
+    sound.play("error")
+  end
+  return true
+end
+
+function GameState:_handle_prompt_structure_click(pi, idx)
+  if type(idx) ~= "number" then return false end
+  return self:_dispatch_prompt_click_from_top(PROMPT_STRUCTURE_CLICK_METHODS, pi, idx)
+end
+
+function GameState:_handle_prompt_upgrade_click(kind, pi, idx, extra, x, y)
+  local top_kind, pending = self:_top_prompt()
+  if top_kind ~= "upgrade" or type(pending) ~= "table" then
+    return false
+  end
+
+  local p = self.game_state.players[self.local_player_index + 1]
+  local required_subtypes = upgrade_required_subtypes(pending.effect_args)
+  local function upgrade_error(msg)
+    local pi_panel = self:player_to_panel(self.local_player_index)
+    local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+    popup.create(msg, px_b + pw_b / 2, py_b + ph_b - 118, { 1.0, 0.45, 0.35 })
+    sound.play("error")
+  end
+
+  if pending.stage == "sacrifice" and is_worker_click_kind(kind) then
+    if pending.eligible_worker_sacrifice ~= true then
+      upgrade_error("No worker upgrade available")
+      return true
+    end
+    local eligible = find_upgrade_hand_indices(p, pending.effect_args, 1)
+    if #eligible == 0 then
+      pending.eligible_worker_sacrifice = false
+      upgrade_error("No Tier 1 upgrade in hand")
+      return true
+    end
+    pending.sacrifice_target = { target_worker = kind, target_worker_extra = idx }
+    pending.stage = "hand"
+    pending.eligible_hand_indices = eligible
+    sound.play("click")
+    return true
+  end
+
+  if pending.stage == "sacrifice" and (kind == "structure" or kind == "activate_ability" or kind == "ability_hover" or kind == "unit_row") then
+    local target_si = nil
+    if kind == "structure" then
+      target_si = idx
+    elseif type(extra) == "table" and extra.source == "board" then
+      target_si = extra.board_index
+    end
+    if pi == self.local_player_index then
+      local nearest_target = find_pending_upgrade_target_by_click(
+        self.game_state,
+        self.local_player_index,
+        pending.eligible_board_indices,
+        x, y,
+        {
+          pending_attack_declarations = self.pending_attack_declarations,
+          pending_block_assignments = self.pending_block_assignments,
+          pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+        }
+      )
+      if nearest_target and nearest_target > 0 then
+        target_si = nearest_target
+      end
+    end
+    if (not target_si or target_si <= 0) and pi == self.local_player_index then
+      target_si = find_pending_upgrade_target_by_click(
+        self.game_state,
+        self.local_player_index,
+        pending.eligible_board_indices,
+        x, y,
+        {
+          pending_attack_declarations = self.pending_attack_declarations,
+          pending_block_assignments = self.pending_block_assignments,
+          pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+        }
+      )
+    end
+    if not target_si or target_si <= 0 then
+      upgrade_error("Pick a highlighted ally")
+      return true
+    end
+
+    local entry = p.board[target_si]
+    local ok_t, tdef = false, nil
+    if entry then
+      ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
+    end
+    if not ok_t or not tdef or tdef.kind == "Structure" or tdef.kind == "Artifact" or not has_any_subtype(tdef, required_subtypes) then
+      local bad_name = "unknown"
+      if entry then
+        local ok_bad, bad_def = pcall(cards.get_card_def, entry.card_id)
+        if ok_bad and bad_def and bad_def.name then bad_name = bad_def.name end
+      end
+      upgrade_error("Target mismatch: " .. bad_name)
+      return true
+    end
+    local next_tier = (tdef.tier or 0) + 1
+    local eligible = find_upgrade_hand_indices(p, pending.effect_args, next_tier)
+    if #eligible == 0 then
+      upgrade_error("No matching upgrade in hand")
+      return true
+    end
+    if not has_index(pending.eligible_board_indices, target_si) then
+      pending.eligible_board_indices[#pending.eligible_board_indices + 1] = target_si
+    end
+    pending.sacrifice_target = { target_board_index = target_si }
+    pending.stage = "hand"
+    pending.eligible_hand_indices = eligible
+    sound.play("click")
+    return true
+  end
+
+  if pending.stage == "hand" and kind == "hand_card" then
+    local is_eligible = false
+    for _, ei in ipairs(pending.eligible_hand_indices or {}) do if ei == idx then is_eligible = true; break end end
+    if not is_eligible then sound.play("error"); return true end
+
+    local payload = {
+      type = "SACRIFICE_UPGRADE_PLAY",
+      player_index = self.local_player_index,
+      source = pending.source,
+      ability_index = pending.ability_index,
+      hand_index = idx,
+    }
+    if pending.sacrifice_target and pending.sacrifice_target.target_board_index then
+      payload.target_board_index = pending.sacrifice_target.target_board_index
+    else
+      payload.target_worker = pending.sacrifice_target and pending.sacrifice_target.target_worker
+      payload.target_worker_extra = pending.sacrifice_target and pending.sacrifice_target.target_worker_extra
+    end
+    local result = self:dispatch_command(payload)
+    if result.ok then
+      sound.play("coin")
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      popup.create("Fighting Pits upgrade!", px_b + pw_b / 2, py_b + ph_b - 90, { 0.9, 0.3, 0.3 })
+      self:_clear_prompt("upgrade")
+      self.hand_selected_index = nil
+      while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+    else
+      local pi_panel = self:player_to_panel(self.local_player_index)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      popup.create(pretty_reason(result.reason), px_b + pw_b / 2, py_b + ph_b - 118, { 1.0, 0.45, 0.35 })
+      sound.play("error")
+    end
+    return true
+  end
+
+  -- While a sacrifice-upgrade flow is active, non-matching clicks should
+  -- not silently fall through into drag/combat handlers.
+  if pending.stage == "sacrifice" or pending.stage == "hand" then
+    sound.play("error")
+    return true
+  end
+
+  return false
+end
+
+function GameState:_handle_prompt_damage_x_pre_hit_test_click(x, y)
+  local pending = self:_prompt_payload("damage_x")
+  if not pending then return false end
+  local function in_btn(b) return b and x >= b.x and x <= b.x + b.w and y >= b.y and y <= b.y + b.h end
+  if in_btn(pending.minus_btn) then
+    pending.x_amount = math.max(1, pending.x_amount - 1)
+    return true
+  end
+  if in_btn(pending.plus_btn) then
+    pending.x_amount = math.min(pending.max_x, pending.x_amount + 1)
+    return true
+  end
+  return false
+end
+
+function GameState:_handle_prompt_pre_hit_test_click(x, y)
+  return self:_dispatch_prompt_click_from_top(PROMPT_PRE_HIT_TEST_CLICK_METHODS, x, y)
+end
+
+function GameState:_current_graveyard_return_prompt()
+  return self:_prompt_payload("graveyard_return") or self.pending_graveyard_return
+end
+
+function GameState:_open_graveyard_return_prompt(source, ability_index, args, cards_for_selection, faction_key)
+  self:_set_prompt("graveyard_return", {
+    source = source,
+    ability_index = ability_index,
+    max_count = (args and args.count) or 1,
+    effect_args = args or {},
+    selected_graveyard_indices = {},
+  })
+
+  local faction_info = factions_data[faction_key]
+  local accent = faction_info and faction_info.color or { 0.5, 0.5, 0.7 }
+  local viewer_title = (args and args.return_to == "hand") and "Return to Hand" or "Return from Graveyard"
+  local viewer_hint = "Select up to "
+    .. ((args and args.count) or 1)
+    .. (((args and args.return_to) == "hand") and " card" or " Undead")
+    .. ((((args and args.count) or 1) > 1) and "s" or "")
+
+  deck_viewer.open({
+    title = viewer_title,
+    hint = viewer_hint,
+    cards = cards_for_selection,
+    accent = accent,
+    can_click_fn = function(def) return def.graveyard_eligible == true end,
+    card_overlay_fn = function(def, cx, cy, cw, ch)
+      if not def.graveyard_index then return end
+      local pending_ref = self:_current_graveyard_return_prompt()
+      if not pending_ref then return end
+      -- Dim ineligible cards
+      if not def.graveyard_eligible then
+        love.graphics.setColor(0, 0, 0, 0.55)
+        love.graphics.rectangle("fill", cx, cy, cw, ch, 5, 5)
+        return
+      end
+      -- Highlight selected cards
+      local selected = pending_ref.selected_graveyard_indices
+      for _, gi in ipairs(selected) do
+        if gi == def.graveyard_index then
+          love.graphics.setColor(0.2, 0.9, 0.35, 0.35)
+          love.graphics.rectangle("fill", cx, cy, cw, ch, 5, 5)
+          love.graphics.setColor(0.2, 0.9, 0.35, 0.85)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", cx - 2, cy - 2, cw + 4, ch + 4, 7, 7)
+          love.graphics.setLineWidth(1)
+          return
+        end
+      end
+    end,
+    on_click = function(def)
+      if not def.graveyard_eligible or not def.graveyard_index then return end
+      local pending_ref = self:_current_graveyard_return_prompt()
+      if not pending_ref then return end
+      local sel = pending_ref.selected_graveyard_indices
+      -- Toggle: deselect if already selected
+      for i, gi in ipairs(sel) do
+        if gi == def.graveyard_index then
+          table.remove(sel, i)
+          sound.play("click")
+          return
+        end
+      end
+      -- Add if under max
+      if #sel < pending_ref.max_count then
+        sel[#sel + 1] = def.graveyard_index
+        sound.play("click")
+      else
+        sound.play("error")
+      end
+    end,
+    confirm_label = ((args and args.return_to) == "hand") and "Return to Hand" or "Summon Selected",
+    confirm_enabled_fn = function()
+      local pending_ref = self:_current_graveyard_return_prompt()
+      if not pending_ref then return false end
+      return #pending_ref.selected_graveyard_indices > 0
+    end,
+    confirm_fn = function()
+      local pending_ref = self:_current_graveyard_return_prompt()
+      if not pending_ref then return end
+      local selected = pending_ref.selected_graveyard_indices
+      if #selected == 0 then return end
+      local result = self:dispatch_command({
+        type = "RETURN_FROM_GRAVEYARD",
+        player_index = self.local_player_index,
+        source = pending_ref.source,
+        ability_index = pending_ref.ability_index,
+        selected_graveyard_indices = selected,
+      })
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        local count = result.meta and result.meta.returned_count or 0
+        local msg = ((args and args.return_to) == "hand")
+          and (count .. " card" .. (count == 1 and "" or "s") .. " returned to hand!")
+          or (count .. " Undead summoned!")
+        popup.create(msg, px_b + pw_b / 2, py_b + ph_b - 80, { 0.55, 0.9, 0.45 })
+      else
+        sound.play("error")
+      end
+      deck_viewer.close()
+      self.show_blueprint_for_player = nil
+      self:_clear_prompt("graveyard_return")
+    end,
+  })
+  self.show_blueprint_for_player = nil
+  sound.play("click")
+end
+
+function GameState:_start_activated_play_unit_prompt(pi, p, info, ab)
+  local eligible = abilities.find_matching_hand_indices(p, ab.effect_args)
+  if #eligible == 0 then
+    sound.play("error")
+    return true
+  elseif #eligible == 1 then
+    -- Only one match: auto-play immediately
+    local before_res = {}
+    for k, v in pairs(p.resources) do before_res[k] = v end
+    local result = self:dispatch_command({
+      type = "PLAY_UNIT_FROM_HAND",
+      player_index = pi,
+      source = { type = info.source, index = info.board_index },
+      ability_index = info.ability_index,
+      hand_index = eligible[1],
+      fast_ability = ab.fast or false,
+    })
+    if result.ok then
+      sound.play("coin")
+      local pi_panel = self:player_to_panel(pi)
+      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+      for _, c in ipairs(ab.cost or {}) do
+        if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+          local rb_x, rb_y = board.resource_bar_rect(pi_panel)
+          popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
+        end
+      end
+      local card_id = result.meta and result.meta.card_id
+      local unit_name = "Unit"
+      if card_id then
+        local ok_d, udef = pcall(cards.get_card_def, card_id)
+        if ok_d and udef then unit_name = udef.name end
+      end
+      popup.create(unit_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.4, 0.9, 1.0 })
+      self.hand_selected_index = nil
+      self:_clear_prompt("play_unit")
+      while #self.hand_y_offsets > #p.hand do
+        table.remove(self.hand_y_offsets)
+      end
+    end
+    return true
+  else
+    -- Multiple matches: enter pending selection mode
+    self:_set_prompt("play_unit", {
+      source = { type = info.source, index = info.board_index },
+      ability_index = info.ability_index,
+      effect_args = ab.effect_args,
+      eligible_indices = eligible,
+      cost = ab.cost,
+      fast = ab.fast or false,
+    })
+    self.hand_selected_index = nil
+    sound.play("click")
+    return true
+  end
+end
+
+function GameState:_start_activated_sacrifice_upgrade_prompt(pi, p, info, ab)
+  local _ = p
+  local sel_info = abilities.collect_activated_selection_cost_targets(self.game_state, pi, ab)
+  local warrior_indices = (sel_info and sel_info.eligible_board_indices) or {}
+  local can_sac_workers = (sel_info and sel_info.has_worker_tokens) or false
+  if #warrior_indices == 0 and not can_sac_workers then
+    sound.play("error")
+    return true
+  end
+  self:_set_prompt("upgrade", {
+    source = { type = info.source, index = info.board_index },
+    ability_index = info.ability_index,
+    effect_args = ab.effect_args,
+    stage = "sacrifice",
+    sacrifice_target = nil,
+    eligible_hand_indices = nil,
+    eligible_board_indices = warrior_indices,
+    eligible_worker_sacrifice = can_sac_workers,
+  })
+  self.hand_selected_index = nil
+  self:_clear_prompt("play_unit")
+  self:_clear_prompt("sacrifice")
+  sound.play("click")
+  return true
+end
+
+function GameState:_start_activated_sacrifice_produce_prompt(pi, p, info, ab)
+  local sel_info = abilities.collect_activated_selection_cost_targets(self.game_state, pi, ab)
+  local eligible = (sel_info and sel_info.eligible_board_indices) or {}
+  local has_worker_to_sacrifice = (sel_info and sel_info.has_worker_tokens) or false
+  if #eligible == 0 and not has_worker_to_sacrifice then
+    sound.play("error")
+    return true
+  end
+  self:_set_prompt("sacrifice", {
+    source = { type = info.source, index = info.board_index },
+    ability_index = info.ability_index,
+    effect_args = ab.effect_args,
+    eligible_board_indices = eligible,
+    allow_worker_tokens = (sel_info and sel_info.allow_worker_tokens) ~= false,
+  })
+  self.hand_selected_index = nil
+  self:_clear_prompt("play_unit")
+  sound.play("click")
+  return true
+end
+
+function GameState:_start_activated_deal_damage_prompt(pi, p, info, ab)
+  local source_entry = info.source == "board" and p.board[info.board_index] or nil
+  local can_pay_ab, _ = abilities.can_pay_activated_ability_costs(p.resources, ab, {
+    source_entry = source_entry,
+  })
+  if not can_pay_ab then
+    sound.play("error")
+    return true
+  end
+  local source_key = (info.source == "board" and "board:" .. info.board_index or "base") .. ":" .. info.ability_index
+  local source_ref = (info.source == "board") and { type = "board", index = info.board_index } or { type = "base" }
+  if ab.once_per_turn and abilities.is_activated_ability_used_this_turn(self.game_state, pi, source_key, source_ref, info.ability_index) then
+    sound.play("error")
+    return true
+  end
+  local args = ab.effect_args or {}
+  local target_info = abilities.collect_effect_target_candidates(self.game_state, pi, ab.effect, args)
+  if not target_info or target_info.requires_target == false then
+    sound.play("error")
+    return true
+  end
+  local has_board_targets = false
+  if type(target_info.eligible_board_indices) == "table" and #target_info.eligible_board_indices > 0 then
+    has_board_targets = true
+  elseif type(target_info.eligible_board_indices_by_player) == "table" then
+    for _, list in pairs(target_info.eligible_board_indices_by_player) do
+      if type(list) == "table" and #list > 0 then
+        has_board_targets = true
+        break
+      end
+    end
+  end
+  local has_base_targets = false
+  if type(target_info.eligible_base_player_indices) == "table" then
+    for _, allowed in pairs(target_info.eligible_base_player_indices) do
+      if allowed then has_base_targets = true; break end
+    end
+  end
+  if not has_board_targets and not has_base_targets then
+    sound.play("error")
+    return true
+  end
+  self:_set_prompt("damage_target", {
+    source = { type = info.source, index = info.board_index },
+    ability_index = info.ability_index,
+    effect_args = args,
+    eligible_player_index = target_info.eligible_player_index,
+    eligible_board_indices = target_info.eligible_board_indices,
+    eligible_board_indices_by_player = target_info.eligible_board_indices_by_player,
+    eligible_base_player_indices = target_info.eligible_base_player_indices,
+    fast = ab.fast or false,
+  })
+  sound.play("click")
+  return true
+end
+
+function GameState:_start_activated_play_spell_prompt(pi, p, info, ab)
+  local eligible = abilities.find_matching_spell_hand_indices(p, ab.effect_args)
+  if #eligible == 0 then
+    sound.play("error")
+    return true
+  end
+
+  if ab.effect == "sacrifice_cast_spell" then
+    local sel_info = abilities.collect_activated_selection_cost_targets(self.game_state, pi, ab)
+    local sac_eligible = (sel_info and sel_info.eligible_board_indices) or {}
+    if #sac_eligible == 0 then
+      sound.play("error")
+      return true
+    end
+    self:_set_prompt("sacrifice", {
+      source = { type = info.source, index = info.board_index },
+      ability_index = info.ability_index,
+      effect_args = ab.effect_args,
+      eligible_board_indices = sac_eligible,
+      next = "play_spell",
+      spell_eligible_indices = eligible,
+      spell_cost = ab.cost,
+      fast = ab.fast or false,
+      allow_worker_tokens = (sel_info and sel_info.allow_worker_tokens) == true,
+    })
+    self.hand_selected_index = nil
+    sound.play("click")
+    return true
+  end
+
+  local function do_cast_spell(hand_idx)
+    local spell_id = p.hand[hand_idx]
+    local spell_def = nil
+    if spell_id then
+      local ok_s, sd = pcall(cards.get_card_def, spell_id)
+      if ok_s and sd then spell_def = sd end
+    end
+    local targeted_ab = find_targeted_spell_on_cast_ability(spell_def)
+    if targeted_ab then
+      local args = targeted_ab.effect_args or {}
+      local opponent_pi, dmg_eligible = collect_targeted_spell_eligible_indices(self.game_state, pi, targeted_ab)
+      if #dmg_eligible == 0 then
+        sound.play("error")
+        return
+      end
+      self:_set_prompt("spell_target", {
+        hand_index = hand_idx,
+        effect_args = args,
+        eligible_player_index = opponent_pi,
+        eligible_board_indices = dmg_eligible,
+        via_ability_source = { type = info.source, index = info.board_index },
+        via_ability_ability_index = info.ability_index,
+        fast = ab.fast or false,
+      })
+      self:_clear_prompt("play_spell")
+      sound.play("click")
+    else
+      local before_res = {}
+      for k, v in pairs(p.resources) do before_res[k] = v end
+      local result = self:dispatch_command({
+        type = "PLAY_SPELL_VIA_ABILITY",
+        player_index = pi,
+        source = { type = info.source, index = info.board_index },
+        ability_index = info.ability_index,
+        hand_index = hand_idx,
+        fast_ability = ab.fast or false,
+      })
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(pi)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        for _, c in ipairs(ab.cost or {}) do
+          if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+            local rb_x, rb_y = board.resource_bar_rect(pi_panel)
+            popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
+          end
+        end
+        local sname = spell_def and spell_def.name or "Spell"
+        popup.create(sname .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
+        self:_clear_prompt("play_spell")
+        while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+      else
+        sound.play("error")
+      end
+    end
+  end
+
+  if #eligible == 1 then
+    do_cast_spell(eligible[1])
+  else
+    self:_set_prompt("play_spell", {
+      source = { type = info.source, index = info.board_index },
+      ability_index = info.ability_index,
+      cost = ab.cost,
+      effect_args = ab.effect_args,
+      eligible_indices = eligible,
+      fast = ab.fast or false,
+    })
+    self.hand_selected_index = nil
+    sound.play("click")
+  end
+  return true
+end
+
+function GameState:_start_activated_discard_draw_prompt(pi, p, info, ab)
+  local _ = pi
+  local args = ab.effect_args or {}
+  local required_discard = args.discard or 2
+  if #p.hand < required_discard then
+    sound.play("error")
+    return true
+  end
+  self:_set_prompt("discard_draw", {
+    source = { type = info.source, index = info.board_index },
+    ability_index = info.ability_index,
+    required_count = required_discard,
+    draw_count = args.draw or 1,
+    selected_set = {},
+  })
+  self.hand_selected_index = nil
+  sound.play("click")
+  return true
+end
+
+function GameState:_start_activated_damage_x_prompt(pi, p, info, ab)
+  local source_entry = info.source == "board" and p.board[info.board_index] or nil
+  local can_pay_base_costs, _ = abilities.can_pay_activated_ability_costs(p.resources, ab, {
+    source_entry = source_entry,
+    require_variable_min = true,
+  })
+  if not can_pay_base_costs then
+    sound.play("error")
+    return true
+  end
+  local available, _, avail_reason = abilities.max_activated_variable_cost_amount(p.resources, ab)
+  if avail_reason or type(available) ~= "number" or available < 1 then
+    sound.play("error")
+    return true
+  end
+  local args = ab.effect_args or {}
+  local target_info = abilities.collect_effect_target_candidates(self.game_state, pi, ab.effect, args)
+  if not target_info or target_info.requires_target == false
+    or type(target_info.eligible_player_index) ~= "number"
+    or type(target_info.eligible_board_indices) ~= "table"
+    or #target_info.eligible_board_indices == 0 then
+    sound.play("error")
+    return true
+  end
+  self:_set_prompt("damage_x", {
+    source = { type = info.source, index = info.board_index },
+    ability_index = info.ability_index,
+    effect_args = args,
+    eligible_player_index = target_info.eligible_player_index,
+    eligible_board_indices = target_info.eligible_board_indices,
+    x_amount = available,
+    max_x = available,
+    fast = ab.fast or false,
+  })
+  sound.play("click")
+  return true
+end
+
+function GameState:_start_activated_counter_placement_prompt(pi, p, info, ab)
+  local source_entry = info.source == "board" and p.board[info.board_index] or nil
+  local can_pay_ab, _ = abilities.can_pay_activated_ability_costs(p.resources, ab, {
+    source_entry = source_entry,
+  })
+  if not can_pay_ab then
+    sound.play("error")
+    return true
+  end
+  local target_info = abilities.collect_effect_target_candidates(self.game_state, pi, ab.effect, ab.effect_args or {})
+  if not target_info or target_info.requires_target == false
+    or type(target_info.eligible_board_indices) ~= "table"
+    or #target_info.eligible_board_indices == 0 then
+    sound.play("error")
+    return true
+  end
+  self:_set_prompt("counter_placement", {
+    source = { type = info.source, index = info.board_index },
+    ability_index = info.ability_index,
+    effect_args = ab.effect_args or {},
+    eligible_board_indices = target_info.eligible_board_indices,
+    fast = ab.fast or false,
+  })
+  sound.play("click")
+  return true
+end
+
+function GameState:_start_activated_graveyard_return_prompt(pi, p, info, ab)
+  local source_entry = info.source == "board" and p.board[info.board_index] or nil
+  local can_pay_ab, _ = abilities.can_pay_activated_ability_costs(p.resources, ab, {
+    source_entry = source_entry,
+  })
+  if not can_pay_ab then
+    sound.play("error")
+    return true
+  end
+  local source_key = (info.source == "board" and "board:" .. info.board_index or "base") .. ":" .. info.ability_index
+  local source_ref = (info.source == "board") and { type = "board", index = info.board_index } or { type = "base" }
+  if ab.once_per_turn and abilities.is_activated_ability_used_this_turn(self.game_state, pi, source_key, source_ref, info.ability_index) then
+    sound.play("error")
+    return true
+  end
+  local args = ab.effect_args or {}
+  local cards_for_selection = graveyard_cards_for_selection(p, args)
+  local has_eligible = false
+  for _, c in ipairs(cards_for_selection) do
+    if c.graveyard_eligible then has_eligible = true; break end
+  end
+  if not has_eligible then
+    sound.play("error")
+    return true
+  end
+  self:_open_graveyard_return_prompt(
+    { type = info.source, index = info.board_index },
+    info.ability_index,
+    args,
+    cards_for_selection,
+    p.faction
+  )
+  return true
+end
+
+function GameState:_try_start_activated_prompt(pi, p, info, ab)
+  if type(ab) ~= "table" or type(ab.effect) ~= "string" then return false end
+  local method_name = ACTIVATED_PROMPT_START_METHODS[ab.effect]
+  local method = method_name and self[method_name] or nil
+  if type(method) ~= "function" then return false end
+  return method(self, pi, p, info, ab)
+end
+
 function GameState:mousepressed(x, y, button, istouch, presses)
   if button ~= 1 then return end -- left click only
+  if self.in_game_settings_open then
+    self:_handle_in_game_settings_click(x, y)
+    return
+  end
   if self.game_state and self.game_state.is_terminal then return end
   self.mouse_down = true
 
@@ -2248,23 +5343,14 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     deck_viewer.mousepressed(x, y, button)
     if was_open and not deck_viewer.is_open() then
       self.show_blueprint_for_player = nil
-      self.pending_graveyard_return = nil
+      self:_clear_prompt("graveyard_return")
     end
     return
   end
 
-  -- Handle deal_damage_x +/- button clicks before board hit-test
-  if self.pending_damage_x then
-    local pdx = self.pending_damage_x
-    local function in_btn(b) return b and x >= b.x and x <= b.x + b.w and y >= b.y and y <= b.y + b.h end
-    if in_btn(pdx.minus_btn) then
-      pdx.x_amount = math.max(1, pdx.x_amount - 1)
-      return
-    end
-    if in_btn(pdx.plus_btn) then
-      pdx.x_amount = math.min(pdx.max_x, pdx.x_amount + 1)
-      return
-    end
+  -- Prompt-owned pre-hit-test UI controls (e.g. damage_x +/- buttons)
+  if self:_handle_prompt_pre_hit_test_click(x, y) then
+    return
   end
 
   local kind, pi, extra = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, {
@@ -2318,59 +5404,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   if not kind then
     -- Clicked on empty space: cancel pending selection or deselect hand card
     self:_clear_pending_attack_declarations()
-    if self.pending_play_unit then
-      self.pending_play_unit = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_sacrifice then
-      self.pending_sacrifice = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_upgrade then
-      self.pending_upgrade = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_hand_sacrifice then
-      self.pending_hand_sacrifice = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_monument then
-      self.pending_monument = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_counter_placement then
-      self.pending_counter_placement = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_damage_target then
-      self.pending_damage_target = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_damage_x then
-      self.pending_damage_x = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_spell_target then
-      self.pending_spell_target = nil
-      self.hand_selected_index = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_play_spell then
-      self.pending_play_spell = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_discard_draw then
-      self.pending_discard_draw = nil
+    if self:_cancel_top_prompt_for_context("empty_click") then
       sound.play("click")
       return
     end
@@ -2381,719 +5415,20 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     return
   end
 
-  -- Hand card click during pending play_unit selection
-  if kind == "hand_card" and self.pending_play_unit then
-    local pending = self.pending_play_unit
-    local is_eligible = false
-    for _, ei in ipairs(pending.eligible_indices) do
-      if ei == idx then is_eligible = true; break end
-    end
-    if is_eligible then
-      local p = self.game_state.players[self.local_player_index + 1]
-      local before_res = {}
-      for k, v in pairs(p.resources) do before_res[k] = v end
-      local result = self:dispatch_command({
-        type = "PLAY_UNIT_FROM_HAND",
-        player_index = self.local_player_index,
-        source = pending.source,
-        ability_index = pending.ability_index,
-        hand_index = idx,
-        fast_ability = pending.fast or false,
-      })
-      if result.ok then
-        sound.play("coin")
-        local pi_panel = self:player_to_panel(self.local_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-        for _, c in ipairs(pending.cost or {}) do
-          if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
-            local rb_x, rb_y = board.resource_bar_rect(pi_panel)
-            popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
-          end
-        end
-        local card_id = result.meta and result.meta.card_id
-        local unit_name = "Unit"
-        if card_id then
-          local ok_d, udef = pcall(cards.get_card_def, card_id)
-          if ok_d and udef then unit_name = udef.name end
-        end
-        popup.create(unit_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.4, 0.9, 1.0 })
-        self.hand_selected_index = nil
-        self.pending_play_unit = nil
-        while #self.hand_y_offsets > #p.hand do
-          table.remove(self.hand_y_offsets)
-        end
-      else
-        sound.play("error")
-      end
-    else
-      sound.play("error")
-    end
+  if kind == "hand_card" and self:_handle_prompt_hand_card_click(idx) then
     return
   end
 
-  -- Hand card click during pending play_spell selection (e.g. Alchemy Table)
-  if kind == "hand_card" and self.pending_play_spell then
-    local pending = self.pending_play_spell
-    local is_eligible = false
-    for _, ei in ipairs(pending.eligible_indices) do
-      if ei == idx then is_eligible = true; break end
-    end
-    if is_eligible then
-      local p = self.game_state.players[self.local_player_index + 1]
-      local spell_id = p.hand[idx]
-      local spell_def = nil
-      if spell_id then
-        local ok_s, sd = pcall(cards.get_card_def, spell_id)
-        if ok_s and sd then spell_def = sd end
-      end
-      -- Check if this spell has a targeted on_cast ability
-      local targeted_ab = nil
-      if spell_def then
-        for _, sab in ipairs(spell_def.abilities or {}) do
-          if sab.trigger == "on_cast" and sab.effect == "deal_damage" then targeted_ab = sab; break end
-        end
-      end
-      if targeted_ab then
-        local args = targeted_ab.effect_args or {}
-        local opponent_pi = 1 - self.local_player_index
-        local op = self.game_state.players[opponent_pi + 1]
-        local eligible = {}
-        for si, entry in ipairs(op.board) do
-          local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-          if ok_d and edef then
-            if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
-              eligible[#eligible + 1] = si
-            elseif args.target == "any" then
-              eligible[#eligible + 1] = si
-            end
-          end
-        end
-        if #eligible == 0 then
-          sound.play("error")
-          return
-        end
-        self.pending_spell_target = {
-          hand_index = idx,
-          effect_args = args,
-          eligible_player_index = opponent_pi,
-          eligible_board_indices = eligible,
-          via_ability_source = pending.source,
-          via_ability_ability_index = pending.ability_index,
-          fast = pending.fast or false,
-        }
-        self.pending_play_spell = nil
-        sound.play("click")
-      else
-        -- Non-targeted: cast immediately via ability
-        local before_res = {}
-        for k, v in pairs(p.resources) do before_res[k] = v end
-        local result = self:dispatch_command({
-          type = "PLAY_SPELL_VIA_ABILITY",
-          player_index = self.local_player_index,
-          source = pending.source,
-          ability_index = pending.ability_index,
-          hand_index = idx,
-          fast_ability = pending.fast or false,
-        })
-        if result.ok then
-          sound.play("coin")
-          local pi_panel = self:player_to_panel(self.local_player_index)
-          local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-          for _, c in ipairs(pending.cost or {}) do
-            if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
-              local rb_x, rb_y = board.resource_bar_rect(pi_panel)
-              popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
-            end
-          end
-          local sname = spell_def and spell_def.name or "Spell"
-          popup.create(sname .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
-          self.pending_play_spell = nil
-          while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
-        else
-          sound.play("error")
-        end
-      end
-    else
-      sound.play("error")
-    end
+  if self:_handle_prompt_worker_click(kind, idx) then
     return
   end
 
-  -- Hand card click during pending discard_draw selection (e.g. Hospital)
-  if kind == "hand_card" and self.pending_discard_draw then
-    local pending = self.pending_discard_draw
-    local selected = pending.selected_set
-    -- Toggle selection
-    if selected[idx] then
-      selected[idx] = nil
-      sound.play("click")
-    else
-      local count = 0
-      for _ in pairs(selected) do count = count + 1 end
-      if count >= pending.required_count then
-        sound.play("error")
-      else
-        selected[idx] = true
-        sound.play("click")
-        -- Auto-dispatch when required count reached
-        count = count + 1
-        if count == pending.required_count then
-          local indices = {}
-          for hi in pairs(selected) do indices[#indices + 1] = hi end
-          local p = self.game_state.players[self.local_player_index + 1]
-          local result = self:dispatch_command({
-            type = "DISCARD_DRAW_HAND",
-            player_index = self.local_player_index,
-            source = pending.source,
-            ability_index = pending.ability_index,
-            hand_indices = indices,
-          })
-          if result.ok then
-            sound.play("coin")
-            local pi_panel = self:player_to_panel(self.local_player_index)
-            local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-            popup.create("Drew " .. pending.draw_count .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.65, 0.3 })
-            self.pending_discard_draw = nil
-            while #self.hand_y_offsets > #p.hand do
-              table.remove(self.hand_y_offsets)
-            end
-          else
-            sound.play("error")
-            self.pending_discard_draw = nil
-          end
-        end
-      end
-    end
+  if kind == "structure" and self:_handle_prompt_structure_click(pi, idx) then
     return
   end
 
-  -- Worker click during pending hand sacrifice selection (e.g. Loving Family)
-  if self.pending_hand_sacrifice and (kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" or kind == "unassigned_pool") then
-    local pending = self.pending_hand_sacrifice
-    pending.selected_targets[#pending.selected_targets + 1] = { kind = kind, extra = idx }
-
-    if #pending.selected_targets >= pending.required_count then
-      local p = self.game_state.players[self.local_player_index + 1]
-      local result = self:dispatch_command({
-        type = "PLAY_FROM_HAND_WITH_SACRIFICES",
-        player_index = self.local_player_index,
-        hand_index = pending.hand_index,
-        sacrifice_targets = pending.selected_targets,
-      })
-      if result.ok then
-        sound.play("coin")
-        shake.trigger(4, 0.15)
-        local pi_panel = self:player_to_panel(self.local_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-        popup.create("-" .. pending.required_count .. " Workers", px_b + pw_b * 0.5, py_b + ph_b - 80, { 1.0, 0.5, 0.25 })
-        popup.create("Loving Family played!", px_b + pw_b * 0.5, py_b + ph_b - 110, { 0.9, 0.8, 0.2 })
-        self.hand_selected_index = nil
-        self.pending_hand_sacrifice = nil
-        while #self.hand_y_offsets > #p.hand do
-          table.remove(self.hand_y_offsets)
-        end
-      else
-        self.pending_hand_sacrifice = nil
-        sound.play("error")
-      end
-    else
-      sound.play("click")
-    end
+  if self:_handle_prompt_upgrade_click(kind, pi, idx, extra, x, y) then
     return
-  end
-
-  -- Worker click during pending sacrifice selection
-  if self.pending_sacrifice and (kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" or kind == "unassigned_pool") then
-    local pending = self.pending_sacrifice
-    local p = self.game_state.players[self.local_player_index + 1]
-    local result = self:dispatch_command({
-      type = "SACRIFICE_UNIT",
-      player_index = self.local_player_index,
-      source = pending.source,
-      ability_index = pending.ability_index,
-      target_worker = kind,
-      target_worker_extra = idx,
-    })
-    if result.ok then
-      sound.play("coin")
-      local pi_panel = self:player_to_panel(self.local_player_index)
-      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-      local args = pending.effect_args or {}
-      if args.resource then
-        popup.create("+" .. (args.amount or 1) .. " " .. args.resource, px_b + pw_b / 2, py_b + 8, { 0.9, 0.2, 0.3 })
-      end
-      popup.create("Worker sacrificed!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.3, 0.3 })
-      self.pending_sacrifice = nil
-    else
-      sound.play("error")
-    end
-    return
-  end
-
-  -- Board tile click during pending monument selection
-  if kind == "structure" and self.pending_monument then
-    local pending = self.pending_monument
-    local target_si = idx
-    local is_eligible = false
-    for _, ei in ipairs(pending.eligible_indices) do
-      if ei == target_si then is_eligible = true; break end
-    end
-    if is_eligible then
-      local p = self.game_state.players[self.local_player_index + 1]
-      local hand_card_id = p.hand[pending.hand_index]
-      local hand_card_def = nil
-      local card_name = "Card"
-      if hand_card_id then
-        local ok_c, cdef = pcall(cards.get_card_def, hand_card_id)
-        if ok_c and cdef then card_name = cdef.name; hand_card_def = cdef end
-      end
-
-      -- If the hand card is a Spell, use the spell cast flow (not board placement)
-      if hand_card_def and hand_card_def.kind == "Spell" then
-        local targeted_ab = nil
-        for _, ab in ipairs(hand_card_def.abilities or {}) do
-          if ab.trigger == "on_cast" and ab.effect == "deal_damage" then targeted_ab = ab; break end
-        end
-        if targeted_ab then
-          local args = targeted_ab.effect_args or {}
-          local opponent_pi = 1 - self.local_player_index
-          local op = self.game_state.players[opponent_pi + 1]
-          local eligible = {}
-          for si, entry in ipairs(op.board) do
-            local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-            if ok_d and edef then
-              if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
-                eligible[#eligible + 1] = si
-              elseif args.target == "any" then
-                eligible[#eligible + 1] = si
-              end
-            end
-          end
-          if #eligible == 0 then
-            sound.play("error")
-            return
-          end
-          self.pending_spell_target = {
-            hand_index = pending.hand_index,
-            effect_args = args,
-            eligible_player_index = opponent_pi,
-            eligible_board_indices = eligible,
-            monument_board_index = target_si,
-          }
-          self.pending_monument = nil
-          sound.play("click")
-          return
-        else
-          -- Non-targeted monument spell
-          local result = self:dispatch_command({
-            type = "PLAY_SPELL_FROM_HAND",
-            player_index = self.local_player_index,
-            hand_index = pending.hand_index,
-            monument_board_index = target_si,
-          })
-          if result.ok then
-            sound.play("coin")
-            local pi_panel = self:player_to_panel(self.local_player_index)
-            local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-            popup.create(card_name .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
-            self.pending_monument = nil
-            self.hand_selected_index = nil
-            while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
-          else
-            sound.play("error")
-          end
-          return
-        end
-      end
-
-      -- Default: non-spell monument card (place on board)
-      local result = self:dispatch_command({
-        type = "PLAY_MONUMENT_FROM_HAND",
-        player_index = self.local_player_index,
-        hand_index = pending.hand_index,
-        monument_board_index = target_si,
-      })
-      if result.ok then
-        sound.play("coin")
-        local pi_panel = self:player_to_panel(self.local_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-        popup.create(card_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.95, 0.78, 0.2 })
-        self.pending_monument = nil
-        self.hand_selected_index = nil
-        while #self.hand_y_offsets > #p.hand do
-          table.remove(self.hand_y_offsets)
-        end
-      else
-        sound.play("error")
-      end
-    else
-      sound.play("error")
-    end
-    return
-  end
-
-  -- Board tile click during pending sacrifice selection
-  if kind == "structure" and self.pending_sacrifice then
-    local pending = self.pending_sacrifice
-    local target_si = idx
-    local is_eligible = false
-    for _, ei in ipairs(pending.eligible_board_indices) do
-      if ei == target_si then is_eligible = true; break end
-    end
-    if is_eligible then
-      local p = self.game_state.players[self.local_player_index + 1]
-      local sacrificed_entry = p.board[target_si]
-      local sacrificed_name = "Unit"
-      if sacrificed_entry then
-        local s_ok, s_def = pcall(cards.get_card_def, sacrificed_entry.card_id)
-        if s_ok and s_def then sacrificed_name = s_def.name end
-      end
-      local result = self:dispatch_command({
-        type = "SACRIFICE_UNIT",
-        player_index = self.local_player_index,
-        source = pending.source,
-        ability_index = pending.ability_index,
-        target_board_index = target_si,
-      })
-      if result.ok then
-        sound.play("coin")
-        local pi_panel = self:player_to_panel(self.local_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-        local args = pending.effect_args or {}
-        if args.resource then
-          popup.create("+" .. (args.amount or 1) .. " " .. args.resource, px_b + pw_b / 2, py_b + 8, { 0.9, 0.2, 0.3 })
-        end
-        popup.create(sacrificed_name .. " sacrificed!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.9, 0.3, 0.3 })
-        self.pending_sacrifice = nil
-      else
-        sound.play("error")
-      end
-    else
-      sound.play("error")
-    end
-    return
-  end
-
-  -- Board tile click during deal_damage targeting
-  if kind == "structure" and self.pending_damage_target then
-    local pending = self.pending_damage_target
-    local target_si = idx
-    local is_global = pending.eligible_board_indices_by_player ~= nil
-
-    local function fire_damage(target_pi, board_idx, is_base)
-      local result = self:dispatch_command({
-        type = "DEAL_DAMAGE_TO_TARGET",
-        player_index = self.local_player_index,
-        source = pending.source,
-        ability_index = pending.ability_index,
-        target_player_index = target_pi,
-        target_board_index = board_idx,
-        target_is_base = is_base or false,
-        fast_ability = pending.fast or false,
-      })
-      if result.ok then
-        local damage = pending.effect_args.damage or 0
-        local tgt_panel = self:player_to_panel(target_pi)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(tgt_panel)
-        popup.create("-" .. damage, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
-        sound.play("coin")
-      else
-        sound.play("error")
-      end
-      self.pending_damage_target = nil
-    end
-
-    -- Base click (idx == 0)
-    if target_si == 0 then
-      if pending.eligible_base_player_indices and pending.eligible_base_player_indices[pi] then
-        fire_damage(pi, nil, true)
-      else
-        sound.play("error")
-      end
-      return
-    end
-
-    -- Board card click
-    if is_global then
-      local eligible = pending.eligible_board_indices_by_player[pi] or {}
-      local is_eligible = false
-      for _, ei in ipairs(eligible) do
-        if ei == target_si then is_eligible = true; break end
-      end
-      if is_eligible then
-        fire_damage(pi, target_si, false)
-      else
-        sound.play("error")
-      end
-      return
-    else
-      -- Legacy single-player targeting
-      if pi == pending.eligible_player_index then
-        local is_eligible = false
-        for _, ei in ipairs(pending.eligible_board_indices) do
-          if ei == target_si then is_eligible = true; break end
-        end
-        if is_eligible then
-          fire_damage(pending.eligible_player_index, target_si, false)
-        else
-          sound.play("error")
-        end
-        return
-      end
-      -- Not the eligible player - fall through to other handlers
-    end
-  end
-
-  -- Board tile click to resolve a targeted spell
-  if kind == "structure" and self.pending_spell_target and pi == self.pending_spell_target.eligible_player_index then
-    local pending = self.pending_spell_target
-    local target_si = idx
-    local is_eligible = false
-    for _, ei in ipairs(pending.eligible_board_indices) do
-      if ei == target_si then is_eligible = true; break end
-    end
-    if is_eligible then
-      local cmd_type = pending.via_ability_source and "PLAY_SPELL_VIA_ABILITY" or "PLAY_SPELL_FROM_HAND"
-      local result = self:dispatch_command({
-        type = cmd_type,
-        player_index = self.local_player_index,
-        source = pending.via_ability_source,
-        ability_index = pending.via_ability_ability_index,
-        hand_index = pending.hand_index,
-        target_player_index = pending.eligible_player_index,
-        target_board_index = target_si,
-        monument_board_index = pending.monument_board_index,
-        fast_ability = pending.fast or false,
-      })
-      if result.ok then
-        local damage = pending.effect_args.damage or 0
-        local opp_panel = self:player_to_panel(pending.eligible_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(opp_panel)
-        popup.create("-" .. damage, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
-        sound.play("coin")
-      else
-        sound.play("error")
-      end
-      self.pending_spell_target = nil
-      self.hand_selected_index = nil
-    else
-      sound.play("error")
-    end
-    return
-  end
-
-  -- Enemy board tile click during deal_damage_x targeting (Flying Machine)
-  if kind == "structure" and self.pending_damage_x and pi == self.pending_damage_x.eligible_player_index then
-    local pending = self.pending_damage_x
-    local target_si = idx
-    local is_eligible = false
-    for _, ei in ipairs(pending.eligible_board_indices) do
-      if ei == target_si then is_eligible = true; break end
-    end
-    if is_eligible then
-      local result = self:dispatch_command({
-        type = "DEAL_DAMAGE_X_TO_TARGET",
-        player_index = self.local_player_index,
-        source = pending.source,
-        ability_index = pending.ability_index,
-        target_player_index = pending.eligible_player_index,
-        target_board_index = target_si,
-        x_amount = pending.x_amount,
-        fast_ability = pending.fast or false,
-      })
-      if result.ok then
-        local opp_panel = self:player_to_panel(pending.eligible_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(opp_panel)
-        popup.create("-" .. pending.x_amount, px_b + pw_b / 2, py_b + ph_b / 2, { 0.95, 0.35, 0.25 })
-        sound.play("coin")
-      else
-        sound.play("error")
-      end
-      self.pending_damage_x = nil
-    else
-      sound.play("error")
-    end
-    return
-  end
-
-  -- Board tile click during counter placement targeting
-  if kind == "structure" and self.pending_counter_placement then
-    local pending = self.pending_counter_placement
-    local target_si = idx
-    local is_eligible = false
-    for _, ei in ipairs(pending.eligible_board_indices) do
-      if ei == target_si then is_eligible = true; break end
-    end
-    if is_eligible then
-      local result = self:dispatch_command({
-        type = "PLACE_COUNTER_ON_TARGET",
-        player_index = self.local_player_index,
-        source = pending.source,
-        ability_index = pending.ability_index,
-        target_board_index = target_si,
-        fast_ability = pending.fast or false,
-      })
-      local cp_args = pending.effect_args or {}
-      if result.ok then
-        local pi_panel = self:player_to_panel(self.local_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-        local amount = cp_args.amount or 2
-        local cname = cp_args.counter or "knowledge"
-        popup.create("+" .. amount .. " " .. cname, px_b + pw_b / 2, py_b + ph_b - 80, { 0.35, 0.55, 0.95 })
-        sound.play("coin")
-      else
-        sound.play("error")
-      end
-      self.pending_counter_placement = nil
-    else
-      sound.play("error")
-    end
-    return
-  end
-
-  -- Click during Fighting Pits sacrifice-upgrade flow
-  if self.pending_upgrade then
-    local pending = self.pending_upgrade
-    local p = self.game_state.players[self.local_player_index + 1]
-    local required_subtypes = upgrade_required_subtypes(pending.effect_args)
-    local function upgrade_error(msg)
-      local pi_panel = self:player_to_panel(self.local_player_index)
-      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-      popup.create(msg, px_b + pw_b / 2, py_b + ph_b - 118, { 1.0, 0.45, 0.35 })
-      sound.play("error")
-    end
-
-    if pending.stage == "sacrifice" and (kind == "worker_unassigned" or kind == "worker_left" or kind == "worker_right" or kind == "structure_worker" or kind == "unassigned_pool") then
-      if pending.eligible_worker_sacrifice ~= true then
-        upgrade_error("No worker upgrade available")
-        return
-      end
-      local eligible = find_upgrade_hand_indices(p, pending.effect_args, 1)
-      if #eligible == 0 then
-        pending.eligible_worker_sacrifice = false
-        upgrade_error("No Tier 1 upgrade in hand")
-        return
-      end
-      pending.sacrifice_target = { target_worker = kind, target_worker_extra = idx }
-      pending.stage = "hand"
-      pending.eligible_hand_indices = eligible
-      sound.play("click")
-      return
-    end
-
-    if pending.stage == "sacrifice" and (kind == "structure" or kind == "activate_ability" or kind == "ability_hover" or kind == "unit_row") then
-      local target_si = nil
-      if kind == "structure" then
-        target_si = idx
-      elseif type(extra) == "table" and extra.source == "board" then
-        target_si = extra.board_index
-      end
-      if pi == self.local_player_index then
-        local nearest_target = find_pending_upgrade_target_by_click(
-          self.game_state,
-          self.local_player_index,
-          pending.eligible_board_indices,
-          x, y,
-          {
-            pending_attack_declarations = self.pending_attack_declarations,
-            pending_block_assignments = self.pending_block_assignments,
-            pending_attack_trigger_targets = self.pending_attack_trigger_targets,
-          }
-        )
-        if nearest_target and nearest_target > 0 then
-          target_si = nearest_target
-        end
-      end
-      if (not target_si or target_si <= 0) and pi == self.local_player_index then
-        target_si = find_pending_upgrade_target_by_click(
-          self.game_state,
-          self.local_player_index,
-          pending.eligible_board_indices,
-          x, y,
-          {
-            pending_attack_declarations = self.pending_attack_declarations,
-            pending_block_assignments = self.pending_block_assignments,
-            pending_attack_trigger_targets = self.pending_attack_trigger_targets,
-          }
-        )
-      end
-      if not target_si or target_si <= 0 then
-        upgrade_error("Pick a highlighted ally")
-        return
-      end
-
-      local entry = p.board[target_si]
-      local ok_t, tdef = false, nil
-      if entry then
-        ok_t, tdef = pcall(cards.get_card_def, entry.card_id)
-      end
-      if not ok_t or not tdef or tdef.kind == "Structure" or tdef.kind == "Artifact" or not has_any_subtype(tdef, required_subtypes) then
-        local bad_name = "unknown"
-        if entry then
-          local ok_bad, bad_def = pcall(cards.get_card_def, entry.card_id)
-          if ok_bad and bad_def and bad_def.name then bad_name = bad_def.name end
-        end
-        upgrade_error("Target mismatch: " .. bad_name)
-        return
-      end
-      local next_tier = (tdef.tier or 0) + 1
-      local eligible = find_upgrade_hand_indices(p, pending.effect_args, next_tier)
-      if #eligible == 0 then
-        upgrade_error("No matching upgrade in hand")
-        return
-      end
-      if not has_index(pending.eligible_board_indices, target_si) then
-        pending.eligible_board_indices[#pending.eligible_board_indices + 1] = target_si
-      end
-      pending.sacrifice_target = { target_board_index = target_si }
-      pending.stage = "hand"
-      pending.eligible_hand_indices = eligible
-      sound.play("click")
-      return
-    end
-
-    if pending.stage == "hand" and kind == "hand_card" then
-      local is_eligible = false
-      for _, ei in ipairs(pending.eligible_hand_indices or {}) do if ei == idx then is_eligible = true; break end end
-      if not is_eligible then sound.play("error"); return end
-
-      local payload = {
-        type = "SACRIFICE_UPGRADE_PLAY",
-        player_index = self.local_player_index,
-        source = pending.source,
-        ability_index = pending.ability_index,
-        hand_index = idx,
-      }
-      if pending.sacrifice_target.target_board_index then
-        payload.target_board_index = pending.sacrifice_target.target_board_index
-      else
-        payload.target_worker = pending.sacrifice_target.target_worker
-        payload.target_worker_extra = pending.sacrifice_target.target_worker_extra
-      end
-      local result = self:dispatch_command(payload)
-      if result.ok then
-        sound.play("coin")
-        local pi_panel = self:player_to_panel(self.local_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-        popup.create("Fighting Pits upgrade!", px_b + pw_b / 2, py_b + ph_b - 90, { 0.9, 0.3, 0.3 })
-        self.pending_upgrade = nil
-        self.hand_selected_index = nil
-        while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
-      else
-        local pi_panel = self:player_to_panel(self.local_player_index)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-        popup.create(pretty_reason(result.reason), px_b + pw_b / 2, py_b + ph_b - 118, { 1.0, 0.45, 0.35 })
-        sound.play("error")
-      end
-      return
-    end
-
-    -- While a sacrifice-upgrade flow is active, non-matching clicks should
-    -- not silently fall through into drag/combat handlers.
-    if pending.stage == "sacrifice" or pending.stage == "hand" then
-      sound.play("error")
-      return
-    end
   end
 
   -- Hand card click: toggle selection or play from hand
@@ -3105,52 +5440,29 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       if card_id and pi == self.game_state.activePlayer then
         local card_ok, card_def = pcall(cards.get_card_def, card_id)
         if card_ok and card_def then
-          local sac_ab = nil
-          if card_def.abilities then
-            for _, ab in ipairs(card_def.abilities) do
-              if ab.type == "static" and ab.effect == "play_cost_sacrifice" then sac_ab = ab; break end
-            end
-          end
-          if sac_ab then
-            local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
+          local sac_cost_info = abilities.collect_card_play_cost_targets(self.game_state, pi, card_def)
+          if sac_cost_info and sac_cost_info.effect == "play_cost_sacrifice" then
+            local sacrifice_count = sac_cost_info.required_count or 2
             if (local_p.totalWorkers or 0) >= sacrifice_count then
-              self.pending_hand_sacrifice = {
+              self:_set_prompt("hand_sacrifice", {
                 hand_index = idx,
                 required_count = sacrifice_count,
                 selected_targets = {},
-              }
+              })
               sound.play("click")
               return
             end
           end
           -- Check for monument cost ability
-          local mon_ab = nil
-          if card_def.abilities then
-            for _, ab in ipairs(card_def.abilities) do
-              if ab.type == "static" and ab.effect == "monument_cost" then mon_ab = ab; break end
-            end
-          end
-          if mon_ab then
-            local min_counters = mon_ab.effect_args and mon_ab.effect_args.min_counters or 1
-            local eligible = {}
-            for i, entry in ipairs(local_p.board) do
-              local ok_m, mon_def = pcall(cards.get_card_def, entry.card_id)
-              if ok_m and mon_def and mon_def.keywords then
-                local is_monument = false
-                for _, kw in ipairs(mon_def.keywords) do
-                  if kw == "monument" then is_monument = true; break end
-                end
-                if is_monument and unit_stats.counter_count(entry.state or {}, "wonder") >= min_counters then
-                  eligible[#eligible + 1] = i
-                end
-              end
-            end
+          local monument_cost_info = abilities.collect_card_play_cost_targets(self.game_state, pi, card_def)
+          if monument_cost_info and monument_cost_info.effect == "monument_cost" then
+            local eligible = monument_cost_info.eligible_board_indices or {}
             if #eligible > 0 then
-              self.pending_monument = {
+              self:_set_prompt("monument", {
                 hand_index = idx,
-                min_counters = min_counters,
+                min_counters = monument_cost_info.min_counters or 1,
                 eligible_indices = eligible,
-              }
+              })
               sound.play("click")
               return
             end
@@ -3159,38 +5471,21 @@ function GameState:mousepressed(x, y, button, istouch, presses)
           if card_def.kind == "Spell" then
             if abilities.can_pay_cost(local_p.resources, card_def.costs) then
               -- Find first on_cast ability that needs a target
-              local targeted_ab = nil
-              for _, ab in ipairs(card_def.abilities or {}) do
-                if ab.trigger == "on_cast" and ab.effect == "deal_damage" then
-                  targeted_ab = ab; break
-                end
-              end
+              local targeted_ab = find_targeted_spell_on_cast_ability(card_def)
               if targeted_ab then
                 local args = targeted_ab.effect_args or {}
-                local opponent_pi = 1 - pi
-                local op = self.game_state.players[opponent_pi + 1]
-                local eligible = {}
-                for si, entry in ipairs(op.board) do
-                  local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-                  if ok_d and edef then
-                    if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
-                      eligible[#eligible + 1] = si
-                    elseif args.target == "any" then
-                      eligible[#eligible + 1] = si
-                    end
-                  end
-                end
+                local opponent_pi, eligible = collect_targeted_spell_eligible_indices(self.game_state, pi, targeted_ab)
                 if #eligible == 0 then
                   sound.play("error")
                   self.hand_selected_index = nil
                   return
                 end
-                self.pending_spell_target = {
+                self:_set_prompt("spell_target", {
                   hand_index = idx,
                   effect_args = args,
                   eligible_player_index = opponent_pi,
                   eligible_board_indices = eligible,
-                }
+                })
                 sound.play("click")
                 return
               else
@@ -3288,12 +5583,12 @@ function GameState:mousepressed(x, y, button, istouch, presses)
     end
     -- Clear hand selection and pending state on turn change
     self.hand_selected_index = nil
-    self.pending_play_unit = nil
-    self.pending_sacrifice = nil
-    self.pending_upgrade = nil
-    self.pending_monument = nil
-    self.pending_graveyard_return = nil
-    self.pending_discard_draw = nil
+    self:_clear_prompt("play_unit")
+    self:_clear_prompt("sacrifice")
+    self:_clear_prompt("upgrade")
+    self:_clear_prompt("monument")
+    self:_clear_prompt("graveyard_return")
+    self:_clear_prompt("discard_draw")
     self:_clear_pending_attack_declarations()
     self:_clear_pending_attack_trigger_targets()
     self.pending_block_assignments = {}
@@ -3426,483 +5721,7 @@ function GameState:mousepressed(x, y, button, istouch, presses)
           sound.play("error")
           return
         end
-        -- Two-step flow for play_unit abilities
-        if ab.effect == "play_unit" then
-          local eligible = abilities.find_matching_hand_indices(p, ab.effect_args)
-          if #eligible == 0 then
-            sound.play("error")
-            return
-          elseif #eligible == 1 then
-            -- Only one match: auto-play immediately
-            local before_res = {}
-            for k, v in pairs(p.resources) do before_res[k] = v end
-            local result = self:dispatch_command({
-              type = "PLAY_UNIT_FROM_HAND",
-              player_index = pi,
-              source = { type = info.source, index = info.board_index },
-              ability_index = info.ability_index,
-              hand_index = eligible[1],
-              fast_ability = ab.fast or false,
-            })
-            if result.ok then
-              sound.play("coin")
-              local pi_panel = self:player_to_panel(pi)
-              local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-              for _, c in ipairs(ab.cost) do
-                if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
-                  local rb_x, rb_y = board.resource_bar_rect(pi_panel)
-                  popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
-                end
-              end
-              local card_id = result.meta and result.meta.card_id
-              local unit_name = "Unit"
-              if card_id then
-                local ok_d, udef = pcall(cards.get_card_def, card_id)
-                if ok_d and udef then unit_name = udef.name end
-              end
-              popup.create(unit_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.4, 0.9, 1.0 })
-              self.hand_selected_index = nil
-              self.pending_play_unit = nil
-              while #self.hand_y_offsets > #p.hand do
-                table.remove(self.hand_y_offsets)
-              end
-            end
-            return
-          else
-            -- Multiple matches: enter pending selection mode
-            self.pending_play_unit = {
-              source = { type = info.source, index = info.board_index },
-              ability_index = info.ability_index,
-              effect_args = ab.effect_args,
-              eligible_indices = eligible,
-              cost = ab.cost,
-              fast = ab.fast or false,
-            }
-            self.hand_selected_index = nil
-            sound.play("click")
-            return
-          end
-        end
-
-        -- Two-step flow for sacrifice_upgrade abilities (Fighting Pits)
-        if ab.effect == "sacrifice_upgrade" then
-          local warrior_indices = find_upgrade_board_sacrifice_indices(p, ab.effect_args)
-          local has_workers = (p.totalWorkers or 0) > 0
-          local can_sac_workers = has_workers and (#find_upgrade_hand_indices(p, ab.effect_args, 1) > 0)
-          if #warrior_indices == 0 and not can_sac_workers then
-            sound.play("error")
-            return
-          end
-          self.pending_upgrade = {
-            source = { type = info.source, index = info.board_index },
-            ability_index = info.ability_index,
-            effect_args = ab.effect_args,
-            stage = "sacrifice",
-            sacrifice_target = nil,
-            eligible_hand_indices = nil,
-            eligible_board_indices = warrior_indices,
-            eligible_worker_sacrifice = can_sac_workers,
-          }
-          self.hand_selected_index = nil
-          self.pending_play_unit = nil
-          self.pending_sacrifice = nil
-          sound.play("click")
-          return
-        end
-
-        -- Two-step flow for sacrifice_produce abilities
-        if ab.effect == "sacrifice_produce" then
-          local eligible = abilities.find_sacrifice_targets(p, ab.effect_args)
-          local has_worker_to_sacrifice = (p.totalWorkers or 0) > 0
-          if #eligible == 0 and not has_worker_to_sacrifice then
-            sound.play("error")
-            return
-          end
-          self.pending_sacrifice = {
-            source = { type = info.source, index = info.board_index },
-            ability_index = info.ability_index,
-            effect_args = ab.effect_args,
-            eligible_board_indices = eligible,
-          }
-          self.hand_selected_index = nil
-          self.pending_play_unit = nil
-          sound.play("click")
-          return
-        end
-
-        -- Two-step flow for deal_damage abilities (Alchemist)
-        if ab.effect == "deal_damage" then
-          local source_entry = info.source == "board" and p.board[info.board_index] or nil
-          if ab.rest and source_entry and source_entry.state and source_entry.state.rested then
-            sound.play("error")
-            return
-          end
-          if not abilities.can_pay_cost(p.resources, ab.cost) then
-            sound.play("error")
-            return
-          end
-          local source_key = (info.source == "board" and "board:" .. info.board_index or "base") .. ":" .. info.ability_index
-          local used_key = tostring(pi) .. ":" .. source_key
-          if ab.once_per_turn and self.game_state.activatedUsedThisTurn[used_key] then
-            sound.play("error")
-            return
-          end
-          local args = ab.effect_args or {}
-          local opponent_pi = 1 - pi
-          local op = self.game_state.players[opponent_pi + 1]
-          if args.target == "global" then
-            -- Can target any unit/structure on either board, and either base
-            local own_eligible, opp_eligible = {}, {}
-            for si, entry in ipairs(p.board) do
-              local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-              if ok_d and edef then own_eligible[#own_eligible + 1] = si end
-            end
-            for si, entry in ipairs(op.board) do
-              local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-              if ok_d and edef then opp_eligible[#opp_eligible + 1] = si end
-            end
-            self.pending_damage_target = {
-              source = { type = info.source, index = info.board_index },
-              ability_index = info.ability_index,
-              effect_args = args,
-              eligible_board_indices_by_player = { [pi] = own_eligible, [opponent_pi] = opp_eligible },
-              eligible_base_player_indices = { [pi] = true, [opponent_pi] = true },
-              fast = ab.fast or false,
-            }
-          else
-            local eligible = {}
-            for si, entry in ipairs(op.board) do
-              local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-              if ok_d and edef then
-                if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
-                  eligible[#eligible + 1] = si
-                elseif args.target == "any" then
-                  eligible[#eligible + 1] = si
-                end
-              end
-            end
-            if #eligible == 0 then
-              sound.play("error")
-              return
-            end
-            self.pending_damage_target = {
-              source = { type = info.source, index = info.board_index },
-              ability_index = info.ability_index,
-              effect_args = args,
-              eligible_player_index = opponent_pi,
-              eligible_board_indices = eligible,
-              fast = ab.fast or false,
-            }
-          end
-          sound.play("click")
-          return
-        end
-
-        -- Two-step flow for play_spell abilities (Alchemy Table)
-        if ab.effect == "play_spell" then
-          local eligible = abilities.find_matching_spell_hand_indices(p, ab.effect_args)
-          if #eligible == 0 then
-            sound.play("error")
-            return
-          end
-          local function do_cast_spell(hand_idx)
-            local spell_id = p.hand[hand_idx]
-            local spell_def = nil
-            if spell_id then
-              local ok_s, sd = pcall(cards.get_card_def, spell_id)
-              if ok_s and sd then spell_def = sd end
-            end
-            local targeted_ab = nil
-            if spell_def then
-              for _, sab in ipairs(spell_def.abilities or {}) do
-                if sab.trigger == "on_cast" and sab.effect == "deal_damage" then targeted_ab = sab; break end
-              end
-            end
-            if targeted_ab then
-              local args = targeted_ab.effect_args or {}
-              local opponent_pi = 1 - pi
-              local op = self.game_state.players[opponent_pi + 1]
-              local dmg_eligible = {}
-              for si, entry in ipairs(op.board) do
-                local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-                if ok_d and edef then
-                  if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
-                    dmg_eligible[#dmg_eligible + 1] = si
-                  elseif args.target == "any" then
-                    dmg_eligible[#dmg_eligible + 1] = si
-                  end
-                end
-              end
-              if #dmg_eligible == 0 then sound.play("error"); return end
-              self.pending_spell_target = {
-                hand_index = hand_idx,
-                effect_args = args,
-                eligible_player_index = opponent_pi,
-                eligible_board_indices = dmg_eligible,
-                via_ability_source = { type = info.source, index = info.board_index },
-                via_ability_ability_index = info.ability_index,
-                fast = ab.fast or false,
-              }
-              self.pending_play_spell = nil
-              sound.play("click")
-            else
-              local before_res = {}
-              for k, v in pairs(p.resources) do before_res[k] = v end
-              local result = self:dispatch_command({
-                type = "PLAY_SPELL_VIA_ABILITY",
-                player_index = pi,
-                source = { type = info.source, index = info.board_index },
-                ability_index = info.ability_index,
-                hand_index = hand_idx,
-                fast_ability = ab.fast or false,
-              })
-              if result.ok then
-                sound.play("coin")
-                local pi_panel = self:player_to_panel(pi)
-                local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-                for _, c in ipairs(ab.cost or {}) do
-                  if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
-                    local rb_x, rb_y = board.resource_bar_rect(pi_panel)
-                    popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
-                  end
-                end
-                local sname = spell_def and spell_def.name or "Spell"
-                popup.create(sname .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
-                self.pending_play_spell = nil
-                while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
-              else
-                sound.play("error")
-              end
-            end
-          end
-          if #eligible == 1 then
-            do_cast_spell(eligible[1])
-          else
-            self.pending_play_spell = {
-              source = { type = info.source, index = info.board_index },
-              ability_index = info.ability_index,
-              cost = ab.cost,
-              effect_args = ab.effect_args,
-              eligible_indices = eligible,
-              fast = ab.fast or false,
-            }
-            self.hand_selected_index = nil
-            sound.play("click")
-          end
-          return
-        end
-
-        -- Two-step flow for discard_draw abilities (Hospital)
-        if ab.effect == "discard_draw" then
-          local args = ab.effect_args or {}
-          local required_discard = args.discard or 2
-          if #p.hand < required_discard then
-            sound.play("error")
-            return
-          end
-          self.pending_discard_draw = {
-            source = { type = info.source, index = info.board_index },
-            ability_index = info.ability_index,
-            required_count = required_discard,
-            draw_count = args.draw or 1,
-            selected_set = {},
-          }
-          self.hand_selected_index = nil
-          sound.play("click")
-          return
-        end
-
-        -- Two-step flow for deal_damage_x abilities (Flying Machine)
-        if ab.effect == "deal_damage_x" then
-          local source_entry = info.source == "board" and p.board[info.board_index] or nil
-          if ab.rest and source_entry and source_entry.state and source_entry.state.rested then
-            sound.play("error")
-            return
-          end
-          local args = ab.effect_args or {}
-          local resource = args.resource or "stone"
-          local available = p.resources[resource] or 0
-          if available < 1 then
-            sound.play("error")
-            return
-          end
-          local opponent_pi = 1 - pi
-          local op = self.game_state.players[opponent_pi + 1]
-          local eligible = {}
-          for si, entry in ipairs(op.board) do
-            local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-            if ok_d and edef then
-              if args.target == "unit" and (edef.kind == "Unit" or edef.kind == "Worker") then
-                eligible[#eligible + 1] = si
-              elseif args.target == "any" then
-                eligible[#eligible + 1] = si
-              end
-            end
-          end
-          if #eligible == 0 then
-            sound.play("error")
-            return
-          end
-          self.pending_damage_x = {
-            source = { type = info.source, index = info.board_index },
-            ability_index = info.ability_index,
-            effect_args = args,
-            eligible_player_index = opponent_pi,
-            eligible_board_indices = eligible,
-            x_amount = available,
-            max_x = available,
-            fast = ab.fast or false,
-          }
-          sound.play("click")
-          return
-        end
-
-        -- Two-step flow for place_counter_on_target abilities (Prince of Reason)
-        if ab.effect == "place_counter_on_target" then
-          local source_entry = info.source == "board" and p.board[info.board_index] or nil
-          if ab.rest and source_entry and source_entry.state and source_entry.state.rested then
-            sound.play("error")
-            return
-          end
-          if not abilities.can_pay_cost(p.resources, ab.cost) then
-            sound.play("error")
-            return
-          end
-          -- Collect eligible ally units/workers
-          local eligible = {}
-          for si, entry in ipairs(p.board) do
-            local ok_d, edef = pcall(cards.get_card_def, entry.card_id)
-            if ok_d and edef and (edef.kind == "Unit" or edef.kind == "Worker") then
-              eligible[#eligible + 1] = si
-            end
-          end
-          if #eligible == 0 then
-            sound.play("error")
-            return
-          end
-          self.pending_counter_placement = {
-            source = { type = info.source, index = info.board_index },
-            ability_index = info.ability_index,
-            effect_args = ab.effect_args or {},
-            eligible_board_indices = eligible,
-            fast = ab.fast or false,
-          }
-          sound.play("click")
-          return
-        end
-
-        -- Two-step flow for return_from_graveyard abilities (Skelieutenant)
-        if ab.effect == "return_from_graveyard" then
-          if not abilities.can_pay_cost(p.resources, ab.cost) then
-            sound.play("error")
-            return
-          end
-          local source_key = (info.source == "board" and "board:" .. info.board_index or "base") .. ":" .. info.ability_index
-          local used_key = tostring(pi) .. ":" .. source_key
-          if ab.once_per_turn and self.game_state.activatedUsedThisTurn[used_key] then
-            sound.play("error")
-            return
-          end
-          local args = ab.effect_args or {}
-          local cards_for_selection = graveyard_cards_for_selection(p, args)
-          local has_eligible = false
-          for _, c in ipairs(cards_for_selection) do
-            if c.graveyard_eligible then has_eligible = true; break end
-          end
-          if not has_eligible then
-            sound.play("error")
-            return
-          end
-          self.pending_graveyard_return = {
-            source = { type = info.source, index = info.board_index },
-            ability_index = info.ability_index,
-            max_count = args.count or 1,
-            effect_args = args,
-            selected_graveyard_indices = {},
-          }
-          local pending_ref = self.pending_graveyard_return
-          local faction_info = factions_data[p.faction]
-          local accent = faction_info and faction_info.color or { 0.5, 0.5, 0.7 }
-          local viewer_title = (args.return_to == "hand") and "Return to Hand" or "Return from Graveyard"
-          local viewer_hint = "Select up to " .. (args.count or 1) .. ((args.return_to == "hand") and " card" or " Undead") .. ((args.count or 1) > 1 and "s" or "")
-          deck_viewer.open({
-            title = viewer_title,
-            hint = viewer_hint,
-            cards = cards_for_selection,
-            accent = accent,
-            can_click_fn = function(def) return def.graveyard_eligible == true end,
-            card_overlay_fn = function(def, cx, cy, cw, ch)
-              if not def.graveyard_index then return end
-              -- Dim ineligible cards
-              if not def.graveyard_eligible then
-                love.graphics.setColor(0, 0, 0, 0.55)
-                love.graphics.rectangle("fill", cx, cy, cw, ch, 5, 5)
-                return
-              end
-              -- Highlight selected cards
-              local selected = pending_ref.selected_graveyard_indices
-              for _, gi in ipairs(selected) do
-                if gi == def.graveyard_index then
-                  love.graphics.setColor(0.2, 0.9, 0.35, 0.35)
-                  love.graphics.rectangle("fill", cx, cy, cw, ch, 5, 5)
-                  love.graphics.setColor(0.2, 0.9, 0.35, 0.85)
-                  love.graphics.setLineWidth(2)
-                  love.graphics.rectangle("line", cx - 2, cy - 2, cw + 4, ch + 4, 7, 7)
-                  love.graphics.setLineWidth(1)
-                  return
-                end
-              end
-            end,
-            on_click = function(def)
-              if not def.graveyard_eligible or not def.graveyard_index then return end
-              local sel = pending_ref.selected_graveyard_indices
-              -- Toggle: deselect if already selected
-              for i, gi in ipairs(sel) do
-                if gi == def.graveyard_index then
-                  table.remove(sel, i)
-                  sound.play("click")
-                  return
-                end
-              end
-              -- Add if under max
-              if #sel < pending_ref.max_count then
-                sel[#sel + 1] = def.graveyard_index
-                sound.play("click")
-              else
-                sound.play("error")
-              end
-            end,
-            confirm_label = (args.return_to == "hand") and "Return to Hand" or "Summon Selected",
-            confirm_enabled_fn = function()
-              return #pending_ref.selected_graveyard_indices > 0
-            end,
-            confirm_fn = function()
-              local selected = pending_ref.selected_graveyard_indices
-              if #selected == 0 then return end
-              local result = self:dispatch_command({
-                type = "RETURN_FROM_GRAVEYARD",
-                player_index = self.local_player_index,
-                source = pending_ref.source,
-                ability_index = pending_ref.ability_index,
-                selected_graveyard_indices = selected,
-              })
-              if result.ok then
-                sound.play("coin")
-                local pi_panel = self:player_to_panel(self.local_player_index)
-                local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-                local count = result.meta and result.meta.returned_count or 0
-                local msg = (args.return_to == "hand") and (count .. " card" .. (count == 1 and "" or "s") .. " returned to hand!") or (count .. " Undead summoned!")
-                popup.create(msg, px_b + pw_b / 2, py_b + ph_b - 80, { 0.55, 0.9, 0.45 })
-              else
-                sound.play("error")
-              end
-              deck_viewer.close()
-              self.show_blueprint_for_player = nil
-              self.pending_graveyard_return = nil
-            end,
-          })
-          self.show_blueprint_for_player = nil
-          sound.play("click")
+        if self:_try_start_activated_prompt(pi, p, info, ab) then
           return
         end
 
@@ -4082,6 +5901,13 @@ end
 function GameState:mousereleased(x, y, button, istouch, presses)
   if button ~= 1 then return end
   self.mouse_down = false
+  if self.in_game_settings_open then
+    if self.in_game_settings_dragging_slider then
+      self.in_game_settings_dragging_slider = false
+      self:_save_in_game_settings_if_dirty()
+    end
+    return
+  end
   if self.game_state and self.game_state.is_terminal then
     self.drag = nil
     return
@@ -4391,6 +6217,15 @@ function GameState:mousereleased(x, y, button, istouch, presses)
 end
 
 function GameState:mousemoved(x, y, dx, dy, istouch)
+  if self.in_game_settings_open then
+    if self.in_game_settings_dragging_slider then
+      local layout = self:_in_game_settings_layout()
+      self:_set_in_game_settings_volume_from_mouse_x(x, layout)
+    end
+    self.hover = nil
+    self.hand_hover_index = nil
+    return
+  end
   -- Update hover state for UI highlights
   local kind, pi, idx = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, {
     pending_attack_declarations = self.pending_attack_declarations,
@@ -4412,6 +6247,14 @@ function GameState:mousemoved(x, y, dx, dy, istouch)
 end
 
 function GameState:keypressed(key, scancode, isrepeat)
+  if self.in_game_settings_open then
+    if key == "escape" then
+      self:_close_in_game_settings()
+      sound.play("click")
+    end
+    return
+  end
+
   if key == "f8" then
     local pi = self.local_player_index
     local p = self.game_state.players[pi + 1]
@@ -4443,39 +6286,13 @@ function GameState:keypressed(key, scancode, isrepeat)
     deck_viewer.keypressed(key)
     if was_open and not deck_viewer.is_open() then
       self.show_blueprint_for_player = nil
-      self.pending_graveyard_return = nil
+      self:_clear_prompt("graveyard_return")
     end
     return
   end
-  -- Escape to cancel pending selection, deselect hand card, or return to menu
+  -- Escape to cancel pending selection, deselect hand card, or open in-game settings.
   if key == "escape" then
-    if self.pending_play_unit then
-      self.pending_play_unit = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_sacrifice then
-      self.pending_sacrifice = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_upgrade then
-      self.pending_upgrade = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_hand_sacrifice then
-      self.pending_hand_sacrifice = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_monument then
-      self.pending_monument = nil
-      sound.play("click")
-      return
-    end
-    if self.pending_discard_draw then
-      self.pending_discard_draw = nil
+    if self:_cancel_top_prompt_for_context("escape") then
       sound.play("click")
       return
     end
@@ -4488,15 +6305,17 @@ function GameState:keypressed(key, scancode, isrepeat)
       self.hand_selected_index = nil
       return
     end
-    if self.return_to_menu then
-      if self.server_cleanup then
-        pcall(self.server_cleanup)
-        self.server_step = nil
-        self.server_cleanup = nil
-      end
-      self.return_to_menu()
+    if #self.pending_attack_declarations > 0 then
+      self:_clear_pending_attack_declarations()
+      sound.play("click")
       return
     end
+    if self:_has_in_game_settings_blocker() then
+      return
+    end
+    self:_open_in_game_settings()
+    sound.play("click")
+    return
   end
 end
 

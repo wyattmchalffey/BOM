@@ -1,5 +1,6 @@
 local cards = require("src.game.cards")
 local abilities = require("src.game.abilities")
+local game_events = require("src.game.events")
 local unit_stats = require("src.game.unit_stats")
 
 local combat = {}
@@ -7,12 +8,23 @@ local combat = {}
 local function has_keyword(card_def, needle, state)
   if type(state) == "table" then
     local temp = state.temp_keywords
+    local perm = state.perm_keywords
     local want_state = string.lower(needle)
     if type(temp) == "table" then
       if temp[want_state] == true or temp[needle] == true then
         return true
       end
       for _, kw in pairs(temp) do
+        if type(kw) == "string" and string.lower(kw) == want_state then
+          return true
+        end
+      end
+    end
+    if type(perm) == "table" then
+      if perm[want_state] == true or perm[needle] == true then
+        return true
+      end
+      for _, kw in pairs(perm) do
         if type(kw) == "string" and string.lower(kw) == want_state then
           return true
         end
@@ -64,32 +76,13 @@ local function copy_table(t)
   return out
 end
 
-local function is_undead(card_def)
-  return has_subtype(card_def, "Undead")
-end
-
 local function fire_on_ally_death_triggers(player, g, dead_card_def)
-  for _, entry in ipairs(player.board) do
-    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
-    if ok and card_def and card_def.abilities then
-      for _, ab in ipairs(card_def.abilities) do
-        if ab.type == "triggered" and ab.trigger == "on_ally_death" then
-          local args = ab.effect_args or {}
-          local blocked = false
-          if args.condition == "non_undead" and is_undead(dead_card_def) then
-            blocked = true
-          elseif args.condition == "non_undead_orc" then
-            if is_undead(dead_card_def) or (dead_card_def and dead_card_def.faction ~= "Orc") then
-              blocked = true
-            end
-          end
-          if not blocked then
-            abilities.resolve(ab, player, g, { source_entry = entry })
-          end
-        end
-      end
-    end
-  end
+  local _, _, aggregate = game_events.emit(g, {
+    type = "ally_died",
+    player = player,
+    dead_card_def = dead_card_def,
+  })
+  return aggregate
 end
 
 local function destroy_board_entry(player, g, board_index)
@@ -114,15 +107,12 @@ local function destroy_board_entry(player, g, board_index)
   end
 
   local t_ok, t_def = pcall(cards.get_card_def, target.card_id)
-  if t_ok and t_def and t_def.abilities then
-    for _, ab in ipairs(t_def.abilities) do
-      if ab.type == "triggered" and ab.trigger == "on_destroyed" then
-        abilities.resolve(ab, player, g)
-      end
-    end
-  end
   if t_ok and t_def then
-    fire_on_ally_death_triggers(player, g, t_def)
+    game_events.emit(g, {
+      type = "card_destroyed",
+      player = player,
+      card_def = t_def,
+    })
   end
 
   player.graveyard[#player.graveyard + 1] = { card_id = target.card_id, state = copy_table(target.state or {}) }
@@ -391,6 +381,25 @@ local function shift_defender_indices_after_destroy(combat_state, removed_index)
   end
 end
 
+local function resolve_on_base_damage_triggers(g, owner_player, owner_index, opponent_player, source_damage)
+  game_events.emit(g, {
+    type = "base_damaged",
+    owner_player = owner_player,
+    owner_player_index = owner_index,
+    opponent_player = opponent_player,
+    damage = source_damage,
+  })
+end
+
+local function resolve_on_mass_attack_post_combat_triggers(g, c, atk_player, def_player)
+  game_events.emit(g, {
+    type = "mass_attack_post_combat",
+    combat_state = c,
+    attacker_player = atk_player,
+    defender_player = def_player,
+  })
+end
+
 function combat.declare_attackers(g, player_index, declarations)
   if g.phase ~= "MAIN" then return false, "wrong_phase" end
   if player_index ~= g.activePlayer then return false, "not_active_player" end
@@ -423,7 +432,7 @@ function combat.declare_attackers(g, player_index, declarations)
     if not card_def or (card_def.kind ~= "Unit" and card_def.kind ~= "Worker") then
       return false, "attacker_not_unit"
     end
-    if unit_stats.effective_attack(card_def, entry.state) <= 0 then
+    if unit_stats.effective_attack(card_def, entry.state, g, player_index) <= 0 then
       return false, "attacker_has_no_attack"
     end
 
@@ -616,6 +625,15 @@ function combat.assign_attack_trigger_targets(g, player_index, targets)
               source_entry = src_entry,
               attacker_board_index = trigger.attacker_board_index,
             })
+          elseif trigger.effect == "buff_warriors_per_scholar" then
+            abilities.resolve({
+              effect = "buff_warriors_per_scholar",
+              effect_args = args,
+            }, atk_player, g, {
+              source_entry = src_entry,
+              attacker_board_index = trigger.attacker_board_index,
+              combat_state = c,
+            })
           elseif trigger.effect == "buff_ally_attacker" then
             local buff_atk = args.attack or 0
             local buff_hp = args.health or 0
@@ -648,7 +666,7 @@ function combat.assign_attack_trigger_targets(g, player_index, targets)
   for i, entry in ipairs(def_player.board) do
     local def = cards.get_card_def(entry.card_id)
     local st = ensure_state(entry)
-    local lethal_by_damage = (def.health ~= nil) and (unit_stats.effective_health(def, st) - (st.damage or 0) <= 0)
+    local lethal_by_damage = (def.health ~= nil) and (unit_stats.effective_health(def, st, g, c.defender) - (st.damage or 0) <= 0)
     if st.marked_for_death or lethal_by_damage then
       dead_def[#dead_def + 1] = i
     end
@@ -801,7 +819,7 @@ function combat.resolve(g)
           local queue_for_attacker = atk_first[attacker.board_index] and first_q or normal_q
 
           if #blockers > 0 then
-            local remaining_atk = unit_stats.effective_attack(atk_def, atk_state)
+            local remaining_atk = unit_stats.effective_attack(atk_def, atk_state, g, c.attacker)
             for _, bi in ipairs(blockers) do
               local b_entry = def_player.board[bi]
               if b_entry then
@@ -811,9 +829,9 @@ function combat.resolve(g)
                 if has_keyword(b_def, "crew", b_state) and not b_state.crewed then
                   -- crewless blocker deals no combat damage
                 else
-                  queue_damage(b_queue, "atk", attacker.board_index, unit_stats.effective_attack(b_def, b_state), b_def, b_state, "def", bi)
+                  queue_damage(b_queue, "atk", attacker.board_index, unit_stats.effective_attack(b_def, b_state, g, c.defender), b_def, b_state, "def", bi)
                 end
-                local bhp = unit_stats.effective_health(b_def, b_state)
+                local bhp = unit_stats.effective_health(b_def, b_state, g, c.defender)
                 if has_keyword(atk_def, "deathtouch", atk_state) then bhp = 1 end
                 local to_blocker = math.min(remaining_atk, bhp)
                 queue_damage(queue_for_attacker, "def", bi, to_blocker, atk_def, atk_state, "atk", attacker.board_index)
@@ -824,7 +842,7 @@ function combat.resolve(g)
             if remaining_atk > 0 and has_keyword(atk_def, "trample", atk_state) then
               if attacker.target.type == "base" then
                 if atk_first[attacker.board_index] then
-                  base_damage_first = base_damage_first + remaining_atk
+                base_damage_first = base_damage_first + remaining_atk
                 else
                   base_damage_normal[#base_damage_normal + 1] = { source_index = attacker.board_index, amount = remaining_atk }
                 end
@@ -835,20 +853,20 @@ function combat.resolve(g)
           else
             if attacker.target.type == "base" then
               if atk_first[attacker.board_index] then
-                base_damage_first = base_damage_first + unit_stats.effective_attack(atk_def, atk_state)
+                base_damage_first = base_damage_first + unit_stats.effective_attack(atk_def, atk_state, g, c.attacker)
               else
-                base_damage_normal[#base_damage_normal + 1] = { source_index = attacker.board_index, amount = unit_stats.effective_attack(atk_def, atk_state) }
+                base_damage_normal[#base_damage_normal + 1] = { source_index = attacker.board_index, amount = unit_stats.effective_attack(atk_def, atk_state, g, c.attacker) }
               end
             elseif attacker.target.type == "board" then
               local te = def_player.board[attacker.target.index]
               if te then
                 local tdef = cards.get_card_def(te.card_id)
-                queue_damage(queue_for_attacker, "def", attacker.target.index, unit_stats.effective_attack(atk_def, atk_state), atk_def, atk_state, "atk", attacker.board_index)
+                queue_damage(queue_for_attacker, "def", attacker.target.index, unit_stats.effective_attack(atk_def, atk_state, g, c.attacker), atk_def, atk_state, "atk", attacker.board_index)
                 if tdef.kind == "Unit" or tdef.kind == "Worker" then
                   local tstate = ensure_state(te)
                   if not (has_keyword(tdef, "crew", tstate) and not tstate.crewed) then
                     local t_queue = def_first[attacker.target.index] and first_q or normal_q
-                    queue_damage(t_queue, "atk", attacker.board_index, unit_stats.effective_attack(tdef, tstate), tdef, tstate, "def", attacker.target.index)
+                    queue_damage(t_queue, "atk", attacker.board_index, unit_stats.effective_attack(tdef, tstate, g, c.defender), tdef, tstate, "def", attacker.target.index)
                   end
                 end
               end
@@ -861,12 +879,15 @@ function combat.resolve(g)
 
   apply_damage_queue(g, atk_player, def_player, first_q)
   def_player.life = math.max(0, (def_player.life or 0) - base_damage_first)
+  if base_damage_first > 0 then
+    resolve_on_base_damage_triggers(g, atk_player, c.attacker, def_player, base_damage_first)
+  end
 
   local dead_atk, dead_def = {}, {}
   for i, e in ipairs(atk_player.board) do
     local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    local lethal_by_damage = (d.health ~= nil) and (unit_stats.effective_health(d, st) - (st.damage or 0) <= 0)
+    local lethal_by_damage = (d.health ~= nil) and (unit_stats.effective_health(d, st, g, c.attacker) - (st.damage or 0) <= 0)
     if st.marked_for_death or lethal_by_damage then
       dead_atk[#dead_atk + 1] = i
     end
@@ -874,7 +895,7 @@ function combat.resolve(g)
   for i, e in ipairs(def_player.board) do
     local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    local lethal_by_damage = (d.health ~= nil) and (unit_stats.effective_health(d, st) - (st.damage or 0) <= 0)
+    local lethal_by_damage = (d.health ~= nil) and (unit_stats.effective_health(d, st, g, c.defender) - (st.damage or 0) <= 0)
     if st.marked_for_death or lethal_by_damage then
       dead_def[#dead_def + 1] = i
     end
@@ -904,12 +925,15 @@ function combat.resolve(g)
     total_base_normal = total_base_normal + entry.amount
   end
   def_player.life = math.max(0, (def_player.life or 0) - total_base_normal)
+  if total_base_normal > 0 then
+    resolve_on_base_damage_triggers(g, atk_player, c.attacker, def_player, total_base_normal)
+  end
 
   dead_atk, dead_def = {}, {}
   for i, e in ipairs(atk_player.board) do
     local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    local lethal_by_damage = (d.health ~= nil) and (unit_stats.effective_health(d, st) - (st.damage or 0) <= 0)
+    local lethal_by_damage = (d.health ~= nil) and (unit_stats.effective_health(d, st, g, c.attacker) - (st.damage or 0) <= 0)
     if st.marked_for_death or lethal_by_damage then
       dead_atk[#dead_atk + 1] = i
     end
@@ -917,13 +941,15 @@ function combat.resolve(g)
   for i, e in ipairs(def_player.board) do
     local d = cards.get_card_def(e.card_id)
     local st = ensure_state(e)
-    local lethal_by_damage = (d.health ~= nil) and (unit_stats.effective_health(d, st) - (st.damage or 0) <= 0)
+    local lethal_by_damage = (d.health ~= nil) and (unit_stats.effective_health(d, st, g, c.defender) - (st.damage or 0) <= 0)
     if st.marked_for_death or lethal_by_damage then
       dead_def[#dead_def + 1] = i
     end
   end
   for i = #dead_atk, 1, -1 do destroy_board_entry(atk_player, g, dead_atk[i]) end
   for i = #dead_def, 1, -1 do destroy_board_entry(def_player, g, dead_def[i]) end
+
+  resolve_on_mass_attack_post_combat_triggers(g, c, atk_player, def_player)
 
   for _, p in ipairs({ atk_player, def_player }) do
     for _, e in ipairs(p.board) do

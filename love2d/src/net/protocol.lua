@@ -4,7 +4,7 @@
 
 local protocol = {}
 
-protocol.VERSION = 1
+protocol.VERSION = 2
 
 local function fail(reason, meta)
   return { ok = false, reason = reason, meta = meta }

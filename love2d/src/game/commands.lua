@@ -8,6 +8,7 @@ local cards = require("src.game.cards")
 local abilities = require("src.game.abilities")
 local combat = require("src.game.combat")
 local game_state = require("src.game.state")
+local spell_cast = require("src.game.spell_cast")
 local unit_stats = require("src.game.unit_stats")
 
 local commands = {}
@@ -28,6 +29,8 @@ local function ok(meta, events)
   return { ok = true, reason = "ok", meta = meta, events = events or {} }
 end
 
+local append_resolve_result_events
+
 local function finalize_terminal_state(g, events)
   local terminal = game_state.compute_terminal_result(g)
   if not terminal then
@@ -47,7 +50,18 @@ end
 
 local function succeed(g, meta, events)
   local out_events = events or {}
+  if type(meta) == "table" and type(append_resolve_result_events) == "function" then
+    append_resolve_result_events(out_events, meta)
+  end
   finalize_terminal_state(g, out_events)
+
+  -- Keep the centralized derived/continuous stat cache warm after successful
+  -- state mutations; lazy signature checks remain as a safety net during
+  -- multi-step command resolution/combat.
+  if g then
+    g._derived_stats_cache_token = (g._derived_stats_cache_token or 0) + 1
+    unit_stats.recompute_derived_stats(g)
+  end
 
   if g and g.is_terminal then
     meta = meta or {}
@@ -106,7 +120,54 @@ local function fast_in_blocker_window(g, player_index, command)
     and (player_index == c.attacker or player_index == c.defender)
 end
 
-local function can_activate(g, player_index, card_def, source_key, ability_index)
+append_resolve_result_events = function(out_events, meta)
+  if type(out_events) ~= "table" or type(meta) ~= "table" then return end
+  local resolve_result = meta.resolve_result
+  if type(resolve_result) ~= "table" or type(resolve_result.events) ~= "table" then return end
+
+  for _, ev in ipairs(resolve_result.events) do
+    if type(ev) == "table" and type(ev.type) == "string" then
+      out_events[#out_events + 1] = {
+        type = "resolve_effect_event",
+        effect = resolve_result.effect,
+        resolve_event_type = ev.type,
+        resolve_event = copy_table(ev),
+        source_type = meta.source_type,
+        ability_index = meta.ability_index,
+        card_id = meta.card_id,
+      }
+    end
+  end
+end
+
+local function synthetic_resolve_result(effect, source, event_list)
+  if type(effect) ~= "string" then return nil end
+  local result = abilities.new_resolve_result({ effect = effect }, { source = source })
+  result.handler_found = true
+  result.resolved = true
+  for _, ev in ipairs(event_list or {}) do
+    if type(ev) == "table" then
+      abilities.result_add_event(result, copy_table(ev))
+    end
+  end
+  return result
+end
+
+local function activated_ability_used_this_turn(g, player_index, source_key, source, ability_index)
+  return abilities.is_activated_ability_used_this_turn(g, player_index, source_key, source, ability_index)
+end
+
+local function set_activated_ability_used_this_turn(g, player_index, source_key, source, ability_index, used)
+  abilities.set_activated_ability_used_this_turn(g, player_index, source_key, source, ability_index, used)
+end
+
+local function append_board_entry(g, player, entry)
+  abilities.ensure_board_entry_instance_id(g, entry)
+  player.board[#player.board + 1] = entry
+  return entry
+end
+
+local function can_activate(g, player_index, card_def, source_key, ability_index, source)
   if not card_def or not card_def.abilities then return false end
 
   local ab = card_def.abilities[ability_index]
@@ -123,13 +184,260 @@ local function can_activate(g, player_index, card_def, source_key, ability_index
     if player_index ~= g.activePlayer then return false end
   end
 
-  local key = tostring(player_index) .. ":" .. source_key
-  if ab.once_per_turn and g.activatedUsedThisTurn[key] then return false end
+  if ab.once_per_turn and activated_ability_used_this_turn(g, player_index, source_key, source, ability_index) then
+    return false
+  end
 
   local p = g.players[player_index + 1]
-  if not abilities.can_pay_cost(p.resources, ab.cost) then return false end
+  local source_entry = nil
+  if type(source) == "table" and source.type == "board" and type(source.index) == "number" then
+    source_entry = p.board[source.index]
+  end
+  local can_pay, _ = abilities.can_pay_activated_ability_costs(p.resources, ab, {
+    require_variable_min = true,
+    source_entry = source_entry,
+  })
+  if not can_pay then return false end
+
+  local sel_info = abilities.collect_activated_selection_cost_targets(g, player_index, ab)
+  if sel_info and sel_info.requires_selection and not sel_info.has_any_target then
+    return false
+  end
 
   return true
+end
+
+local function resolve_activated_source_def(player, source, ability_index)
+  if type(player) ~= "table" or type(source) ~= "table" then
+    return nil, nil, nil, "invalid_source_type"
+  end
+
+  if source.type == "base" then
+    return cards.get_card_def(player.baseId), "base:" .. ability_index, nil, nil
+  end
+
+  if source.type == "board" then
+    local entry = player.board[source.index]
+    if not entry then
+      return nil, nil, nil, "missing_board_entry"
+    end
+    return cards.get_card_def(entry.card_id), "board:" .. source.index .. ":" .. ability_index, entry, nil
+  end
+
+  return nil, nil, nil, "invalid_source_type"
+end
+
+local function ability_effect_matches(allowed_effects, effect)
+  if type(allowed_effects) == "string" then
+    return effect == allowed_effects
+  end
+  if type(allowed_effects) ~= "table" then
+    return true
+  end
+  for _, allowed in ipairs(allowed_effects) do
+    if effect == allowed then return true end
+  end
+  return false
+end
+
+local function resolve_command_activated_ability(g, player_index, player, source, ability_index, opts)
+  opts = opts or {}
+
+  if opts.require_board_source and (type(source) ~= "table" or source.type ~= "board") then
+    return nil, "invalid_source_type"
+  end
+
+  local card_def, source_key, source_entry, source_err =
+    resolve_activated_source_def(player, source, ability_index)
+  if source_err then
+    return nil, source_err
+  end
+  if not card_def or not card_def.abilities then
+    return nil, "no_abilities"
+  end
+
+  local ab = card_def.abilities[ability_index]
+  if not ab or ab.type ~= "activated" then
+    return nil, (opts.invalid_effect_reason or "not_activated_ability")
+  end
+
+  if opts.allowed_effects and not ability_effect_matches(opts.allowed_effects, ab.effect) then
+    return nil, (opts.invalid_effect_reason or "wrong_ability_effect")
+  end
+
+  if opts.require_can_activate and not can_activate(g, player_index, card_def, source_key, ability_index, source) then
+    return nil, "ability_not_activatable"
+  end
+
+  return {
+    card_def = card_def,
+    source_key = source_key,
+    source_entry = source_entry,
+    ability = ab,
+  }, nil
+end
+
+local function resolve_command_board_activated_ability(g, player_index, player, source, ability_index, opts)
+  local inner_opts = copy_table(opts or {})
+  inner_opts.require_board_source = true
+  local actx, reason = resolve_command_activated_ability(g, player_index, player, source, ability_index, inner_opts)
+  if not actx and reason == "missing_board_entry" then
+    return nil, (inner_opts.missing_board_entry_reason or "missing_source_entry")
+  end
+  return actx, reason
+end
+
+local function precheck_command_activated_costs(g, player_index, player, source, ability_index, source_key, ability, cost_opts)
+  if ability.once_per_turn and activated_ability_used_this_turn(g, player_index, source_key, source, ability_index) then
+    return false, "ability_already_used"
+  end
+  local can_pay_ab, can_pay_reason = abilities.can_pay_activated_ability_costs(
+    player.resources, ability, cost_opts or {}
+  )
+  if not can_pay_ab then
+    return false, can_pay_reason or "insufficient_resources"
+  end
+  return true, nil
+end
+
+local function pay_and_mark_command_activated_costs(g, player_index, player, source, ability_index, source_key, ability, cost_opts)
+  local paid_ab, pay_reason = abilities.pay_activated_ability_costs(player.resources, ability, cost_opts or {})
+  if not paid_ab then
+    return false, pay_reason or "insufficient_resources"
+  end
+  if ability.once_per_turn then
+    set_activated_ability_used_this_turn(g, player_index, source_key, source, ability_index, true)
+  end
+  return true, nil
+end
+
+local function succeed_activated_command(g, player_index, source, ability_index, opts)
+  opts = opts or {}
+  local meta = copy_table(opts.meta or {})
+  if opts.include_source_meta ~= false and type(source) == "table" and source.type ~= nil then
+    meta.source_type = source.type
+  end
+  if opts.include_ability_meta ~= false and type(ability_index) == "number" then
+    meta.ability_index = ability_index
+  end
+
+  local event = copy_table(opts.event or {})
+  if type(opts.event_type) == "string" then
+    event.type = opts.event_type
+  end
+  event.player_index = player_index
+  if opts.include_source_event and type(source) == "table" and source.type ~= nil then
+    event.source_type = source.type
+  end
+  if opts.include_ability_event and type(ability_index) == "number" then
+    event.ability_index = ability_index
+  end
+
+  return succeed(g, meta, { event })
+end
+
+local function list_has_number(values, wanted)
+  for _, value in ipairs(values or {}) do
+    if value == wanted then return true end
+  end
+  return false
+end
+
+local function load_hand_card_def(player, hand_index, invalid_reason)
+  if type(player) ~= "table" or type(player.hand) ~= "table" then
+    return nil, nil, "invalid_player"
+  end
+  if type(hand_index) ~= "number" or hand_index < 1 or hand_index > #player.hand then
+    return nil, nil, "invalid_hand_index"
+  end
+  local card_id = player.hand[hand_index]
+  local ok, card_def = pcall(cards.get_card_def, card_id)
+  if not ok or not card_def then
+    return nil, nil, invalid_reason or "invalid_card"
+  end
+  return card_id, card_def, nil
+end
+
+local function validate_direct_spell_hand_selection(player, hand_index)
+  local card_id, card_def, err = load_hand_card_def(player, hand_index, "invalid_card")
+  if err then return nil, nil, err end
+  if card_def.kind ~= "Spell" then
+    return nil, nil, "not_a_spell"
+  end
+  return card_id, card_def, nil
+end
+
+local function validate_ability_spell_hand_selection(player, hand_index, effect_args)
+  if type(player) ~= "table" or type(player.hand) ~= "table" then
+    return nil, nil, "invalid_player"
+  end
+  if type(hand_index) ~= "number" or hand_index < 1 or hand_index > #player.hand then
+    return nil, nil, "invalid_hand_index"
+  end
+  local eligible = abilities.find_matching_spell_hand_indices(player, effect_args)
+  if not list_has_number(eligible, hand_index) then
+    return nil, nil, "hand_card_not_eligible"
+  end
+  local card_id, card_def, err = load_hand_card_def(player, hand_index, "invalid_spell_card")
+  if err then return nil, nil, err end
+  if card_def.kind ~= "Spell" then
+    return nil, nil, "invalid_spell_card"
+  end
+  return card_id, card_def, nil
+end
+
+local function execute_validated_spell_cast_command(g, opts)
+  opts = opts or {}
+  local pi = opts.player_index
+  local p = opts.player
+  local spell_id = opts.spell_id
+  local spell_def = opts.spell_def
+  local target_player_index = opts.target_player_index
+  local target_board_index = opts.target_board_index
+  local cast_action = opts.cast_action
+
+  if type(pi) ~= "number" or type(p) ~= "table" or type(spell_def) ~= "table" or type(cast_action) ~= "function" then
+    return fail("invalid_spell_cast_command")
+  end
+
+  local cast_ok, cast_reason, cast_info, failure_stage = spell_cast.perform_validated_cast(g, {
+    caster_player = p,
+    caster_index = pi,
+    spell_def = spell_def,
+    target_player_index = target_player_index,
+    target_board_index = target_board_index,
+    cast_action = cast_action,
+  })
+  if not cast_ok then
+    if failure_stage == "target_validation" then
+      return fail(cast_reason or opts.invalid_target_reason or "invalid_spell_target")
+    end
+    return fail(cast_reason or opts.cast_fail_reason or "spell_cast_failed")
+  end
+
+  local resolve_result = type(cast_info) == "table" and cast_info.resolve_result or nil
+  local cast_spell_id = type(cast_info) == "table" and cast_info.spell_id or spell_id
+
+  local meta = type(opts.success_meta) == "table" and copy_table(opts.success_meta) or {}
+  meta.card_id = cast_spell_id
+  meta.resolve_result = resolve_result
+
+  local event = type(opts.success_event) == "table" and copy_table(opts.success_event) or {}
+  event.type = event.type or "spell_cast"
+  event.player_index = pi
+  event.card_id = cast_spell_id
+
+  if type(opts.source) == "table" and type(opts.ability_index) == "number" then
+    return succeed_activated_command(g, pi, opts.source, opts.ability_index, {
+      meta = meta,
+      event = event,
+      event_type = event.type,
+      include_source_event = opts.include_source_event == true,
+      include_ability_event = opts.include_ability_event == true,
+    })
+  end
+
+  return succeed(g, meta, { event })
 end
 
 function commands.execute(g, command)
@@ -138,6 +446,11 @@ function commands.execute(g, command)
   end
   if g and g.is_terminal then
     return fail("game_over")
+  end
+  if g then
+    -- Mark the derived stat cache as unstable while this command mutates state;
+    -- `succeed()` restores a warmed stable cache on success.
+    g._derived_stats_cache_token = nil
   end
 
   if command.type == "START_TURN" then
@@ -244,10 +557,10 @@ function commands.execute(g, command)
   end
 
   if command.type == "BUILD_STRUCTURE" then
-    local built = actions.build_structure(g, command.player_index, command.card_id)
+    local built, build_reason, resolve_result = actions.build_structure(g, command.player_index, command.card_id)
     if not built then return fail("build_not_allowed") end
     return succeed(g,
-      { card_id = command.card_id },
+      { card_id = command.card_id, resolve_result = resolve_result },
       { { type = "structure_built", player_index = command.player_index, card_id = command.card_id } }
     )
   end
@@ -262,37 +575,23 @@ function commands.execute(g, command)
       return fail("invalid_activate_payload")
     end
 
-    local card_def
-    local source_key
-    if source.type == "base" then
-      card_def = cards.get_card_def(p.baseId)
-      source_key = "base:" .. ability_index
-    elseif source.type == "board" then
-      local entry = p.board[source.index]
-      if not entry then return fail("missing_board_entry") end
-      card_def = cards.get_card_def(entry.card_id)
-      source_key = "board:" .. source.index .. ":" .. ability_index
-      -- Check rest cost before further validation
-      local ab_check = card_def.abilities and card_def.abilities[ability_index]
-      if ab_check and ab_check.rest and entry.state and entry.state.rested then
-        return fail("unit_is_rested")
-      end
-    else
-      return fail("invalid_source_type")
-    end
+    local card_def, source_key, _, source_err = resolve_activated_source_def(p, source, ability_index)
+    if source_err then return fail(source_err) end
 
-    if not can_activate(g, pi, card_def, source_key, ability_index) then
+    if not can_activate(g, pi, card_def, source_key, ability_index, source) then
       return fail("ability_not_activatable")
     end
 
-    local activated, activate_reason = actions.activate_ability(g, pi, card_def, source_key, ability_index, source)
+    local activated, activate_reason, resolve_result = actions.activate_ability(g, pi, card_def, source_key, ability_index, source)
     if not activated then
       return fail(activate_reason or "activate_failed")
     end
-    return succeed(g,
-      { source_type = source.type, ability_index = ability_index },
-      { { type = "ability_activated", player_index = pi, source_type = source.type, ability_index = ability_index } }
-    )
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = { resolve_result = resolve_result },
+      event_type = "ability_activated",
+      include_source_event = true,
+      include_ability_event = true,
+    })
   end
 
   if command.type == "PLAY_UNIT_FROM_HAND" then
@@ -310,29 +609,15 @@ function commands.execute(g, command)
       if g.phase ~= "MAIN" then return fail("wrong_phase") end
     end
 
-    local card_def
-    local source_key
-    if source.type == "base" then
-      card_def = cards.get_card_def(p.baseId)
-      source_key = "base:" .. ability_index
-    elseif source.type == "board" then
-      local entry = p.board[source.index]
-      if not entry then return fail("missing_board_entry") end
-      card_def = cards.get_card_def(entry.card_id)
-      source_key = "board:" .. source.index .. ":" .. ability_index
-    else
-      return fail("invalid_source_type")
-    end
-
-    if not card_def or not card_def.abilities then return fail("no_abilities") end
-    local ab = card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "play_unit" then
-      return fail("not_play_unit_ability")
-    end
-
-    if not can_activate(g, pi, card_def, source_key, ability_index) then
-      return fail("ability_not_activatable")
-    end
+    local actx, actx_reason = resolve_command_activated_ability(g, pi, p, source, ability_index, {
+      allowed_effects = "play_unit",
+      invalid_effect_reason = "not_play_unit_ability",
+      require_can_activate = true,
+    })
+    if not actx then return fail(actx_reason) end
+    local card_def = actx.card_def
+    local source_key = actx.source_key
+    local ab = actx.ability
 
     if hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
     local matching = abilities.find_matching_hand_indices(p, ab.effect_args)
@@ -343,14 +628,17 @@ function commands.execute(g, command)
     if not is_eligible then return fail("hand_card_not_eligible") end
 
     local card_id = p.hand[hand_index]
-    local played, play_reason = actions.play_unit_from_hand(g, pi, card_def, source_key, ability_index, hand_index)
+    local played, play_reason, resolve_result = actions.play_unit_from_hand(g, pi, card_def, source_key, ability_index, hand_index)
     if not played then
       return fail(play_reason or "play_failed")
     end
-    return succeed(g,
-      { source_type = source.type, ability_index = ability_index, card_id = card_id, hand_index = hand_index },
-      { { type = "unit_played_from_hand", player_index = pi, source_type = source.type, ability_index = ability_index, card_id = card_id } }
-    )
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = { card_id = card_id, hand_index = hand_index, resolve_result = resolve_result },
+      event_type = "unit_played_from_hand",
+      event = { card_id = card_id },
+      include_source_event = true,
+      include_ability_event = true,
+    })
   end
 
   if command.type == "PLAY_SPELL_VIA_ABILITY" then
@@ -358,6 +646,7 @@ function commands.execute(g, command)
     local source = command.source
     local ability_index = command.ability_index
     local hand_index = command.hand_index
+    local sacrifice_target_board_index = command.sacrifice_target_board_index
     local target_player_index = command.target_player_index
     local target_board_index = command.target_board_index
     local p = g.players[pi + 1]
@@ -371,91 +660,54 @@ function commands.execute(g, command)
     end
 
     -- Resolve source ability
-    local src_card_def
-    local source_key
-    if source.type == "base" then
-      src_card_def = cards.get_card_def(p.baseId)
-      source_key = "base:" .. ability_index
-    elseif source.type == "board" then
-      local entry = p.board[source.index]
-      if not entry then return fail("missing_board_entry") end
-      src_card_def = cards.get_card_def(entry.card_id)
-      source_key = "board:" .. source.index .. ":" .. ability_index
-    else
-      return fail("invalid_source_type")
-    end
-    if not src_card_def or not src_card_def.abilities then return fail("no_abilities") end
-    local ab = src_card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "play_spell" then
-      return fail("not_play_spell_ability")
-    end
-    if not can_activate(g, pi, src_card_def, source_key, ability_index) then
-      return fail("ability_not_activatable")
-    end
+    local actx, actx_reason = resolve_command_activated_ability(g, pi, p, source, ability_index, {
+      allowed_effects = { "play_spell", "sacrifice_cast_spell" },
+      invalid_effect_reason = "not_play_spell_ability",
+      require_can_activate = true,
+    })
+    if not actx then return fail(actx_reason) end
+    local src_card_def = actx.card_def
+    local source_key = actx.source_key
+    local ab = actx.ability
+    local is_play_spell = (ab.effect == "play_spell")
+    local is_sac_cast_spell = (ab.effect == "sacrifice_cast_spell")
 
-    -- Validate hand card is an eligible spell
-    if hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
-    local matching = abilities.find_matching_spell_hand_indices(p, ab.effect_args)
-    local is_eligible = false
-    for _, idx in ipairs(matching) do
-      if idx == hand_index then is_eligible = true; break end
-    end
-    if not is_eligible then return fail("hand_card_not_eligible") end
+    local spell_id, spell_def, spell_sel_reason =
+      validate_ability_spell_hand_selection(p, hand_index, ab.effect_args)
+    if spell_sel_reason then return fail(spell_sel_reason) end
 
-    local spell_id = p.hand[hand_index]
-    local spell_ok, spell_def = pcall(cards.get_card_def, spell_id)
-    if not spell_ok or not spell_def then return fail("invalid_spell_card") end
-
-    -- Validate target if the spell needs one
-    for _, sab in ipairs(spell_def.abilities or {}) do
-      if sab.trigger == "on_cast" and sab.effect == "deal_damage" then
-        local args = sab.effect_args or {}
-        if args.target and args.target ~= "self" then
-          if type(target_player_index) ~= "number" then return fail("missing_target_player") end
-          local tp = g.players[target_player_index + 1]
-          if not tp then return fail("invalid_target_player") end
-          if not target_board_index then return fail("missing_target") end
-          local target_entry = tp.board[target_board_index]
-          if not target_entry then return fail("invalid_target") end
-          local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
-          if not tok or not tdef then return fail("invalid_target_card") end
-          if args.target == "unit" and tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then
-            return fail("target_not_a_unit")
-          end
-        end
+    if is_sac_cast_spell then
+      if type(sacrifice_target_board_index) ~= "number" then
+        return fail("missing_sacrifice_target")
       end
+      local sac_ok, _ = abilities.validate_activated_selection_cost(g, pi, ab, {
+        target_board_index = sacrifice_target_board_index,
+      })
+      if not sac_ok then return fail("invalid_sacrifice_target") end
     end
 
-    -- Pay ability cost and mark used
-    local key = tostring(pi) .. ":" .. source_key
-    for _, c in ipairs(ab.cost or {}) do
-      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-    end
-    if ab.once_per_turn then g.activatedUsedThisTurn[key] = true end
-
-    -- Remove spell from hand
-    table.remove(p.hand, hand_index)
-
-    -- Resolve on_cast abilities (spell cost is waived — already paid by ability)
-    for _, sab in ipairs(spell_def.abilities or {}) do
-      if sab.trigger == "on_cast" then
-        if sab.effect == "deal_damage" and target_board_index then
-          local damage = (sab.effect_args or {}).damage or 0
-          actions.apply_damage_to_unit(g, target_player_index, target_board_index, damage)
-        else
-          abilities.resolve(sab, p, g, {})
-        end
-      end
-    end
-
-    -- Move spell to graveyard
-    p.graveyard = p.graveyard or {}
-    p.graveyard[#p.graveyard + 1] = { card_id = spell_id }
-
-    return succeed(g,
-      { card_id = spell_id, ability_index = ability_index },
-      { { type = "spell_cast_via_ability", player_index = pi, card_id = spell_id } }
-    )
+    return execute_validated_spell_cast_command(g, {
+      player_index = pi,
+      player = p,
+      source = source,
+      ability_index = ability_index,
+      spell_id = spell_id,
+      spell_def = spell_def,
+      target_player_index = target_player_index,
+      target_board_index = target_board_index,
+      cast_fail_reason = "play_spell_via_ability_failed",
+      success_meta = { ability_index = ability_index },
+      success_event = { type = "spell_cast_via_ability" },
+      cast_action = function(resolve_on_cast)
+        return actions.activate_play_spell_via_ability(
+          g, pi, src_card_def, source_key, ability_index, source, hand_index, {
+            expected_spell_id = spell_id,
+            spell_def = spell_def,
+            sacrifice_target_board_index = sacrifice_target_board_index,
+            resolve_on_cast = resolve_on_cast,
+          })
+      end,
+    })
   end
 
   if command.type == "ASSIGN_STRUCTURE_WORKER" then
@@ -517,17 +769,12 @@ function commands.execute(g, command)
     local card_ok, card_def = pcall(cards.get_card_def, card_id)
     if not card_ok or not card_def then return fail("invalid_card") end
 
-    local sac_ab = nil
-    if card_def.abilities then
-      for _, ab in ipairs(card_def.abilities) do
-        if ab.type == "static" and ab.effect == "play_cost_sacrifice" then sac_ab = ab; break end
-      end
-    end
+    local sac_ab = abilities.find_static_effect_ability(card_def, "play_cost_sacrifice")
     if not sac_ab then return fail("card_not_playable") end
-    local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
-    if type(sacrifice_targets) ~= "table" or #sacrifice_targets ~= sacrifice_count then
-      return fail("invalid_sacrifice_targets")
-    end
+    local sac_ok, sac_reason = abilities.validate_card_play_cost_selection(g, pi, card_def, {
+      sacrifice_targets = sacrifice_targets,
+    })
+    if not sac_ok then return fail(sac_reason or "invalid_sacrifice_targets") end
 
     local played = actions.play_from_hand(g, pi, hand_index, sacrifice_targets)
     if not played then return fail("play_failed") end
@@ -548,15 +795,12 @@ function commands.execute(g, command)
     local card_ok, card_def = pcall(cards.get_card_def, card_id)
     if not card_ok or not card_def then return fail("invalid_card") end
     -- Check card has sacrifice ability
-    local sac_ab = nil
-    if card_def.abilities then
-      for _, ab in ipairs(card_def.abilities) do
-        if ab.type == "static" and ab.effect == "play_cost_sacrifice" then sac_ab = ab; break end
-      end
-    end
+    local sac_ab = abilities.find_static_effect_ability(card_def, "play_cost_sacrifice")
     if not sac_ab then return fail("card_not_playable") end
-    local sacrifice_count = sac_ab.effect_args and sac_ab.effect_args.sacrifice_count or 2
-    if actions.count_unassigned_workers(p) < sacrifice_count then return fail("not_enough_workers") end
+    local sac_ok, sac_reason = abilities.validate_card_play_cost_selection(g, pi, card_def, {
+      available_unassigned_workers = actions.count_unassigned_workers(p),
+    })
+    if not sac_ok then return fail(sac_reason or "not_enough_workers") end
     local played = actions.play_from_hand(g, pi, hand_index)
     if not played then return fail("play_failed") end
     return succeed(g,
@@ -605,21 +849,22 @@ function commands.execute(g, command)
     if pi ~= g.activePlayer then return fail("not_active_player") end
     if g.phase ~= "MAIN" then return fail("wrong_phase") end
 
-    local card_def
-    local source_key
-    if source.type == "board" then
-      local entry = p.board[source.index]
-      if not entry then return fail("missing_board_entry") end
-      card_def = cards.get_card_def(entry.card_id)
-      source_key = "board:" .. source.index .. ":" .. ability_index
-    else
-      return fail("invalid_source_type")
-    end
-
-    if not card_def or not card_def.abilities then return fail("no_abilities") end
-    local ab = card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "sacrifice_upgrade" then return fail("not_sacrifice_upgrade_ability") end
-    if not can_activate(g, pi, card_def, source_key, ability_index) then return fail("ability_not_activatable") end
+    local actx, actx_reason = resolve_command_activated_ability(g, pi, p, source, ability_index, {
+      require_board_source = true,
+      allowed_effects = "sacrifice_upgrade",
+      invalid_effect_reason = "not_sacrifice_upgrade_ability",
+      require_can_activate = true,
+    })
+    if not actx then return fail(actx_reason) end
+    local card_def = actx.card_def
+    local source_key = actx.source_key
+    local ab = actx.ability
+    local sel_ok, sel_reason = abilities.validate_activated_selection_cost(g, pi, ab, {
+      target_board_index = target_board_index,
+      target_worker = target_worker,
+      target_worker_extra = target_worker_extra,
+    })
+    if not sel_ok then return fail(sel_reason or "invalid_sacrifice_target") end
     local upgrade_subtypes = required_upgrade_subtypes(ab.effect_args)
 
     local sacrificed_tier = 0
@@ -642,62 +887,23 @@ function commands.execute(g, command)
       return fail("hand_card_not_eligible")
     end
 
-    local snapshot = {
-      totalWorkers = p.totalWorkers,
-      workersOn = { food = p.workersOn.food, wood = p.workersOn.wood, stone = p.workersOn.stone },
-      resources = {},
-      board = {},
-      specialWorkers = {},
-      activated = g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key],
-    }
-    for k, v in pairs(p.resources) do snapshot.resources[k] = v end
-    for i, e in ipairs(p.board) do snapshot.board[i] = copy_table(e) end
-    for i, sw in ipairs(p.specialWorkers) do snapshot.specialWorkers[i] = copy_table(sw) end
-    snapshot.workerStatePool = copy_table(p.workerStatePool or {})
-
-    local ok_apply = true
-    if target_board_index then
-      ok_apply = actions.sacrifice_board_entry(g, pi, target_board_index)
-    else
-      ok_apply = actions.sacrifice_worker_token(g, pi, target_worker, target_worker_extra)
-    end
-
-    if ok_apply then
-      if hand_index < 1 or hand_index > #p.hand then ok_apply = false end
-    end
-    if ok_apply then
-      g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = true
-      table.remove(p.hand, hand_index)
-      p.board[#p.board + 1] = {
-        card_id = hand_id,
-        state = { rested = false, summoned_turn = g.turnNumber },
-      }
-      actions.resolve_on_play_triggers(g, pi, hand_id)
-    end
-
+    local ok_apply, apply_reason, upgrade_info = actions.activate_sacrifice_upgrade_play(
+      g, pi, card_def, source_key, ability_index, source, hand_index, {
+      target_board_index = target_board_index,
+      target_worker = target_worker,
+      target_worker_extra = target_worker_extra,
+    })
     if not ok_apply then
-      p.totalWorkers = snapshot.totalWorkers
-      p.workersOn.food = snapshot.workersOn.food
-      p.workersOn.wood = snapshot.workersOn.wood
-      p.workersOn.stone = snapshot.workersOn.stone
-      for k, v in pairs(snapshot.resources) do p.resources[k] = v end
-      p.board = {}
-      for i, e in ipairs(snapshot.board) do p.board[i] = copy_table(e) end
-      p.specialWorkers = {}
-      for i, sw in ipairs(snapshot.specialWorkers) do p.specialWorkers[i] = copy_table(sw) end
-      p.workerStatePool = copy_table(snapshot.workerStatePool or {})
-      if snapshot.activated then
-        g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = snapshot.activated
-      else
-        g.activatedUsedThisTurn[tostring(pi) .. ":" .. source_key] = nil
-      end
-      return fail("upgrade_failed")
+      return fail(apply_reason or "upgrade_failed")
     end
+    local resolve_result = type(upgrade_info) == "table" and upgrade_info.resolve_result or nil
+    local played_card_id = (type(upgrade_info) == "table" and upgrade_info.card_id) or hand_id
 
-    return succeed(g,
-      { card_id = hand_id, source_type = source.type, ability_index = ability_index },
-      { { type = "unit_played_from_sacrifice_upgrade", player_index = pi, card_id = hand_id } }
-    )
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = { card_id = played_card_id, resolve_result = resolve_result },
+      event_type = "unit_played_from_sacrifice_upgrade",
+      event = { card_id = played_card_id },
+    })
   end
 
   if command.type == "SACRIFICE_UNIT" then
@@ -717,64 +923,51 @@ function commands.execute(g, command)
     if pi ~= g.activePlayer then return fail("not_active_player") end
     if g.phase ~= "MAIN" then return fail("wrong_phase") end
 
-    local card_def
-    local source_key
-    if source.type == "base" then
-      card_def = cards.get_card_def(p.baseId)
-      source_key = "base:" .. ability_index
-    elseif source.type == "board" then
-      local entry = p.board[source.index]
-      if not entry then return fail("missing_board_entry") end
-      card_def = cards.get_card_def(entry.card_id)
-      source_key = "board:" .. source.index .. ":" .. ability_index
-    else
-      return fail("invalid_source_type")
+    local actx, actx_reason = resolve_command_activated_ability(g, pi, p, source, ability_index, {
+      allowed_effects = "sacrifice_produce",
+      invalid_effect_reason = "not_sacrifice_ability",
+      require_can_activate = true,
+    })
+    if not actx then return fail(actx_reason) end
+    local card_def = actx.card_def
+    local source_key = actx.source_key
+    local ab = actx.ability
+
+    local sel_ok, sel_reason = abilities.validate_activated_selection_cost(g, pi, ab, {
+      target_board_index = target_board_index,
+      target_worker = target_worker,
+      target_worker_extra = command.target_worker_extra,
+    })
+    if not sel_ok then
+      return fail(sel_reason or "invalid_sacrifice_target")
     end
 
-    if not card_def or not card_def.abilities then return fail("no_abilities") end
-    local ab = card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "sacrifice_produce" then
-      return fail("not_sacrifice_ability")
+    local sacrificed, sacrifice_reason, exec_info =
+      actions.activate_sacrifice_produce(g, pi, card_def, source_key, ability_index, {
+        source = source,
+        target_board_index = target_board_index,
+        target_worker = target_worker,
+        target_worker_extra = command.target_worker_extra,
+      })
+    if not sacrificed then
+      return fail(sacrifice_reason or "sacrifice_failed")
     end
 
-    if not can_activate(g, pi, card_def, source_key, ability_index) then
-      return fail("ability_not_activatable")
+    local payment = type(exec_info) == "table" and exec_info.payment or nil
+    if payment and payment.sacrificed_kind == "Worker" then
+      return succeed_activated_command(g, pi, source, ability_index, {
+        meta = { target_worker = true },
+        event_type = "worker_sacrificed",
+      })
     end
 
-    if target_worker then
-      -- Sacrificing a worker token
-      if p.totalWorkers <= 0 then return fail("no_workers") end
-      local worker_extra = command.target_worker_extra
-      local sacrificed, sacrifice_reason =
-        actions.sacrifice_worker(g, pi, card_def, source_key, ability_index, target_worker, worker_extra)
-      if not sacrificed then
-        return fail(sacrifice_reason or "sacrifice_failed")
-      end
-      return succeed(g,
-        { source_type = source.type, ability_index = ability_index, target_worker = true },
-        { { type = "worker_sacrificed", player_index = pi } }
-      )
-    else
-      -- Sacrificing a board entry
-      local eligible = abilities.find_sacrifice_targets(p, ab.effect_args)
-      local is_eligible = false
-      for _, idx in ipairs(eligible) do
-        if idx == target_board_index then is_eligible = true; break end
-      end
-      if not is_eligible then return fail("target_not_eligible") end
-
-      local sacrificed_entry = p.board[target_board_index]
-      local sacrificed_id = sacrificed_entry and sacrificed_entry.card_id
-      local sacrificed, sacrifice_reason =
-        actions.sacrifice_unit(g, pi, card_def, source_key, ability_index, target_board_index)
-      if not sacrificed then
-        return fail(sacrifice_reason or "sacrifice_failed")
-      end
-      return succeed(g,
-        { source_type = source.type, ability_index = ability_index, target_board_index = target_board_index, card_id = sacrificed_id },
-        { { type = "unit_sacrificed", player_index = pi, target_board_index = target_board_index } }
-      )
-    end
+    local sacrificed_id = payment and payment.sacrificed_card_id or nil
+    local sacrificed_board_index = payment and payment.target_board_index or target_board_index
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = { target_board_index = sacrificed_board_index, card_id = sacrificed_id },
+      event_type = "unit_sacrificed",
+      event = { target_board_index = sacrificed_board_index },
+    })
   end
 
   if command.type == "RETURN_FROM_GRAVEYARD" then
@@ -787,22 +980,18 @@ function commands.execute(g, command)
     if not p or not source or not ability_index then return fail("invalid_payload") end
     if pi ~= g.activePlayer then return fail("not_active_player") end
     if g.phase ~= "MAIN" then return fail("wrong_phase") end
-    if source.type ~= "board" then return fail("invalid_source_type") end
-
-    local entry = p.board[source.index]
-    if not entry then return fail("missing_board_entry") end
-    local card_def = cards.get_card_def(entry.card_id)
-    if not card_def or not card_def.abilities then return fail("no_abilities") end
-
-    local ab = card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "return_from_graveyard" then
-      return fail("not_return_ability")
-    end
-
-    local source_key = "board:" .. source.index .. ":" .. ability_index
-    local key = tostring(pi) .. ":" .. source_key
-    if ab.once_per_turn and g.activatedUsedThisTurn[key] then return fail("ability_already_used") end
-    if not abilities.can_pay_cost(p.resources, ab.cost) then return fail("insufficient_resources") end
+    local actx, actx_reason = resolve_command_activated_ability(g, pi, p, source, ability_index, {
+      require_board_source = true,
+      allowed_effects = "return_from_graveyard",
+      invalid_effect_reason = "not_return_ability",
+    })
+    if not actx then return fail(actx_reason) end
+    local entry = actx.source_entry
+    local card_def = actx.card_def
+    local ab = actx.ability
+    local source_key = actx.source_key
+    local pre_ok, pre_reason = precheck_command_activated_costs(g, pi, p, source, ability_index, source_key, ab)
+    if not pre_ok then return fail(pre_reason) end
 
     if type(selected) ~= "table" or #selected == 0 then return fail("no_cards_selected") end
     local args = ab.effect_args or {}
@@ -847,10 +1036,8 @@ function commands.execute(g, command)
     end
 
     -- Pay cost and mark used
-    for _, c in ipairs(ab.cost or {}) do
-      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-    end
-    g.activatedUsedThisTurn[key] = true
+    local paid_ok, paid_reason = pay_and_mark_command_activated_costs(g, pi, p, source, ability_index, source_key, ab)
+    if not paid_ok then return fail(paid_reason) end
 
     -- Remove from graveyard highest-index first, then add to board or hand
     table.sort(to_return, function(a, b) return a.gi > b.gi end)
@@ -860,18 +1047,34 @@ function commands.execute(g, command)
       if args.return_to == "hand" then
         p.hand[#p.hand + 1] = etr.card_id
       else
-        p.board[#p.board + 1] = {
+        append_board_entry(g, p, {
           card_id = etr.card_id,
           state = { rested = false, summoned_turn = g.turnNumber },
-        }
+        })
       end
       returned[#returned + 1] = etr.card_id
     end
 
-    return succeed(g,
-      { summoned = returned, returned_count = #returned },
-      { { type = "units_returned_from_graveyard", player_index = pi, count = #returned } }
-    )
+    local destination = (args.return_to == "hand") and "hand" or "board"
+    local resolve_result = synthetic_resolve_result(ab.effect, source, {
+      {
+        type = "cards_returned_from_graveyard",
+        count = #returned,
+        destination = destination,
+        card_ids = copy_table(returned),
+      },
+    })
+
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = {
+        summoned = returned,
+        returned_count = #returned,
+        resolve_result = resolve_result,
+        card_id = entry.card_id,
+      },
+      event_type = "units_returned_from_graveyard",
+      event = { count = #returned },
+    })
   end
 
   if command.type == "PLAY_MONUMENT_FROM_HAND" then
@@ -888,18 +1091,13 @@ function commands.execute(g, command)
     local card_ok, card_def = pcall(cards.get_card_def, card_id)
     if not card_ok or not card_def then return fail("invalid_card") end
 
-    local mon_ab = nil
-    if card_def.abilities then
-      for _, ab in ipairs(card_def.abilities) do
-        if ab.type == "static" and ab.effect == "monument_cost" then mon_ab = ab; break end
-      end
-    end
+    local mon_ab = abilities.find_static_effect_ability(card_def, "monument_cost")
     if not mon_ab then return fail("card_not_monument_playable") end
 
-    local played = actions.play_monument_card(g, pi, hand_index, monument_board_index)
+    local played, play_reason, resolve_result = actions.play_monument_card(g, pi, hand_index, monument_board_index)
     if not played then return fail("play_monument_failed") end
     return succeed(g,
-      { card_id = card_id },
+      { card_id = card_id, resolve_result = resolve_result },
       { { type = "monument_card_played", player_index = pi, card_id = card_id } }
     )
   end
@@ -917,66 +1115,92 @@ function commands.execute(g, command)
       if pi ~= g.activePlayer then return fail("not_active_player") end
       if g.phase ~= "MAIN" then return fail("wrong_phase") end
     end
-    if source.type ~= "board" then return fail("invalid_source_type") end
+    local actx, actx_reason = resolve_command_board_activated_ability(g, pi, p, source, ability_index, {
+      allowed_effects = "deal_damage",
+      invalid_effect_reason = "not_deal_damage_ability",
+    })
+    if not actx then return fail(actx_reason) end
+    local source_entry = actx.source_entry
+    local card_def = actx.card_def
+    local ab = actx.ability
+    local source_key = actx.source_key
 
-    local source_entry = p.board[source.index]
-    if not source_entry then return fail("missing_source_entry") end
-    local card_def = cards.get_card_def(source_entry.card_id)
-    if not card_def or not card_def.abilities then return fail("no_abilities") end
-
-    local ab = card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "deal_damage" then
-      return fail("not_deal_damage_ability")
-    end
-
-    local source_key = "board:" .. source.index .. ":" .. ability_index
-    local key = tostring(pi) .. ":" .. source_key
-    if ab.once_per_turn and g.activatedUsedThisTurn[key] then return fail("ability_already_used") end
-    if not abilities.can_pay_cost(p.resources, ab.cost) then return fail("insufficient_resources") end
-    if ab.rest and source_entry.state and source_entry.state.rested then return fail("unit_is_rested") end
-
-    if type(target_player_index) ~= "number" then return fail("missing_target_player") end
-    local tp = g.players[target_player_index + 1]
-    if not tp then return fail("invalid_target_player") end
+    local pre_ok, pre_reason = precheck_command_activated_costs(g, pi, p, source, ability_index, source_key, ab, {
+      source_entry = source_entry,
+    })
+    if not pre_ok then return fail(pre_reason) end
 
     local args = ab.effect_args or {}
     local damage = args.damage or 0
 
-    -- Pay costs
-    for _, c in ipairs(ab.cost or {}) do
-      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-    end
-    if ab.rest then
-      source_entry.state = source_entry.state or {}
-      source_entry.state.rested = true
-    end
-    g.activatedUsedThisTurn[key] = true
-
-    if command.target_is_base then
-      -- Damage the target player's base directly
-      tp.life = math.max(0, (tp.life or 0) - damage)
-      return succeed(g,
-        { damage = damage, target_player_index = target_player_index, target_is_base = true },
-        { { type = "damage_dealt", player_index = pi, damage = damage } }
+    local is_base_target = (command.target_is_base == true)
+    if is_base_target then
+      local target_ok, target_reason = abilities.validate_effect_target_selection(
+        g, pi, ab.effect, args, target_player_index, nil, { target_is_base = true }
       )
+      if not target_ok then return fail(target_reason or "invalid_target") end
+    else
+      local target_ok, target_reason = abilities.validate_effect_target_selection(
+        g, pi, ab.effect, args, target_player_index, target_board_index, { target_is_base = false }
+      )
+      if not target_ok then return fail(target_reason or "invalid_target") end
     end
 
-    if not target_board_index then return fail("missing_target") end
-    local target_entry = tp.board[target_board_index]
-    if not target_entry then return fail("invalid_target") end
-    local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
-    if not tok or not tdef then return fail("invalid_target_card") end
+    -- Pay costs
+    local paid_ok, paid_reason = pay_and_mark_command_activated_costs(g, pi, p, source, ability_index, source_key, ab, {
+      source_entry = source_entry,
+    })
+    if not paid_ok then return fail(paid_reason) end
 
-    if args.target == "unit" and tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then
-      return fail("target_not_a_unit")
+    if args.sacrifice_self and source.type == "board" then
+      actions.destroy_board_entry_any(g, pi, source.index)
+    end
+
+    if is_base_target then
+      local tp = g.players[target_player_index + 1]
+      tp.life = math.max(0, (tp.life or 0) - damage)
+      local resolve_result = synthetic_resolve_result(ab.effect, source, {
+        {
+          type = "damage_dealt",
+          damage = damage,
+          target_player_index = target_player_index,
+          target_is_base = true,
+        },
+      })
+      return succeed_activated_command(g, pi, source, ability_index, {
+        meta = {
+          damage = damage,
+          target_player_index = target_player_index,
+          target_is_base = true,
+          resolve_result = resolve_result,
+          card_id = source_entry.card_id,
+        },
+        event_type = "damage_dealt",
+        event = { damage = damage },
+      })
     end
 
     actions.apply_damage_to_unit(g, target_player_index, target_board_index, damage)
+    local resolve_result = synthetic_resolve_result(ab.effect, source, {
+      {
+        type = "damage_dealt",
+        damage = damage,
+        target_player_index = target_player_index,
+        target_board_index = target_board_index,
+      },
+    })
 
-    return succeed(g,
-      { damage = damage, target_player_index = target_player_index },
-      { { type = "damage_dealt", player_index = pi, damage = damage } }
-    )
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = {
+        damage = damage,
+        target_player_index = target_player_index,
+        target_board_index = target_board_index,
+        resolve_result = resolve_result,
+        card_id = source_entry.card_id,
+      },
+      event_type = "damage_dealt",
+      event = { damage = damage },
+    })
   end
 
   if command.type == "PLACE_COUNTER_ON_TARGET" then
@@ -991,43 +1215,35 @@ function commands.execute(g, command)
       if pi ~= g.activePlayer then return fail("not_active_player") end
       if g.phase ~= "MAIN" then return fail("wrong_phase") end
     end
-    if source.type ~= "board" then return fail("invalid_source_type") end
+    local actx, actx_reason = resolve_command_board_activated_ability(g, pi, p, source, ability_index, {
+      allowed_effects = "place_counter_on_target",
+      invalid_effect_reason = "not_place_counter_ability",
+    })
+    if not actx then return fail(actx_reason) end
+    local source_entry = actx.source_entry
+    local card_def = actx.card_def
+    local ab = actx.ability
+    local source_key = actx.source_key
 
-    local source_entry = p.board[source.index]
-    if not source_entry then return fail("missing_source_entry") end
-    local card_def = cards.get_card_def(source_entry.card_id)
-    if not card_def or not card_def.abilities then return fail("no_abilities") end
+    local pre_ok, pre_reason = precheck_command_activated_costs(g, pi, p, source, ability_index, source_key, ab, {
+      source_entry = source_entry,
+    })
+    if not pre_ok then return fail(pre_reason) end
 
-    local ab = card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "place_counter_on_target" then
-      return fail("not_place_counter_ability")
-    end
-
-    local source_key = "board:" .. source.index .. ":" .. ability_index
-    local key = tostring(pi) .. ":" .. source_key
-    if ab.once_per_turn and g.activatedUsedThisTurn[key] then return fail("ability_already_used") end
-    if not abilities.can_pay_cost(p.resources, ab.cost) then return fail("insufficient_resources") end
-    if ab.rest and source_entry.state and source_entry.state.rested then return fail("unit_is_rested") end
-
-    if not target_board_index then return fail("missing_target") end
+    local target_ok, target_reason = abilities.validate_effect_target_selection(
+      g, pi, ab.effect, ab.effect_args or {}, pi, target_board_index, { target_is_base = false }
+    )
+    if not target_ok then return fail(target_reason or "invalid_target") end
     local target_entry = p.board[target_board_index]
-    if not target_entry then return fail("invalid_target") end
-    local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
-    if not tok or not tdef then return fail("invalid_target_card") end
-    if tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then return fail("target_not_a_unit") end
 
     -- Pay costs
-    for _, c in ipairs(ab.cost or {}) do
-      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-    end
-    if ab.rest then
-      source_entry.state = source_entry.state or {}
-      source_entry.state.rested = true
-    end
-    g.activatedUsedThisTurn[key] = true
+    local paid_ok, paid_reason = pay_and_mark_command_activated_costs(g, pi, p, source, ability_index, source_key, ab, {
+      source_entry = source_entry,
+    })
+    if not paid_ok then return fail(paid_reason) end
 
     -- Apply effect
-    abilities.resolve(ab, p, g, {
+    local resolve_result = abilities.resolve(ab, p, g, {
       source = source,
       source_entry = source_entry,
       target_entry = target_entry,
@@ -1036,10 +1252,11 @@ function commands.execute(g, command)
       player_index = pi,
     })
 
-    return succeed(g,
-      { target_board_index = target_board_index },
-      { { type = "counter_placed_on_target", player_index = pi, target_board_index = target_board_index } }
-    )
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = { target_board_index = target_board_index, resolve_result = resolve_result },
+      event_type = "counter_placed_on_target",
+      event = { target_board_index = target_board_index },
+    })
   end
 
   if command.type == "PLAY_SPELL_FROM_HAND" then
@@ -1048,34 +1265,17 @@ function commands.execute(g, command)
     if pi ~= g.activePlayer then return fail("not_active_player") end
     if g.phase ~= "MAIN" then return fail("wrong_phase") end
     local p = g.players[pi + 1]
-    if not hand_index or hand_index < 1 or hand_index > #p.hand then return fail("invalid_hand_index") end
-    local card_id = p.hand[hand_index]
-    local card_ok, card_def = pcall(cards.get_card_def, card_id)
-    if not card_ok or not card_def then return fail("invalid_card") end
-    if card_def.kind ~= "Spell" then return fail("not_a_spell") end
+    local card_id, card_def, spell_sel_reason = validate_direct_spell_hand_selection(p, hand_index)
+    if spell_sel_reason then return fail(spell_sel_reason) end
 
     -- Check for monument cost ability (overrides resource cost)
-    local mon_cost_ab = nil
-    for _, ab in ipairs(card_def.abilities or {}) do
-      if ab.type == "static" and ab.effect == "monument_cost" then mon_cost_ab = ab; break end
-    end
+    local mon_cost_ab = abilities.find_static_effect_ability(card_def, "monument_cost")
     local monument_board_index = command.monument_board_index
     if mon_cost_ab then
-      if not monument_board_index then return fail("missing_monument_board_index") end
-      local monument_entry = p.board[monument_board_index]
-      if not monument_entry then return fail("invalid_monument") end
-      local ok_mon, mon_def = pcall(cards.get_card_def, monument_entry.card_id)
-      if not ok_mon or not mon_def then return fail("invalid_monument_card") end
-      local is_monument = false
-      for _, kw in ipairs(mon_def.keywords or {}) do
-        if kw == "monument" then is_monument = true; break end
-      end
-      if not is_monument then return fail("not_a_monument") end
-      local min_counters = (mon_cost_ab.effect_args and mon_cost_ab.effect_args.min_counters) or 1
-      monument_entry.state = monument_entry.state or {}
-      if unit_stats.counter_count(monument_entry.state, "wonder") < min_counters then
-        return fail("insufficient_monument_counters")
-      end
+      local monument_ok, monument_reason = abilities.validate_card_play_cost_selection(g, pi, card_def, {
+        monument_board_index = monument_board_index,
+      })
+      if not monument_ok then return fail(monument_reason or "invalid_monument_cost") end
     else
       if not abilities.can_pay_cost(p.resources, card_def.costs) then return fail("insufficient_resources") end
     end
@@ -1083,57 +1283,25 @@ function commands.execute(g, command)
     -- Validate target requirements for targeted on_cast abilities
     local target_player_index = command.target_player_index
     local target_board_index = command.target_board_index
-    for _, ab in ipairs(card_def.abilities or {}) do
-      if ab.trigger == "on_cast" and ab.effect == "deal_damage" then
-        local args = ab.effect_args or {}
-        if args.target and args.target ~= "self" then
-          if type(target_player_index) ~= "number" then return fail("missing_target_player") end
-          local tp = g.players[target_player_index + 1]
-          if not tp then return fail("invalid_target_player") end
-          if not target_board_index then return fail("missing_target") end
-          local target_entry = tp.board[target_board_index]
-          if not target_entry then return fail("invalid_target") end
-          local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
-          if not tok or not tdef then return fail("invalid_target_card") end
-          if args.target == "unit" and tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then
-            return fail("target_not_a_unit")
-          end
-        end
-      end
-    end
 
-    -- Pay costs
-    if mon_cost_ab then
-      unit_stats.remove_counter(p.board[monument_board_index].state, "wonder", 1)
-    else
-      for _, c in ipairs(card_def.costs or {}) do
-        p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-      end
-    end
-
-    -- Remove from hand
-    table.remove(p.hand, hand_index)
-
-    -- Resolve on_cast abilities
-    for _, ab in ipairs(card_def.abilities or {}) do
-      if ab.trigger == "on_cast" then
-        if ab.effect == "deal_damage" and target_board_index then
-          local damage = (ab.effect_args or {}).damage or 0
-          actions.apply_damage_to_unit(g, target_player_index, target_board_index, damage)
-        else
-          abilities.resolve(ab, p, g, {})
-        end
-      end
-    end
-
-    -- Move to graveyard
-    p.graveyard = p.graveyard or {}
-    p.graveyard[#p.graveyard + 1] = { card_id = card_id }
-
-    return succeed(g,
-      { card_id = card_id },
-      { { type = "spell_cast", player_index = pi, card_id = card_id } }
-    )
+    return execute_validated_spell_cast_command(g, {
+      player_index = pi,
+      player = p,
+      spell_id = card_id,
+      spell_def = card_def,
+      target_player_index = target_player_index,
+      target_board_index = target_board_index,
+      cast_fail_reason = "spell_cast_failed",
+      success_event = { type = "spell_cast" },
+      cast_action = function(resolve_on_cast)
+        return actions.play_spell_from_hand(g, pi, hand_index, {
+          expected_spell_id = card_id,
+          spell_def = card_def,
+          monument_board_index = monument_board_index,
+          resolve_on_cast = resolve_on_cast,
+        })
+      end,
+    })
   end
 
   if command.type == "DEAL_DAMAGE_X_TO_TARGET" then
@@ -1150,56 +1318,59 @@ function commands.execute(g, command)
       if pi ~= g.activePlayer then return fail("not_active_player") end
       if g.phase ~= "MAIN" then return fail("wrong_phase") end
     end
-    if source.type ~= "board" then return fail("invalid_source_type") end
     if type(x_amount) ~= "number" or x_amount < 1 then return fail("invalid_x_amount") end
 
-    local source_entry = p.board[source.index]
-    if not source_entry then return fail("missing_source_entry") end
-    local card_def = cards.get_card_def(source_entry.card_id)
-    if not card_def or not card_def.abilities then return fail("no_abilities") end
-
-    local ab = card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "deal_damage_x" then
-      return fail("not_deal_damage_x_ability")
-    end
-
-    local source_key = "board:" .. source.index .. ":" .. ability_index
-    local key = tostring(pi) .. ":" .. source_key
-    if ab.once_per_turn and g.activatedUsedThisTurn[key] then return fail("ability_already_used") end
-    if ab.rest and source_entry.state and source_entry.state.rested then return fail("unit_is_rested") end
-
+    local actx, actx_reason = resolve_command_board_activated_ability(g, pi, p, source, ability_index, {
+      allowed_effects = "deal_damage_x",
+      invalid_effect_reason = "not_deal_damage_x_ability",
+    })
+    if not actx then return fail(actx_reason) end
+    local source_entry = actx.source_entry
+    local card_def = actx.card_def
+    local ab = actx.ability
+    local source_key = actx.source_key
     local args = ab.effect_args or {}
     local resource = args.resource or "stone"
-    local available = p.resources[resource] or 0
-    if x_amount > available then return fail("insufficient_resources") end
 
-    if type(target_player_index) ~= "number" then return fail("missing_target_player") end
-    local tp = g.players[target_player_index + 1]
-    if not tp then return fail("invalid_target_player") end
+    local pre_ok, pre_reason = precheck_command_activated_costs(g, pi, p, source, ability_index, source_key, ab, {
+      x_amount = x_amount,
+      source_entry = source_entry,
+    })
+    if not pre_ok then return fail(pre_reason) end
 
-    if not target_board_index then return fail("missing_target") end
-    local target_entry = tp.board[target_board_index]
-    if not target_entry then return fail("invalid_target") end
-    local tok, tdef = pcall(cards.get_card_def, target_entry.card_id)
-    if not tok or not tdef then return fail("invalid_target_card") end
-    if args.target == "unit" and tdef.kind ~= "Unit" and tdef.kind ~= "Worker" then
-      return fail("target_not_a_unit")
-    end
+    local target_ok, target_reason = abilities.validate_effect_target_selection(
+      g, pi, ab.effect, args, target_player_index, target_board_index, { target_is_base = false }
+    )
+    if not target_ok then return fail(target_reason or "invalid_target") end
 
     -- Pay costs
-    p.resources[resource] = available - x_amount
-    if ab.rest then
-      source_entry.state = source_entry.state or {}
-      source_entry.state.rested = true
-    end
-    g.activatedUsedThisTurn[key] = true
+    local paid_ok, paid_reason = pay_and_mark_command_activated_costs(g, pi, p, source, ability_index, source_key, ab, {
+      x_amount = x_amount,
+      source_entry = source_entry,
+    })
+    if not paid_ok then return fail(paid_reason) end
 
     actions.apply_damage_to_unit(g, target_player_index, target_board_index, x_amount)
+    local resolve_result = synthetic_resolve_result(ab.effect, source, {
+      {
+        type = "damage_dealt",
+        damage = x_amount,
+        target_player_index = target_player_index,
+        target_board_index = target_board_index,
+      },
+    })
 
-    return succeed(g,
-      { damage = x_amount, target_player_index = target_player_index },
-      { { type = "damage_dealt", player_index = pi, damage = x_amount } }
-    )
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = {
+        damage = x_amount,
+        target_player_index = target_player_index,
+        target_board_index = target_board_index,
+        resolve_result = resolve_result,
+        card_id = source_entry.card_id,
+      },
+      event_type = "damage_dealt",
+      event = { damage = x_amount },
+    })
   end
 
   if command.type == "DISCARD_DRAW_HAND" then
@@ -1215,27 +1386,16 @@ function commands.execute(g, command)
     if pi ~= g.activePlayer then return fail("not_active_player") end
     if g.phase ~= "MAIN" then return fail("wrong_phase") end
 
-    local card_def, source_key
-    if source.type == "base" then
-      card_def = cards.get_card_def(p.baseId)
-      source_key = "base:" .. ability_index
-    elseif source.type == "board" then
-      local entry = p.board[source.index]
-      if not entry then return fail("missing_board_entry") end
-      card_def = cards.get_card_def(entry.card_id)
-      source_key = "board:" .. source.index .. ":" .. ability_index
-    else
-      return fail("invalid_source_type")
-    end
-    if not card_def or not card_def.abilities then return fail("no_abilities") end
-
-    local ab = card_def.abilities[ability_index]
-    if not ab or ab.type ~= "activated" or ab.effect ~= "discard_draw" then
-      return fail("not_discard_draw_ability")
-    end
-    if not can_activate(g, pi, card_def, source_key, ability_index) then
-      return fail("ability_not_activatable")
-    end
+    local actx, actx_reason = resolve_command_activated_ability(g, pi, p, source, ability_index, {
+      allowed_effects = "discard_draw",
+      invalid_effect_reason = "not_discard_draw_ability",
+      require_can_activate = true,
+    })
+    if not actx then return fail(actx_reason) end
+    local card_def = actx.card_def
+    local source_key = actx.source_key
+    local source_entry_for_cost = actx.source_entry
+    local ab = actx.ability
 
     local args = ab.effect_args or {}
     local required_discard = args.discard or 2
@@ -1251,11 +1411,10 @@ function commands.execute(g, command)
     end
 
     -- Pay cost and mark used
-    for _, c in ipairs(ab.cost or {}) do
-      p.resources[c.type] = (p.resources[c.type] or 0) - c.amount
-    end
-    local key = tostring(pi) .. ":" .. source_key
-    if ab.once_per_turn then g.activatedUsedThisTurn[key] = true end
+    local paid_ok, paid_reason = pay_and_mark_command_activated_costs(g, pi, p, source, ability_index, source_key, ab, {
+      source_entry = source_entry_for_cost,
+    })
+    if not paid_ok then return fail(paid_reason) end
 
     -- Discard in descending index order so earlier indices stay valid
     local sorted = {}
@@ -1266,16 +1425,33 @@ function commands.execute(g, command)
     end
 
     -- Draw
+    local actual_draw_count = 0
     for _ = 1, draw_amount do
       if #p.deck > 0 then
         p.hand[#p.hand + 1] = table.remove(p.deck)
+        actual_draw_count = actual_draw_count + 1
       end
     end
 
-    return succeed(g,
-      { discard_count = required_discard, draw_count = draw_amount },
-      { { type = "discard_draw_resolved", player_index = pi, discard_count = required_discard, draw_count = draw_amount } }
-    )
+    local resolve_result = synthetic_resolve_result(ab.effect, source, {
+      {
+        type = "discard_draw_resolved",
+        discard_count = required_discard,
+        draw_count = actual_draw_count,
+        requested_draw_count = draw_amount,
+      },
+    })
+
+    return succeed_activated_command(g, pi, source, ability_index, {
+      meta = {
+        discard_count = required_discard,
+        draw_count = draw_amount,
+        resolve_result = resolve_result,
+        card_id = card_def.id,
+      },
+      event_type = "discard_draw_resolved",
+      event = { discard_count = required_discard, draw_count = draw_amount },
+    })
   end
 
   return fail("unknown_command")
