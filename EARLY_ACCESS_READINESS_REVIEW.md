@@ -3,6 +3,29 @@
 Date: 2026-02-20  
 Scope reviewed: `love2d/`, `relay/`, root build/deploy docs/scripts
 
+## Status Update (2026-02-25)
+
+This document is a point-in-time review from 2026-02-20. Several items listed below have already been addressed or partially addressed since then.
+
+### Confirmed Progress Since This Review
+
+- Hidden-information redaction is implemented in the host snapshot/push/submit flow (the original `C1` finding is no longer current).
+- Submit identity is session-token bound in the host/protocol flow (the original `C2` finding is no longer current).
+- `START_TURN` is host-internal and command/auth flow has been hardened (the original `C3` exploit path is no longer current).
+- Terminal match flow/UI exists (`is_terminal`, winner/reason handling in gameplay + UI).
+- Deterministic canonical state hashing replaced the earlier weak checksum implementation.
+- Replay logs now include deterministic state hash telemetry, and replay export is available in-game (`Esc -> Settings -> Export Replay JSON`).
+- Multiplayer reconnect diagnostics and desync detection are significantly improved (`state_seq`, visible-state checksums, optimistic/push hash mismatch detection).
+
+### Still Useful In This Review
+
+- Production readiness framing and milestone guidance
+- TLS verification concerns for internet play
+- Operational hardening recommendations (telemetry, abuse controls, CI breadth)
+- Release/build pipeline and Early Access launch process guidance
+
+Use this document as a strategic review reference, not a current bug list.
+
 ## Executive Summary
 
 The project is moving in the right architectural direction for a PvP TCG:
@@ -476,4 +499,3 @@ Goal: ship-ready distribution and live ops.
 3. Add exploit tests proving those fixes.
 4. Add terminal match-state flow.
 5. Add faction/deck handshake validation and safe failure handling.
-

@@ -1,326 +1,141 @@
-# Multiplayer Migration Testing Guide
+# Multiplayer Testing Guide (Current)
 
-This guide covers practical test steps for the current multiplayer foundation.
+Updated for the current authoritative multiplayer foundation, deterministic checksum/desync detection, and replay export tooling.
 
-## Prerequisites
+## Version Compatibility (Important)
 
-1. Lua 5.3+ installed and available as `lua`.
-2. (Optional) LÖVE 11.x for running the game client UI.
-3. For websocket-mode tests and runtime checks, install websocket Lua modules:
-   - client side: module `websocket` with `client.sync()`
-   - host side: module `websocket.server.sync` with `listen()`, or `websocket.server_copas` + `copas`
+Current compatibility gates (`src/data/config.lua`):
 
-## 0) Preflight multiplayer setup sanity check
+- `protocol_version = 2`
+- `rules_version = 0.1.1`
+- `content_version = 0.1.1`
 
-From repository root, confirm no obvious merge artifacts are present in docs/scripts:
+Use matching builds on both machines when testing multiplayer.
+
+## Recommended Test Order
+
+1. Engine regression suite (fast, broad coverage)
+2. Core smoke tests (host/session/runtime)
+3. Websocket/relay smoke tests (if testing online transport)
+4. Manual two-client playtest (including reconnect/desync scenarios)
+
+## 1) Engine Regression Suite (Repo Root)
 
 ```bash
-rg -n "^(<<<<<<<|=======|>>>>>>>|@@ )" love2d
+lua love2d/tests/engine_regression_tests.lua
 ```
 
-Expected output: no matches.
+What this covers (examples):
 
-## 1) Run deterministic replay smoke test
+- effect args schema validation
+- command/action regressions
+- stable instance IDs / once-per-turn tracking across index shifts
+- continuous buff recalculation
+- deterministic checksum behavior
+- replay hash telemetry
+- host checksum/state sequence metadata behavior
 
-From repository root:
+## 2) Core Multiplayer Smoke Tests (Repo Root)
+
+Run these first for host/session/adapter coverage:
 
 ```bash
 lua love2d/scripts/replay_smoke.lua
-```
-
-Expected output:
-
-```text
-Replay smoke test passed
-```
-
-This validates:
-- command log creation,
-- replay re-execution,
-- final state checksum consistency for a known sequence.
-
-## 2) Run authoritative host smoke test
-
-From repository root:
-
-```bash
 lua love2d/scripts/host_smoke.lua
-```
-
-Expected output:
-
-```text
-Host smoke test passed
-```
-
-This validates:
-- handshake version compatibility,
-- player slot join flow,
-- sequence-checked command submission,
-- out-of-order sequence rejection,
-- replay entry capture on host side.
-
-## 3) Run loopback client-session smoke test
-
-From repository root:
-
-```bash
 lua love2d/scripts/loopback_session_smoke.lua
-```
-
-Expected output:
-
-```text
-Loopback session smoke test passed
-```
-
-This validates:
-- client session handshake, join assignment, and reconnect via session token,
-- sequence continuity across reconnect (no seq reset to 1),
-- client -> transport -> host command path,
-- sequence progression and command acks,
-- snapshot + checksum retrieval for resync workflows,
-- checksum-mismatch handling via `resync_required` and client session auto-resync helper.
-
-## 4) Run websocket-ready transport smoke test
-
-From repository root:
-
-```bash
-lua love2d/scripts/websocket_transport_smoke.lua
-```
-
-Expected output:
-
-```text
-Websocket transport smoke test passed
-```
-
-This validates:
-- host gateway request routing (`connect`, `reconnect`, `submit`, `snapshot`),
-- websocket-ready transport request/response contract,
-- compatibility with `client_session` reconnect + resync helpers over a transport boundary.
-
-## 5) Run websocket JSON + client-wrapper smoke test
-
-From repository root:
-
-```bash
-lua love2d/scripts/websocket_json_client_smoke.lua
-```
-
-Expected output:
-
-```text
-Websocket JSON client smoke test passed
-```
-
-This validates:
-- JSON encode/decode framing around transport request/response payloads,
-- `websocket_client` provider wrapper compatibility with `websocket_transport`,
-- end-to-end connect/submit/resync/retry flow using framed payloads.
-
-## 6) Run websocket transport error-handling smoke test
-
-From repository root:
-
-```bash
-lua love2d/scripts/websocket_transport_error_smoke.lua
-```
-
-Expected output:
-
-```text
-Websocket transport error smoke test passed
-```
-
-This validates:
-- encode/send/receive/decode failure normalization to protocol `error` messages,
-- non-crashing behavior for transport boundary failures,
-- explicit `reason` codes for client-session level handling/logging.
-
-## 7) Run headless host service smoke test
-
-From repository root:
-
-```bash
 lua love2d/scripts/headless_host_service_smoke.lua
-```
-
-Expected output:
-
-```text
-Headless host service smoke test passed
-```
-
-This validates:
-- framed JSON service boundary (`headless_host_service`) over host gateway,
-- client-session compatibility across a process/network-style request/response boundary,
-- connect/submit/resync/retry flow without direct in-process host calls.
-
-## 8) Run authoritative client adapter smoke test
-
-From repository root:
-
-```bash
 lua love2d/scripts/authoritative_client_game_smoke.lua
-```
-
-Expected output:
-
-```text
-Authoritative client game smoke test passed
-```
-
-This validates:
-- a client-facing authoritative adapter that syncs host snapshots after command submit,
-- compatibility between `client_session` and process/network-style host service boundaries,
-- command submission + resync-required retry handling while maintaining a client-side snapshot cache.
-
-## 9) Run runtime multiplayer wiring smoke test
-
-From repository root:
-
-```bash
 lua love2d/scripts/runtime_multiplayer_smoke.lua
-```
-
-Expected output:
-
-```text
-Runtime multiplayer smoke test passed
-```
-
-This validates:
-- runtime builder wiring for in-process headless authoritative mode,
-- end-to-end connect + submit through `runtime_multiplayer`-constructed adapter,
-- client snapshot availability after authoritative command execution.
-
-## 10) Run websocket provider compatibility smoke test
-
-From repository root:
-
-```bash
-lua love2d/scripts/websocket_provider_smoke.lua
-```
-
-Expected output:
-
-```text
-Websocket provider smoke test passed
-```
-
-This validates:
-- websocket provider contract normalization (`send`/`receive` or `send_text`/`receive_text`),
-- module-based provider resolution path used by runtime startup wiring.
-
-## 11) Run runtime reconnect smoke test
-
-From repository root:
-
-```bash
 lua love2d/scripts/runtime_multiplayer_reconnect_smoke.lua
 ```
 
-Expected output:
-
-```text
-Runtime multiplayer reconnect smoke test passed
-```
-
-This validates:
-- runtime-built authoritative adapter reconnect behavior,
-- reconnect after local session disconnect without rebuilding transport wiring,
-- command submission continuity after reconnect.
-
-## 12) Run websocket host service smoke test
-
-From repository root:
+Useful additional correctness smokes:
 
 ```bash
-lua love2d/scripts/websocket_host_service_smoke.lua
-```
-
-Expected output:
-
-```text
-Websocket host service smoke test passed
-```
-
-This validates:
-- network host loop provider contract (`listen`/`accept`/`receive_text`/`send_text`),
-- frame dispatch from websocket host boundary into authoritative frame handler.
-
-## 13) Run conflict-marker smoke test
-
-From repository root:
-
-```bash
+lua love2d/scripts/hidden_info_redaction_smoke.lua
+lua love2d/scripts/command_result_semantics_smoke.lua
+lua love2d/scripts/terminal_state_smoke.lua
+lua love2d/scripts/deck_legality_smoke.lua
+lua love2d/scripts/upkeep_smoke.lua
+lua love2d/scripts/summoning_sickness_smoke.lua
 lua love2d/scripts/conflict_marker_smoke.lua
 ```
 
-Expected output:
+## 3) Websocket / Transport / Relay Smoke Tests (Repo Root)
 
-```text
-Conflict marker smoke test passed
-```
-
-This validates:
-- no unresolved Git merge markers are present in `.lua` and `.md` files under `love2d/`,
-- branch merges did not leave conflict artifacts that break Lua parsing.
-
-## 14) Manual protocol checks in REPL (optional)
-
-Open Lua REPL in repo root:
+Use these when validating websocket provider behavior, host services, or relay integration:
 
 ```bash
-lua
+lua love2d/scripts/websocket_transport_smoke.lua
+lua love2d/scripts/websocket_transport_error_smoke.lua
+lua love2d/scripts/websocket_json_client_smoke.lua
+lua love2d/scripts/websocket_provider_smoke.lua
+lua love2d/scripts/websocket_provider_raw_fallback_smoke.lua
+lua love2d/scripts/websocket_provider_secure_retry_smoke.lua
+lua love2d/scripts/websocket_host_service_smoke.lua
+lua love2d/scripts/relay_host_bridge_smoke.lua
+lua love2d/scripts/relay_host_bridge_push_routing_smoke.lua
+lua love2d/scripts/websocket_transport_relay_control_smoke.lua
 ```
 
-Then:
+Optional live `wss://` probe (requires network + SSL runtime support):
 
-```lua
-package.path = table.concat({
-  "love2d/?.lua",
-  "love2d/?/init.lua",
-  "love2d/src/?.lua",
-  "love2d/src/?/init.lua",
-  package.path,
-}, ";")
-
-local protocol = require("src.net.protocol")
-
-print(protocol.validate_submit_command({
-  type = "submit_command",
-  protocol_version = protocol.VERSION,
-  match_id = "m1",
-  seq = 1,
-  command = { type = "END_TURN" },
-}).ok)
+```bash
+lua love2d/scripts/wss_real_connection_smoke.lua
 ```
 
-Expected output: `true`.
+## 4) Manual Two-Client Test (Recommended)
 
-## 15) Run game client (optional UI sanity)
+### Local Headless Authoritative (single machine / quick sanity)
 
 From `love2d/`:
 
-```bash
-love .
+```powershell
+.\run_multiplayer.ps1 -Mode headless -PlayerName "P1" -MatchId "smoke-headless"
 ```
 
-This confirms command-driven local flow; set `BOM_MULTIPLAYER_MODE=headless` for local authoritative wiring or `BOM_MULTIPLAYER_MODE=websocket` + `BOM_MULTIPLAYER_URL=ws://...` for remote wiring (requires a websocket provider module at runtime).
+### Websocket Host + Two Clients (LAN)
+
+Host process (`love2d/`):
+
+```powershell
+.\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
+```
+
+Clients (`love2d/`, separate terminals/machines):
+
+```powershell
+.\run_multiplayer.ps1 -Mode websocket -Url "ws://HOST_IP:8080" -PlayerName "P1" -MatchId "lan-test"
+.\run_multiplayer.ps1 -Mode websocket -Url "ws://HOST_IP:8080" -PlayerName "P2" -MatchId "lan-test"
+```
+
+### What To Verify Manually
+
+- Both clients connect with no version mismatch errors
+- Turn flow works across both players
+- Reconnect flow preserves disconnect cause text
+- No random disconnects during longer idle and active play
+- Active abilities / spell targeting work for both players
+- `Esc` opens in-game settings when no prompt is pending
+- `Export Replay JSON` writes a file under the LÖVE save directory
+
+## Desync / Disconnect Debugging Checklist
+
+If a client enters reconnect flow:
+
+1. Capture the exact `Cause: ...` text from the reconnect status box.
+2. Export replay JSON from both players (if possible) via `Esc -> Export Replay JSON`.
+3. Note which command/action immediately preceded the issue.
+4. Confirm both clients are on the same build (`protocol/rules/content`).
+
+Current multiplayer instrumentation includes:
+
+- deterministic visible-state checksums
+- authoritative `state_seq`
+- optimistic local-vs-authoritative hash mismatch detection
+- push-payload checksum verification
 
 ## Notes
 
-- `src/net/websocket_transport.lua` is adapter-based: inject a real websocket client and encode/decode functions (for example JSON) to move from in-memory smoke to real network transport.
-- `src/net/websocket_client.lua` wraps provider-specific websocket connections behind the transport client contract.
-- `src/net/json_codec.lua` provides minimal JSON framing utilities for transport payloads.
-- `src/net/headless_host_service.lua` exposes host/gateway as framed JSON for process/network boundaries.
-- `scripts/run_headless_host.lua` runs the headless host service over stdin/stdout lines.
-- `src/net/websocket_host_service.lua` provides a provider-driven network host loop for websocket frame handling.
-- `scripts/run_websocket_host.lua` runs a websocket-facing authoritative host process (requires websocket server module).
-- `src/net/authoritative_client_game.lua` is a client adapter that keeps local state in sync via authoritative snapshots.
-- `src/net/runtime_multiplayer.lua` builds authoritative adapters for runtime headless/websocket mode selection.
-- `src/net/protocol.lua` and `src/net/host.lua` are transport-agnostic foundations for future socket/websocket integration.
-- For CI, add all smoke scripts as required checks once Lua is installed in the build environment.
+- Some docs in `docs/` are historical planning references. Use this file and `love2d/README.md` for current testing workflow.
+- For dependency setup, see `docs/MULTIPLAYER_DEPENDENCIES.md`.

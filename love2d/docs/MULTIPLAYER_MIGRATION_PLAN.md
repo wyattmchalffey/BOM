@@ -1,214 +1,65 @@
-# Multiplayer Migration Plan (MVP -> Early Access)
+# Multiplayer Migration Plan (History + Current Status)
 
-## Goal
+This document originally tracked the migration from local-only gameplay to a host-authoritative multiplayer foundation.
 
-Evolve the existing Love2D foundation into an Early Access-ready multiplayer architecture without a full rewrite.
+That migration has advanced substantially. This file now serves as:
 
-This plan assumes:
-- Keep the current Love2D client/UI foundation.
-- Introduce authoritative simulation boundaries now.
-- Add networking incrementally after deterministic command/reducer flow is stable.
+- a summary of what is already completed
+- a snapshot of what remains for production-quality multiplayer
 
----
+## Current Foundation Status (2026-02-25)
 
-## Target Architecture
+### Completed (Major)
 
-## Current implementation progress
+- Command-driven simulation boundary (`src/game/commands.lua`)
+- Host-authoritative multiplayer flow (`src/net/host.lua`)
+- Protocol versioning + compatibility gates (`src/net/protocol.lua`, `src/data/config.lua`)
+- Client session + reconnect/resync flow (`src/net/client_session.lua`)
+- Authoritative client adapters (`src/net/authoritative_client_game.lua`, threaded adapter)
+- Websocket/headless host service boundaries
+- Replay logging + replay export (in-game settings)
+- Deterministic canonical state hashing for desync checks
+- Authoritative `state_seq` tracking
+- Client desync detection hooks (optimistic hash mismatch + push hash mismatch)
+- Improved disconnect cause reporting + reconnect UX diagnostics
+- Engine regression test suite (`love2d/tests/engine_regression_tests.lua`)
 
-- ✅ Added centralized command execution boundary (`src/game/commands.lua`).
-- ✅ Routed key gameplay flows in `state/game.lua` through command dispatch.
-- ✅ Added structured command results with `ok`, `reason`, `meta`, and `events` payloads.
-- ✅ Added replay-log schema support (`src/game/replay.lua`) with versioned metadata and deterministic command capture.
-- ✅ Added protocol scaffolding (`src/net/protocol.lua`) for version-checked handshake and command submission envelopes.
-- ✅ Added a headless authoritative host foundation (`src/net/host.lua`) with join flow, sequence validation, command execution, and replay capture.
-- ✅ Added smoke-test scripts (`scripts/replay_smoke.lua`, `scripts/host_smoke.lua`) and a dedicated testing guide.
-- ✅ Added loopback transport + client-session adapter for end-to-end local command/ack/snapshot flow.
-- ✅ Added checksum-based `resync_required` path and snapshot resync plumbing.
-- ✅ Added session-token reconnect flow for client sessions over transport boundaries.
-- ✅ Added reconnect metadata carrying next expected sequence hints.
-- ✅ Added websocket-ready transport adapter (`src/net/websocket_transport.lua`) plus host gateway (`src/net/host_gateway.lua`) for real network boundary integration.
-- ✅ Added JSON framing codec (`src/net/json_codec.lua`) and concrete websocket client wrapper (`src/net/websocket_client.lua`) for provider-based runtime wiring.
-- ✅ Added websocket transport error normalization (encode/send/receive/decode failure mapping) with dedicated smoke coverage.
-- ✅ Added headless host service boundary (`src/net/headless_host_service.lua`) and process runner (`scripts/run_headless_host.lua`).
-- ✅ Added authoritative client adapter (`src/net/authoritative_client_game.lua`) to sync snapshots after network command submission.
-- ✅ Added in-client command logging (`GameState.command_log`) using replay schema metadata to seed replay/network sync work.
-- ✅ Added runtime multiplayer wiring (`src/net/runtime_multiplayer.lua`) so game startup can opt into authoritative headless/websocket transport flows.
-- ✅ Routed `state/game.lua` command dispatch through an optional authoritative adapter path for remote-authoritative command submission.
-- ✅ Added client-side reconnect queue/backoff handling in `state/game.lua` for transport failures in authoritative mode.
-- ✅ Added websocket host-service loop boundary (`src/net/websocket_host_service.lua`) and host runner (`scripts/run_websocket_host.lua`) for LAN/online process wiring.
+### Completed (Engine Refactor / Scalability)
 
----
+- Effect metadata/spec registry (`src/game/effect_specs.lua`)
+- Typed event bus foundation (`src/game/events.lua`)
+- Structured `abilities.resolve(...)` results
+- Spell `on_cast` registry (`src/game/spell_cast.lua`)
+- Prompt system refactor in `src/state/game.lua`
+- Stable board instance IDs + improved once-per-turn tracking
+- Continuous effect cache foundation in `src/game/unit_stats.lua`
 
-## 1) Core principles
+## What This Means
 
-1. **Single source of truth for rules**
-   - Game legality and state transitions live in a pure simulation core.
-   - UI never mutates game state directly.
+The project is no longer in the "migration plan" phase for multiplayer basics.
 
-2. **Command-based flow**
-   - Inputs become commands (player intent).
-   - Commands are validated and reduced into state changes.
-   - Reducer emits events for UI/audio feedback and replay logs.
+The remaining work is mostly about:
 
-3. **Determinism first**
-   - Given the same initial state + seed + command stream, outcomes must match exactly.
+- production hardening
+- tooling and observability
+- deeper engine normalization
+- content/mechanics completion
 
-4. **Server authority for multiplayer**
-   - Multiplayer clients submit commands.
-   - Authoritative host/server validates + applies.
-   - Clients render snapshots/events.
+## Remaining High-Impact Multiplayer/Engine Work
 
-## 2) Runtime components
+1. Zone-wide stable card instance IDs (hand/deck/graveyard, not just board)
+2. Continuous effects v2 (more than `global_buff`)
+3. Replay/desync diff tooling (first-divergence analysis between logs)
+4. Further event/command normalization for debugging/replay consumers
+5. Expanded automated sync/golden replay tests
+6. Softer desync recovery (in-place snapshot resync before reconnect fallback)
 
-- **Core simulation module** (`src/game/*`)
-  - State model
-  - Command validator/executor
-  - Reducer/actions
+## Historical Note
 
-- **Client presentation module** (`src/state/*`, `src/ui/*`, `src/fx/*`)
-  - Input mapping (click/drag -> command)
-  - Visuals/audio/animations
-  - Local prediction (optional later)
+If you need the original step-by-step migration checklist, check git history for earlier revisions of this file.
 
-- **Networking layer** (future)
-  - Match session/lobby
-  - Command transport
-  - Snapshot + event replication
-  - Reconnect handling
+## Related Docs
 
----
-
-## Phased implementation plan
-
-## Phase 0 — Immediate hardening (current sprint)
-
-1. Add a central command executor in game logic.
-2. Route existing gameplay intents through commands (start/end turn, worker assignment, structure build, activated ability).
-3. Return structured command results (`ok`, `reason`, optional metadata).
-4. Keep UI behavior unchanged (sound/popup effects still in presentation layer).
-
-**Deliverable:** The client no longer directly calls mutating action functions for primary gameplay operations.
-
-## Phase 1 — Full command coverage + event output
-
-1. Add command types for all player-facing actions (future combat, deck/hand actions, etc.).
-2. Standardize result payload:
-   - `ok`
-   - `reason`
-   - `events` (e.g., `resource_spent`, `worker_assigned`, `turn_started`)
-3. Move one-off validation from UI into command validation.
-4. Add lightweight replay log format:
-   - `initial_seed`
-   - timestamped command stream
-   - version metadata
-
-**Deliverable:** Replay-able deterministic local matches from command logs.
-
-## Phase 2 — Determinism and testing
-
-1. Define deterministic ordering rules for all triggered effects.
-2. Add deterministic RNG wrapper module (seeded, explicit call sites only).
-3. Create automated tests:
-   - command legality tests
-   - reducer transition tests
-   - replay consistency tests
-4. Freeze simulation API surface for networking.
-
-**Deliverable:** CI tests that fail on desync/regression risk.
-
-## Phase 3 — Authoritative multiplayer host
-
-1. Stand up a headless host process using the same core modules.
-2. Define protocol messages:
-   - `join_match`
-   - `submit_command`
-   - `command_result`
-   - `state_snapshot`
-   - `resync`
-3. Implement turn timers and disconnect/reconnect grace windows.
-4. Maintain command index/sequence numbers.
-
-**Deliverable:** Playable online 1v1 with host authority and rejoin support.
-
-## Phase 4 — Early Access operations
-
-1. Add compatibility/version gates (client build vs rules version).
-2. Add telemetry hooks (match duration, disconnect rates, desync detection).
-3. Build live balance pipeline (data patches + migration strategy).
-4. Add anti-cheat safeguards (server-side rule validation only).
-
-**Deliverable:** Production-ready Early Access multiplayer loop.
-
----
-
-## Data and protocol versioning requirements
-
-Before public multiplayer:
-
-1. Add `rules_version` and `content_version` fields to match setup.
-2. Add command schema version.
-3. Add replay format version.
-4. Reject mismatched clients at connect time with clear messaging.
-
----
-
-## Suggested file evolution
-
-Current repository can evolve with minimal disruption:
-
-- `src/game/state.lua` (state model)
-- `src/game/actions.lua` (low-level mutation helpers)
-- `src/game/commands.lua` (**new** command validation + execution boundary)
-- `src/state/game.lua` (maps UI interactions to commands)
-- `docs/MULTIPLAYER_MIGRATION_PLAN.md` (this document)
-
-Future additions:
-- `src/net/*` for transport/protocol
-- `src/game/events.lua` for reducer-emitted domain events
-- `tests/*` for deterministic command/replay tests
-
----
-
-
-## Next implementation targets (short-term)
-
-1. Validate websocket host/server module compatibility in packaged deployments (including TLS/reverse-proxy and firewall guidance).
-2. Expand reconnect UX with explicit player-facing affordances (manual retry button and richer disconnected-state messaging).
-3. Add multiplayer session details UI (match/player identifiers and reconnect attempt telemetry) in-game.
-
----
-
-## Immediate coding tasks (next 1-2 iterations)
-
-1. Expand command coverage to every existing state mutation path.
-2. Introduce event emission in command results.
-3. Add first deterministic replay smoke test.
-4. Add one small host-authority prototype endpoint/process.
-
----
-
-## Risks and mitigations
-
-1. **Risk:** UI code bypasses command layer.
-   - **Mitigation:** Ban direct action mutation calls from UI state handlers.
-
-2. **Risk:** Hidden nondeterminism (timers/random/order).
-   - **Mitigation:** Determinism tests + explicit RNG abstraction.
-
-3. **Risk:** Scope explosion before vertical slice ships.
-   - **Mitigation:** Keep current MVP visuals; prioritize command/reducer and host loop.
-
-4. **Risk:** Version drift during frequent balance patches.
-   - **Mitigation:** Enforce content/rules version checks in match handshake.
-
----
-
-## Definition of done for "multiplayer-ready foundation"
-
-A foundation is considered ready when:
-
-1. All gameplay mutations are command-driven.
-2. A headless host can run the same simulation core.
-3. Local replay of command logs is deterministic.
-4. Clients can reconnect and resync from authoritative snapshots.
-5. Version mismatches are detected and handled gracefully.
+- `MULTIPLAYER_TESTING.md` - current test execution guide
+- `MULTIPLAYER_ROADMAP.md` - longer-term roadmap (current priorities)
+- `../README.md` - runtime setup and controls

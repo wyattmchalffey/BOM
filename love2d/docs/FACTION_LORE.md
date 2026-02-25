@@ -1,5 +1,7 @@
 # Faction Lore Bible
 
+Status note (2026-02-25): This is a lore/reference document for worldbuilding and flavor writing. It is intentionally broader than the currently playable card set and mechanics.
+
 This document formalizes playable faction lore into a consistent format that can be reused for:
 - card flavor text
 - campaign writing

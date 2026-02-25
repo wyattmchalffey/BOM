@@ -1,151 +1,107 @@
-# Battles of Masadoria (LÖVE 2D)
+# Battles of Masadoria (LOVE / LÖVE 2D)
 
-Same game loop and UI as the web prototype: two players (Human Wood+Stone vs Orc Food+Stone), turn-based worker assignment, and structure building.
+Authoritative multiplayer-ready card game prototype built in Lua + LÖVE.
 
-## Run
+## Run The Game
 
-1. Install [LÖVE 11.x](https://love2d.org/) (Windows: use the installer; default path is `C:\Program Files\LOVE\`).
-2. From this folder (`love2d`) run **one** of:
-   - **PowerShell:** `.\run.ps1`
-   - **Command prompt:** `run.bat`
-   - **If `love` is in your PATH:** `love .`
-   - **Or** drag the `love2d` folder onto `love.exe` in `C:\Program Files\LOVE\`.
+Install LÖVE 11.x, then from the `love2d/` folder run one of:
 
-## Controls
+- PowerShell: `.\run.ps1`
+- Command Prompt: `run.bat`
+- If `love` is on PATH: `love .`
 
-- **Click "Blueprint Deck"** on a player panel to open that faction’s structure cards. Click **Close** or outside the box (or press Escape) to close.
-- **Drag a worker** (circle) from the unassigned pool onto a resource node to assign; drag from a node back to the unassigned pool (or onto the other node) to move.
-- Only the **active player** can move workers.
-- **"End turn / Start next"** ends the current turn and starts the next player’s turn (they gain 1 worker and produce resources from current assignments).
-- **Debug hotkey: `F8`** grants **+5** to each resource currently tracked for your local player (for testing only).
+## Core Controls
 
-## Project outline
+- Mouse-driven play (cards, workers, attacks, abilities)
+- `Esc`
+  - closes prompts/modals where applicable
+  - if nothing is pending, opens the in-game settings overlay
+- In-game settings overlay (via `Esc`) includes:
+  - `Export Replay JSON`
+  - `SFX Volume`
+  - `Fullscreen`
+  - `Return to Menu` (when available)
+- `F8` (debug/dev): add resources for the local player
 
-See [PROJECT_OUTLINE.md](PROJECT_OUTLINE.md) for the full MVP plan and file layout.
+## Replay Export
 
-## Multiplayer migration testing
+- Open in-game settings with `Esc` (when no prompt/selection is active)
+- Click `Export Replay JSON`
+- File is written to the LÖVE save directory under `replays/`
 
-See [docs/MULTIPLAYER_TESTING.md](docs/MULTIPLAYER_TESTING.md) for replay and host smoke-test steps.
+Replay logs are format `v2` and include deterministic post-state hash telemetry for desync/debugging workflows.
 
-Dependency checklist: [docs/MULTIPLAYER_DEPENDENCIES.md](docs/MULTIPLAYER_DEPENDENCIES.md).
+## Testing
 
-## Runtime multiplayer environment variables
+### Engine regression tests (recommended)
 
-- `BOM_MULTIPLAYER_MODE`: `off` (default), `headless`, or `websocket`.
-- `BOM_PLAYER_NAME`: optional display name sent during handshake.
-- `BOM_MATCH_ID`: optional match identifier override for local/headless setup.
-- `BOM_MULTIPLAYER_URL`: required for websocket mode (e.g. `ws://127.0.0.1:8080`).
-
-## Required runtime dependencies for websocket mode
-
-Websocket multiplayer depends on Lua websocket modules in **both** places below:
-
-1. **Client runtime (LÖVE app):** a module named `websocket` with `client.sync()` and a connection object that supports `connect`, `send`, and `receive`.
-2. **Host runtime (`lua` process):** either `websocket.server.sync` (`listen(host, port)`) **or** `websocket.server_copas` + `copas` (lua-websockets fallback).
-
-If either dependency is missing:
-- the client startup wiring falls back to local mode with an explicit reason, or
-- the host launcher exits with `websocket_server_module_not_found`.
-
-For secure hosted relays (`wss://...`, for example Render), the client Lua runtime also needs `ssl` (LuaSec). Verify with:
-- `lua -e "require('ssl')"`
-
-On Windows host startup, if you see `failed to start websocket host: websocket_server_module_not_found`, first try `luarocks install lua-websockets` (recommended). If you instead try `luarocks install websocket` and get a Git clone/repository error, switch to `lua-websockets`. If LuaRocks says no results for your current Lua, run `luarocks install lua-websockets --check-lua-versions`, then install for a Lua version you actually have (for example `luarocks --lua-version=5.3 install lua-websockets`). If LuaRocks reports `Could not find Lua <version> in PATH`, set it explicitly (example: `luarocks --lua-version=5.3 --local config variables.LUA C:\path\to\lua.exe`) and retry. Then verify with one of:
-- `lua -e "require('websocket.server.sync')"`
-- `lua -e "require('websocket.server_copas'); require('copas')"`
-
-### Windows dependency installer script
-
-From `love2d/` you can install/verify websocket multiplayer dependencies with:
-
-```powershell
-.\install_multiplayer_dependencies.ps1
-```
-
-If LuaRocks cannot find your Lua version in PATH, pass both version + exe path:
-
-```powershell
-.\install_multiplayer_dependencies.ps1 -LuaVersion 5.3 -LuaExePath "C:\path\to\lua.exe"
-```
-
-If you have multiple Lua installs, verify with the same executable path (not just `lua` from PATH):
-
-```powershell
-& "C:\path\to\lua.exe" -e "require('ssl'); print('ssl ok')"
-```
-
-If `luasec` fails with `OPENSSL_DIR` / `openssl/ssl.h` errors, install OpenSSL and pass its path:
-
-```powershell
-.\install_multiplayer_dependencies.ps1 -OpenSSLDir "C:\Program Files\OpenSSL-Win32"
-```
-
-Use `OpenSSL-Win32` for 32-bit Lua installs (for example Lua under `Program Files (x86)`), and `OpenSSL-Win64` for 64-bit Lua installs.
-If LuaRocks build logs show `'cl' is not recognized`, rerun from a Visual Studio Developer shell (x86 Native Tools for Lua 5.1 x86).
-If `ssl51.dll` loads with `The specified procedure could not be found`, remove stale `ssl51.dll` and reinstall LuaSec with matching OpenSSL runtime DLLs on PATH.
-
-### Host process helper (LAN / online)
-
-For a networked authoritative host process, use:
+From repo root:
 
 ```bash
-BOM_HOST=0.0.0.0 BOM_PORT=8080 lua love2d/scripts/run_websocket_host.lua
+lua love2d/tests/engine_regression_tests.lua
 ```
 
-Then point clients at `BOM_MULTIPLAYER_URL=ws://<host-ip>:8080`.
+### Multiplayer smoke tests
 
-## Non-technical Windows guide
+See `docs/MULTIPLAYER_TESTING.md` for the full list of smoke tests and manual checks.
 
-If you want a click-by-click setup for players/testers, use:
+## Multiplayer Runtime Modes
 
-- [docs/WINDOWS_MULTIPLAYER_SETUP_NON_TECHNICAL.md](docs/WINDOWS_MULTIPLAYER_SETUP_NON_TECHNICAL.md)
+Configured via environment variables (or via in-game menu flows):
 
-## Windows multiplayer quick setup
+- `BOM_MULTIPLAYER_MODE`
+  - `off` (default)
+  - `headless` (in-process authoritative host service)
+  - `websocket` (single-thread websocket client)
+  - `threaded_websocket` (threaded websocket client; recommended runtime path for remote play)
+- `BOM_PLAYER_NAME`
+- `BOM_MATCH_ID`
+- `BOM_MULTIPLAYER_URL` (required for websocket modes)
 
-### 1) Launch a multiplayer client from PowerShell
+Current compatibility gates (`src/data/config.lua`):
 
-From the `love2d` folder:
+- `protocol_version = 2`
+- `rules_version = 0.1.1`
+- `content_version = 0.1.1`
 
-```powershell
-# Local authoritative host in-process
-.\run_multiplayer.ps1 -Mode headless -PlayerName "PlayerA" -MatchId "lan-test"
+Both players must run compatible builds.
 
-# Remote websocket host
-.\run_multiplayer.ps1 -Mode websocket -Url "ws://192.168.1.25:8080" -PlayerName "PlayerA" -MatchId "lan-test"
-```
+## Multiplayer Features (Current)
 
-### 2) Launch a websocket host
+- Host-authoritative command execution
+- Session-token auth + reconnect support
+- Snapshot/push resync flows
+- Deterministic visible-state checksums
+- Authoritative `state_seq` tracking
+- Client-side optimistic hash comparison + desync-triggered resync/reconnect
+- Improved disconnect cause reporting/reconnect diagnostics
 
-From the `love2d` folder:
+## Websocket / Online Multiplayer Dependencies
 
-```powershell
-# PowerShell
-.\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
+See `docs/MULTIPLAYER_DEPENDENCIES.md` for installation and verification steps.
 
-# Command Prompt-safe wrapper (use this if `.ps1` opens in Notepad)
-run_websocket_host.bat -Host 0.0.0.0 -Port 8080 -MatchId "lan-test"
-```
+Non-technical setup guide:
 
-### 3) Build a distributable Windows folder
+- `docs/WINDOWS_MULTIPLAYER_SETUP_NON_TECHNICAL.md`
 
-From the `love2d` folder:
+## Useful Scripts
 
-```powershell
-.\build_windows.ps1 -GameName "BattlesOfMasadoria"
-```
+From `love2d/`:
 
-This creates `build/windows/` with:
-- `BattlesOfMasadoria.love`
-- `BattlesOfMasadoria.exe` (fused executable)
-- required LÖVE runtime `.dll` files copied next to the executable.
+- `.\install_multiplayer_dependencies.ps1`
+- `.\run_multiplayer.ps1 ...`
+- `.\run_websocket_host.ps1 ...`
+- `.\build_windows.ps1 -GameName "BattlesOfMasadoria"`
 
-## Remaining multiplayer setup checklist
+From repo root:
 
-To run reliable LAN/online matches outside local smoke tests, these items are still recommended:
+- `lua love2d/scripts/host_smoke.lua`
+- `lua love2d/scripts/runtime_multiplayer_smoke.lua`
+- `lua love2d/scripts/websocket_host_service_smoke.lua`
 
-- Install and package a websocket **client** Lua module for each target platform build (Windows/macOS/Linux).
-- Install and package a websocket **server** Lua module for the host runtime used by `scripts/run_websocket_host.lua`.
-- For internet play, run behind TLS/reverse proxy (`wss://`) and configure firewall/port-forwarding for the host endpoint.
-- Add clear reconnect UX affordances (manual retry button + richer disconnected-state messaging).
-- Add multiplayer session details UI (match id, player id/name, reconnect attempt telemetry).
-- Finish command/event coverage + deterministic replay validation before broad online rollout.
+## Documentation Map
+
+- `PROJECT_OUTLINE.md` - historical MVP outline (now archived/reference)
+- `docs/MULTIPLAYER_MIGRATION_PLAN.md` - migration history + current status notes
+- `docs/MULTIPLAYER_ROADMAP.md` - roadmap archive + current focus
+- `docs/GAME_DESIGN.md` - design target / rules intent (not exact implementation contract)
