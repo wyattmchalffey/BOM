@@ -102,6 +102,7 @@ From repo root:
 ## Documentation Map
 
 - `PROJECT_OUTLINE.md` - historical MVP outline (now archived/reference)
+- `docs/ALPHA_RULES_BRIEF.md` - short playtester rules summary for the current alpha build
 - `docs/MULTIPLAYER_MIGRATION_PLAN.md` - migration history + current status notes
 - `docs/MULTIPLAYER_ROADMAP.md` - roadmap archive + current focus
 - `docs/GAME_DESIGN.md` - design target / rules intent (not exact implementation contract)

@@ -70,7 +70,14 @@ function MenuState.new(callbacks)
     deckbuilder_counts = {},
     deckbuilder_tab = "main",
     deckbuilder_scroll = 0,
+    deckbuilder_dragging_scrollbar = false,
+    deckbuilder_scrollbar_drag_offset = 0,
+    deckbuilder_search_text = "",
+    deckbuilder_search_focused = false,
+    deckbuilder_filters = { main = "All", blueprints = "All" },
     deckbuilder_total = 0,
+    deckbuilder_main_total = 0,
+    deckbuilder_blueprint_total = 0,
     deckbuilder_min = 0,
     deckbuilder_max = nil,
     deckbuilder_error = nil,
@@ -386,14 +393,34 @@ local DECK_CARD_H = 118
 local DECK_CARD_GAP = 22
 local DECK_CARD_Y = 108
 local DECK_LIST_X_PAD = 120
-local DECK_LIST_TOP = 340
-local DECK_TAB_TOP = DECK_LIST_TOP - 58
-local DECK_TAB_H = 26
-local DECK_TAB_GAP = 8
-local DECK_TAB_WIDTH = 140
+local DECK_TAB_H = 24
+local DECK_TAB_GAP = 6
+local DECK_TAB_WIDTH = 124
+local DECK_TAB_TOP = 252
+local DECK_SEARCH_H = 28
+local DECK_SEARCH_TOP = DECK_TAB_TOP + DECK_TAB_H + 6
+local DECK_FILTER_TOP = DECK_SEARCH_TOP + DECK_SEARCH_H + 6
+local DECK_FILTER_H = 22
+local DECK_STATUS_TOP = DECK_FILTER_TOP + DECK_FILTER_H + 6
+local DECK_LIST_TOP = DECK_STATUS_TOP + 50
 local DECK_TAB_DEFS = {
   { id = "main", label = "Main Deck" },
   { id = "blueprints", label = "Blueprints" },
+}
+local DECK_FILTER_DEFS = {
+  main = {
+    { id = "All", label = "All" },
+    { id = "Unit", label = "Unit" },
+    { id = "Worker", label = "Worker" },
+    { id = "Spell", label = "Spell" },
+    { id = "Technology", label = "Tech" },
+    { id = "Item", label = "Item" },
+  },
+  blueprints = {
+    { id = "All", label = "All" },
+    { id = "Structure", label = "Structure" },
+    { id = "Artifact", label = "Artifact" },
+  },
 }
 local DECK_FACTION_TILES = {
   { id = "Human", label = "Human" },
@@ -410,6 +437,9 @@ local DECK_SELECTOR_COUNT_H = 24
 local DECK_SELECTOR_BTN_W = 28
 local DECK_SELECTOR_BTN_H = 22
 local DECK_SELECTOR_CELL_H = DECK_SELECTOR_CARD_H + DECK_SELECTOR_COUNT_Y_GAP + DECK_SELECTOR_COUNT_H
+local DECK_SELECTOR_SCROLLBAR_W = 12
+local DECK_SELECTOR_SCROLLBAR_PAD = 10
+local DECK_SELECTOR_SCROLLBAR_MIN_THUMB_H = 28
 
 local function supported_deck_factions()
   local out = game_state.supported_player_factions()
@@ -471,12 +501,228 @@ local function is_blueprint_entry(entry)
   return entry and (entry.kind == "Structure" or entry.kind == "Artifact")
 end
 
+local function clamp_number(v, lo, hi)
+  if v < lo then return lo end
+  if v > hi then return hi end
+  return v
+end
+
+local function deckbuilder_count_breakdown(entries, counts)
+  local main_total = 0
+  local blueprint_total = 0
+  for _, entry in ipairs(entries or {}) do
+    local count = math.floor(tonumber(type(counts) == "table" and counts[entry.card_id]) or 0)
+    if count > 0 then
+      if is_blueprint_entry(entry) then
+        blueprint_total = blueprint_total + count
+      else
+        main_total = main_total + count
+      end
+    end
+  end
+  return main_total, blueprint_total
+end
+
+local function deckbuilder_filter_defs_for_tab(tab_id)
+  if tab_id == "blueprints" then
+    return DECK_FILTER_DEFS.blueprints or {}
+  end
+  return DECK_FILTER_DEFS.main or {}
+end
+
+local function deckbuilder_filter_id_supported(tab_id, filter_id)
+  for _, spec in ipairs(deckbuilder_filter_defs_for_tab(tab_id)) do
+    if spec.id == filter_id then
+      return true
+    end
+  end
+  return false
+end
+
+local function deckbuilder_kind_matches_filter(kind, filter_id)
+  if filter_id == nil or filter_id == "All" then
+    return true
+  end
+  kind = tostring(kind or "")
+  if kind == filter_id then
+    return true
+  end
+  if filter_id == "Technology" and kind == "Tech" then
+    return true
+  end
+  if filter_id == "Tech" and kind == "Technology" then
+    return true
+  end
+  return false
+end
+
+local function deckbuilder_text_matches_search(value, needle_lower)
+  if needle_lower == nil or needle_lower == "" then
+    return true
+  end
+  if value == nil then
+    return false
+  end
+  return string.find(string.lower(tostring(value)), needle_lower, 1, true) ~= nil
+end
+
+function MenuState:_refresh_deckbuilder_count_totals()
+  local main_total, blueprint_total = deckbuilder_count_breakdown(self.deckbuilder_cards, self.deckbuilder_counts)
+  self.deckbuilder_main_total = main_total
+  self.deckbuilder_blueprint_total = blueprint_total
+  self.deckbuilder_total = main_total + blueprint_total
+end
+
+function MenuState:_set_deckbuilder_scroll(value, max_scroll)
+  max_scroll = math.max(0, tonumber(max_scroll) or 0)
+  self.deckbuilder_scroll = clamp_number(tonumber(value) or 0, 0, max_scroll)
+end
+
+function MenuState:deckbuilder_search_rect()
+  local gw = love.graphics.getWidth()
+  return {
+    x = DECK_LIST_X_PAD,
+    y = DECK_SEARCH_TOP - (self.deckbuilder_scroll or 0),
+    w = gw - DECK_LIST_X_PAD * 2,
+    h = DECK_SEARCH_H,
+  }
+end
+
+function MenuState:deckbuilder_filter_tab_rects()
+  local rects = {}
+  local defs = deckbuilder_filter_defs_for_tab(self.deckbuilder_tab)
+  local font = util.get_font(11)
+  local x = DECK_LIST_X_PAD
+  for i, spec in ipairs(defs) do
+    local w = font:getWidth(spec.label) + 16
+    rects[i] = {
+      index = i,
+      id = spec.id,
+      label = spec.label,
+      x = x,
+      y = DECK_FILTER_TOP - (self.deckbuilder_scroll or 0),
+      w = w,
+      h = DECK_FILTER_H,
+    }
+    x = x + w + 6
+  end
+  return rects
+end
+
+function MenuState:deckbuilder_scroll_viewport_rect()
+  local gw, gh = love.graphics.getDimensions()
+  local top = DECK_CARD_Y
+  local bottom = gh - 24
+  return {
+    x = 0,
+    y = top,
+    w = gw,
+    h = math.max(1, bottom - top),
+    bottom = bottom,
+  }
+end
+
+function MenuState:deckbuilder_active_filter_id()
+  local tab_id = (self.deckbuilder_tab == "blueprints") and "blueprints" or "main"
+  self.deckbuilder_filters = self.deckbuilder_filters or {}
+  local filter_id = self.deckbuilder_filters[tab_id]
+  if not deckbuilder_filter_id_supported(tab_id, filter_id) then
+    filter_id = "All"
+    self.deckbuilder_filters[tab_id] = filter_id
+  end
+  return filter_id
+end
+
+function MenuState:_set_deckbuilder_active_filter(filter_id)
+  local tab_id = (self.deckbuilder_tab == "blueprints") and "blueprints" or "main"
+  if not deckbuilder_filter_id_supported(tab_id, filter_id) then
+    filter_id = "All"
+  end
+  self.deckbuilder_filters = self.deckbuilder_filters or {}
+  self.deckbuilder_filters[tab_id] = filter_id
+end
+
+function MenuState:deckbuilder_scrollbar_rects(layout)
+  if type(layout) ~= "table" or type(layout.scrollbar_track) ~= "table" then
+    return nil
+  end
+  local track = layout.scrollbar_track
+  local content_h = math.max(tonumber(layout.content_h) or 0, tonumber(layout.total_h) or 0)
+  if layout.max_scroll <= 0 or content_h <= layout.list_h then
+    return { track_r = track, thumb_r = nil }
+  end
+
+  local visible_ratio = layout.list_h / math.max(content_h, 1)
+  local thumb_h = math.floor(math.max(DECK_SELECTOR_SCROLLBAR_MIN_THUMB_H, track.h * visible_ratio))
+  if thumb_h > track.h then thumb_h = track.h end
+  local travel = math.max(0, track.h - thumb_h)
+  local scroll_ratio = (self.deckbuilder_scroll or 0) / math.max(layout.max_scroll, 1)
+  local thumb_y = track.y + math.floor(travel * scroll_ratio + 0.5)
+  return {
+    track_r = track,
+    thumb_r = { x = track.x, y = thumb_y, w = track.w, h = thumb_h },
+  }
+end
+
+function MenuState:_set_deckbuilder_scroll_from_scrollbar_mouse(y, layout, drag_offset)
+  local rects = self:deckbuilder_scrollbar_rects(layout)
+  if not rects or not rects.thumb_r then
+    self:_set_deckbuilder_scroll(0, layout and layout.max_scroll or 0)
+    return
+  end
+  local track = rects.track_r
+  local thumb = rects.thumb_r
+  local travel = math.max(0, track.h - thumb.h)
+  if travel <= 0 then
+    self:_set_deckbuilder_scroll(0, layout.max_scroll)
+    return
+  end
+  local top = (tonumber(y) or track.y) - (tonumber(drag_offset) or 0)
+  local ratio = (top - track.y) / travel
+  ratio = clamp_number(ratio, 0, 1)
+  self:_set_deckbuilder_scroll(ratio * layout.max_scroll, layout.max_scroll)
+end
+
 function MenuState:deckbuilder_visible_cards()
   local visible = {}
   local want_blueprints = (self.deckbuilder_tab == "blueprints")
+  local active_filter = self:deckbuilder_active_filter_id()
+  local search_text = tostring(self.deckbuilder_search_text or "")
+  local search_lower = string.lower((search_text:gsub("^%s+", ""):gsub("%s+$", "")))
+  local use_search = #search_lower > 0
   for _, entry in ipairs(self.deckbuilder_cards or {}) do
     local is_blueprint = is_blueprint_entry(entry)
-    if (want_blueprints and is_blueprint) or ((not want_blueprints) and (not is_blueprint)) then
+    local include = (want_blueprints and is_blueprint) or ((not want_blueprints) and (not is_blueprint))
+    if include and (active_filter ~= "All") then
+      include = deckbuilder_kind_matches_filter(entry.kind, active_filter)
+    end
+    if include and use_search then
+      include = false
+      if deckbuilder_text_matches_search(entry.name, search_lower)
+        or deckbuilder_text_matches_search(entry.card_id, search_lower)
+        or deckbuilder_text_matches_search(entry.kind, search_lower)
+      then
+        include = true
+      else
+        local def = safe_card_def(entry.card_id)
+        if def then
+          if deckbuilder_text_matches_search(def.name, search_lower)
+            or deckbuilder_text_matches_search(def.kind, search_lower)
+            or deckbuilder_text_matches_search(def.text, search_lower)
+          then
+            include = true
+          elseif type(def.subtypes) == "table" then
+            for _, subtype in ipairs(def.subtypes) do
+              if deckbuilder_text_matches_search(subtype, search_lower) then
+                include = true
+                break
+              end
+            end
+          end
+        end
+      end
+    end
+    if include then
       visible[#visible + 1] = entry
     end
   end
@@ -486,15 +732,19 @@ end
 function MenuState:deckbuilder_selector_layout(visible_cards)
   local card_count = type(visible_cards) == "number" and visible_cards or #visible_cards
   local gw, gh = love.graphics.getDimensions()
+  local viewport_top = DECK_CARD_Y
+  local viewport_bottom = gh - 24
+  local viewport_h = math.max(1, viewport_bottom - viewport_top)
   local list_x = DECK_LIST_X_PAD
   local list_w = gw - DECK_LIST_X_PAD * 2
-  local list_top = DECK_LIST_TOP
-  local list_bottom = gh - 24
-  local list_h = list_bottom - list_top
+  local grid_top = DECK_LIST_TOP + (self.deckbuilder_error and 18 or 0)
 
-  local cols = math.max(1, math.floor((list_w + DECK_SELECTOR_COL_GAP) / (DECK_SELECTOR_CARD_W + DECK_SELECTOR_COL_GAP)))
+  local scrollbar_gutter = DECK_SELECTOR_SCROLLBAR_W + DECK_SELECTOR_SCROLLBAR_PAD
+  local content_x = list_x
+  local content_w = math.max(DECK_SELECTOR_CARD_W, list_w - scrollbar_gutter)
+  local cols = math.max(1, math.floor((content_w + DECK_SELECTOR_COL_GAP) / (DECK_SELECTOR_CARD_W + DECK_SELECTOR_COL_GAP)))
   local grid_w = cols * DECK_SELECTOR_CARD_W + (cols - 1) * DECK_SELECTOR_COL_GAP
-  local grid_x = list_x + math.floor((list_w - grid_w) / 2)
+  local grid_x = content_x + math.floor((content_w - grid_w) / 2)
 
   -- Compute per-row max card heights from actual card content
   local rows = math.ceil(card_count / cols)
@@ -525,20 +775,33 @@ function MenuState:deckbuilder_selector_layout(visible_cards)
     if r < rows then total_h = total_h + DECK_SELECTOR_ROW_GAP end
   end
 
-  local max_scroll = math.max(0, total_h - list_h)
-  self.deckbuilder_scroll = math.max(0, math.min(self.deckbuilder_scroll or 0, max_scroll))
+  local content_h = math.max(0, grid_top - viewport_top) + total_h
+  local max_scroll = math.max(0, content_h - viewport_h)
+  self:_set_deckbuilder_scroll(self.deckbuilder_scroll or 0, max_scroll)
 
   return {
     list_x = list_x,
     list_w = list_w,
-    list_top = list_top,
-    list_bottom = list_bottom,
-    list_h = list_h,
+    list_top = viewport_top,
+    list_bottom = viewport_bottom,
+    list_h = viewport_h,
+    viewport_top = viewport_top,
+    viewport_bottom = viewport_bottom,
+    grid_top = grid_top,
+    content_x = content_x,
+    content_w = content_w,
     cols = cols,
     grid_x = grid_x,
     total_h = total_h,
+    content_h = content_h,
     max_scroll = max_scroll,
     row_heights = row_heights,
+    scrollbar_track = {
+      x = list_x + list_w - DECK_SELECTOR_SCROLLBAR_W,
+      y = viewport_top,
+      w = DECK_SELECTOR_SCROLLBAR_W,
+      h = viewport_h,
+    },
   }
 end
 
@@ -560,7 +823,7 @@ function MenuState:deckbuilder_selector_items(visible_cards)
     local row = math.floor((i - 1) / layout.cols) + 1  -- 1-indexed
     local card_h = layout.row_heights[row] or DECK_SELECTOR_CARD_H
     local card_x = layout.grid_x + col * (DECK_SELECTOR_CARD_W + DECK_SELECTOR_COL_GAP)
-    local card_y = layout.list_top + row_y[row] - self.deckbuilder_scroll
+    local card_y = layout.grid_top + row_y[row] - self.deckbuilder_scroll
     local cell_h = card_h + DECK_SELECTOR_COUNT_Y_GAP + DECK_SELECTOR_COUNT_H
     local controls_y = card_y + card_h + DECK_SELECTOR_COUNT_Y_GAP
     local btn_y = controls_y + math.floor((DECK_SELECTOR_COUNT_H - DECK_SELECTOR_BTN_H) / 2)
@@ -585,15 +848,16 @@ function MenuState:deckbuilder_selector_items(visible_cards)
   return layout, items
 end
 
-local function deckbuilder_tab_rects()
+local function deckbuilder_tab_rects(scroll_y)
   local rects = {}
   local x = DECK_LIST_X_PAD
+  local y = DECK_TAB_TOP - (tonumber(scroll_y) or 0)
   for i, tab in ipairs(DECK_TAB_DEFS) do
     rects[i] = {
       id = tab.id,
       label = tab.label,
       x = x,
-      y = DECK_TAB_TOP,
+      y = y,
       w = DECK_TAB_WIDTH,
       h = DECK_TAB_H,
     }
@@ -614,6 +878,15 @@ function MenuState:refresh_deckbuilder_state()
   self.deckbuilder_cards = deck_validation.deck_entries_for_faction(faction)
   local deck = deck_profiles.get_deck(faction) or {}
   self.deckbuilder_counts = deck_profiles.build_counts(faction, deck)
+  self.deckbuilder_filters = self.deckbuilder_filters or { main = "All", blueprints = "All" }
+  if not deckbuilder_filter_id_supported("main", self.deckbuilder_filters.main) then
+    self.deckbuilder_filters.main = "All"
+  end
+  if not deckbuilder_filter_id_supported("blueprints", self.deckbuilder_filters.blueprints) then
+    self.deckbuilder_filters.blueprints = "All"
+  end
+  self.deckbuilder_search_text = tostring(self.deckbuilder_search_text or "")
+  self.deckbuilder_search_focused = false
   if self.deckbuilder_tab ~= "main" and self.deckbuilder_tab ~= "blueprints" then
     self.deckbuilder_tab = "main"
   end
@@ -623,6 +896,9 @@ function MenuState:refresh_deckbuilder_state()
   self.deckbuilder_min = meta.min_size or 0
   self.deckbuilder_max = meta.max_size
   self.deckbuilder_scroll = 0
+  self.deckbuilder_dragging_scrollbar = false
+  self.deckbuilder_scrollbar_drag_offset = 0
+  self:_refresh_deckbuilder_count_totals()
   self.deckbuilder_error = nil
 end
 
@@ -646,9 +922,11 @@ function MenuState:_set_deck_count(card_id, value)
     self.deckbuilder_total = saved.meta and saved.meta.deck_size or #deck
     self.deckbuilder_min = saved.meta and saved.meta.min_size or self.deckbuilder_min
     self.deckbuilder_max = saved.meta and saved.meta.max_size
+    self:_refresh_deckbuilder_count_totals()
     self.deckbuilder_error = nil
   else
     self.deckbuilder_total = #deck
+    self:_refresh_deckbuilder_count_totals()
     self.deckbuilder_error = saved.reason
   end
 end
@@ -669,8 +947,12 @@ function MenuState:draw_deckbuilder()
   love.graphics.setColor(DIM[1], DIM[2], DIM[3], 1)
   love.graphics.printf("Choose faction and tune card counts", 0, 70, gw, "center")
 
+  local deck_viewport = self:deckbuilder_scroll_viewport_rect()
+  love.graphics.setScissor(deck_viewport.x, deck_viewport.y, deck_viewport.w, deck_viewport.h)
+
   -- Faction cards
   local faction_tiles, start_x, card_y = deckbuilder_faction_layout(gw)
+  card_y = card_y - (self.deckbuilder_scroll or 0)
   local label_font = util.get_title_font(21)
   local detail_font = util.get_font(13)
   local soon_font = util.get_title_font(16)
@@ -738,7 +1020,7 @@ function MenuState:draw_deckbuilder()
     end
   end
 
-  local tab_rects = deckbuilder_tab_rects()
+  local tab_rects = deckbuilder_tab_rects(self.deckbuilder_scroll or 0)
   local tab_font = util.get_font(12)
   for i, tab in ipairs(tab_rects) do
     local selected = (self.deckbuilder_tab == tab.id)
@@ -755,30 +1037,105 @@ function MenuState:draw_deckbuilder()
     love.graphics.rectangle("line", tab.x, tab.y, tab.w, tab.h, 6, 6)
     love.graphics.setFont(tab_font)
     love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], selected and 1 or 0.85)
-    love.graphics.printf(tab.label, tab.x, tab.y + 5, tab.w, "center")
+    love.graphics.printf(tab.label, tab.x, tab.y + math.floor((tab.h - tab_font:getHeight()) / 2), tab.w, "center")
   end
 
-  local info_font = util.get_font(13)
-  local status_y = DECK_LIST_TOP - 26
-  local tab_label = (self.deckbuilder_tab == "blueprints") and "Blueprints" or "Main Deck"
-  local status_text = string.format("Deck Size: %d  |  Viewing: %s", self.deckbuilder_total or 0, tab_label)
-  love.graphics.setFont(info_font)
-  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 0.95)
-  love.graphics.printf(status_text, DECK_LIST_X_PAD, status_y, gw - DECK_LIST_X_PAD * 2, "left")
-  if self.deckbuilder_error then
-    love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 0.95)
-    love.graphics.printf("Deck invalid: " .. tostring(self.deckbuilder_error), DECK_LIST_X_PAD, status_y + 16, gw - DECK_LIST_X_PAD * 2, "left")
+  local search_r = self:deckbuilder_search_rect()
+  local search_hovered = (self.deckbuilder_hover == 600)
+  love.graphics.setColor(0.07, 0.08, 0.11, 1)
+  love.graphics.rectangle("fill", search_r.x, search_r.y, search_r.w, search_r.h, 5, 5)
+  if self.deckbuilder_search_focused then
+    love.graphics.setColor(0.35, 0.5, 0.9, 0.75)
+  elseif search_hovered then
+    love.graphics.setColor(0.28, 0.34, 0.44, 0.95)
+  else
+    love.graphics.setColor(0.2, 0.22, 0.28, 1)
+  end
+  love.graphics.rectangle("line", search_r.x, search_r.y, search_r.w, search_r.h, 5, 5)
+  local search_label_font = util.get_font(12)
+  local search_value_font = util.get_font(13)
+  love.graphics.setFont(search_label_font)
+  love.graphics.setColor(0.45, 0.47, 0.55, 1)
+  love.graphics.print("Search:", search_r.x + 8, search_r.y + 7)
+  local search_text_x = search_r.x + 64
+  local raw_search = tostring(self.deckbuilder_search_text or "")
+  local display_search = raw_search
+  love.graphics.setFont(search_value_font)
+  if #display_search == 0 and not self.deckbuilder_search_focused then
+    love.graphics.setColor(0.4, 0.42, 0.5, 0.7)
+    display_search = "Type to filter cards..."
+  else
+    love.graphics.setColor(0.9, 0.91, 0.95, 1)
+  end
+  love.graphics.printf(display_search, search_text_x, search_r.y + 7, search_r.w - (search_text_x - search_r.x) - 10, "left")
+  if self.deckbuilder_search_focused and (math.floor(self.cursor_blink * 2) % 2 == 0) then
+    local cursor_x = search_text_x + search_value_font:getWidth(raw_search)
+    local max_cursor_x = search_r.x + search_r.w - 10
+    if cursor_x < max_cursor_x then
+      love.graphics.setColor(0.8, 0.85, 1, 0.9)
+      love.graphics.rectangle("fill", cursor_x + 1, search_r.y + 6, 1, search_r.h - 12)
+    end
+  end
+
+  local active_filter_id = self:deckbuilder_active_filter_id()
+  local filter_font = util.get_font(11)
+  for i, fr in ipairs(self:deckbuilder_filter_tab_rects()) do
+    local is_active = (fr.id == active_filter_id)
+    local is_hovered = (self.deckbuilder_hover == (700 + i))
+    if is_active then
+      love.graphics.setColor(0.24, 0.34, 0.52, 0.4)
+    elseif is_hovered then
+      love.graphics.setColor(0.2, 0.22, 0.28, 1)
+    else
+      love.graphics.setColor(0.12, 0.13, 0.17, 1)
+    end
+    love.graphics.rectangle("fill", fr.x, fr.y, fr.w, fr.h, 4, 4)
+    if is_active then
+      love.graphics.setColor(0.5, 0.62, 0.85, 0.8)
+    else
+      love.graphics.setColor(0.25, 0.27, 0.33, 1)
+    end
+    love.graphics.rectangle("line", fr.x, fr.y, fr.w, fr.h, 4, 4)
+    love.graphics.setFont(filter_font)
+    love.graphics.setColor(0.85, 0.86, 0.92, is_active and 1 or 0.75)
+    love.graphics.printf(fr.label, fr.x, fr.y + math.floor((fr.h - filter_font:getHeight()) / 2), fr.w, "center")
   end
 
   local visible_cards = self:deckbuilder_visible_cards()
+  local info_font = util.get_font(13)
+  local status_y = DECK_STATUS_TOP - (self.deckbuilder_scroll or 0)
+  local tab_label = (self.deckbuilder_tab == "blueprints") and "Blueprints" or "Main Deck"
+  local counts_text = string.format(
+    "Main: %d  |  Blueprints: %d  |  Total: %d",
+    self.deckbuilder_main_total or 0,
+    self.deckbuilder_blueprint_total or 0,
+    self.deckbuilder_total or 0
+  )
+  local viewing_text = string.format(
+    "Viewing: %s  |  Filter: %s  |  Showing: %d cards%s",
+    tab_label,
+    active_filter_id,
+    #visible_cards,
+    (#raw_search > 0) and ('  |  Search: "' .. raw_search .. '"') or ""
+  )
+  love.graphics.setFont(info_font)
+  love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 0.95)
+  love.graphics.printf(counts_text, DECK_LIST_X_PAD, status_y, gw - DECK_LIST_X_PAD * 2, "left")
+  love.graphics.setColor(DIM[1], DIM[2], DIM[3], 0.95)
+  love.graphics.printf(viewing_text, DECK_LIST_X_PAD, status_y + 15, gw - DECK_LIST_X_PAD * 2, "left")
+  if self.deckbuilder_error then
+    love.graphics.setColor(ERROR_COLOR[1], ERROR_COLOR[2], ERROR_COLOR[3], 0.95)
+    love.graphics.printf("Deck invalid: " .. tostring(self.deckbuilder_error), DECK_LIST_X_PAD, status_y + 30, gw - DECK_LIST_X_PAD * 2, "left")
+  end
+
   local selector_layout, selector_items = self:deckbuilder_selector_items(visible_cards)
   local count_font = util.get_font(13)
   local btn_font = util.get_title_font(16)
 
   love.graphics.setScissor(
-    selector_layout.list_x,
+    selector_layout.content_x,
     selector_layout.list_top,
-    selector_layout.list_w,
+    selector_layout.content_w,
     selector_layout.list_h
   )
   for _, item in ipairs(selector_items) do
@@ -849,6 +1206,31 @@ function MenuState:draw_deckbuilder()
     end
   end
   love.graphics.setScissor()
+
+  local sb = self:deckbuilder_scrollbar_rects(selector_layout)
+  if sb and sb.track_r then
+    local track = sb.track_r
+    local track_hover = (self.deckbuilder_hover == 500 or self.deckbuilder_hover == 501)
+    love.graphics.setColor(0.1, 0.11, 0.16, 0.9)
+    love.graphics.rectangle("fill", track.x, track.y, track.w, track.h, 6, 6)
+    love.graphics.setColor(1, 1, 1, track_hover and 0.22 or 0.1)
+    love.graphics.rectangle("line", track.x, track.y, track.w, track.h, 6, 6)
+
+    if sb.thumb_r then
+      local thumb = sb.thumb_r
+      local thumb_hover = (self.deckbuilder_hover == 501) or self.deckbuilder_dragging_scrollbar
+      if self.deckbuilder_dragging_scrollbar then
+        love.graphics.setColor(0.34, 0.74, 0.98, 0.92)
+      elseif thumb_hover then
+        love.graphics.setColor(0.28, 0.64, 0.9, 0.88)
+      else
+        love.graphics.setColor(0.22, 0.5, 0.72, 0.78)
+      end
+      love.graphics.rectangle("fill", thumb.x + 1, thumb.y + 1, thumb.w - 2, thumb.h - 2, 6, 6)
+      love.graphics.setColor(1, 1, 1, thumb_hover and 0.28 or 0.14)
+      love.graphics.rectangle("line", thumb.x + 1, thumb.y + 1, thumb.w - 2, thumb.h - 2, 6, 6)
+    end
+  end
 end
 
 -- Screen drawing
@@ -1344,9 +1726,15 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
       self.hover_button = nil
       return
     end
+    local deck_viewport = self:deckbuilder_scroll_viewport_rect()
+    if not point_in_rect(x, y, deck_viewport) then
+      self.deckbuilder_search_focused = false
+      return
+    end
     -- Faction cards
     local gw = love.graphics.getWidth()
     local faction_tiles, start_x, card_y = deckbuilder_faction_layout(gw)
+    card_y = card_y - (self.deckbuilder_scroll or 0)
     for i, tile in ipairs(faction_tiles) do
       local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
       local r = { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }
@@ -1362,16 +1750,57 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
     end
 
     -- Deck tabs
-    for _, tab in ipairs(deckbuilder_tab_rects()) do
+    for _, tab in ipairs(deckbuilder_tab_rects(self.deckbuilder_scroll or 0)) do
       if point_in_rect(x, y, tab) then
         self.deckbuilder_tab = tab.id
         self.deckbuilder_scroll = 0
+        self.deckbuilder_dragging_scrollbar = false
+        self.deckbuilder_search_focused = false
+        return
+      end
+    end
+
+    local search_r = self:deckbuilder_search_rect()
+    if point_in_rect(x, y, search_r) then
+      self.deckbuilder_search_focused = true
+      self.deckbuilder_hover = 600
+      self.hover_button = -2
+      return
+    end
+    self.deckbuilder_search_focused = false
+
+    for _, fr in ipairs(self:deckbuilder_filter_tab_rects()) do
+      if point_in_rect(x, y, fr) then
+        self:_set_deckbuilder_active_filter(fr.id)
+        self.deckbuilder_scroll = 0
+        self.deckbuilder_dragging_scrollbar = false
         return
       end
     end
 
     local visible_cards = self:deckbuilder_visible_cards()
     local selector_layout, selector_items = self:deckbuilder_selector_items(visible_cards)
+    local sb = self:deckbuilder_scrollbar_rects(selector_layout)
+    if sb and sb.track_r and point_in_rect(x, y, sb.track_r) then
+      if sb.thumb_r and point_in_rect(x, y, sb.thumb_r) then
+        self.deckbuilder_dragging_scrollbar = true
+        self.deckbuilder_scrollbar_drag_offset = y - sb.thumb_r.y
+        self.deckbuilder_hover = 501
+        self.hover_button = -2
+      elseif sb.thumb_r then
+        self:_set_deckbuilder_scroll_from_scrollbar_mouse(y, selector_layout, sb.thumb_r.h / 2)
+        local sb_after = self:deckbuilder_scrollbar_rects(selector_layout)
+        local thumb_after = sb_after and sb_after.thumb_r or nil
+        self.deckbuilder_dragging_scrollbar = thumb_after ~= nil
+        self.deckbuilder_scrollbar_drag_offset = thumb_after and (y - thumb_after.y) or 0
+        self.deckbuilder_hover = thumb_after and 501 or 500
+        self.hover_button = -2
+      else
+        self.deckbuilder_hover = 500
+        self.hover_button = -2
+      end
+      return
+    end
     for _, item in ipairs(selector_items) do
       local cell = item.cell_r
       if cell.y + cell.h >= selector_layout.list_top and cell.y <= selector_layout.list_bottom then
@@ -1463,6 +1892,9 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
 end
 
 function MenuState:mousereleased(x, y, button, istouch, presses)
+  if button == 1 and self.deckbuilder_dragging_scrollbar then
+    self.deckbuilder_dragging_scrollbar = false
+  end
   if self.settings_dragging_slider then
     self.settings_dragging_slider = false
   end
@@ -1487,12 +1919,25 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
 
   elseif self.screen == "deckbuilder" then
     self.deckbuilder_hover = nil
+    if self.deckbuilder_dragging_scrollbar then
+      local visible_cards = self:deckbuilder_visible_cards()
+      local selector_layout = self:deckbuilder_selector_layout(visible_cards)
+      self:_set_deckbuilder_scroll_from_scrollbar_mouse(y, selector_layout, self.deckbuilder_scrollbar_drag_offset or 0)
+      self.deckbuilder_hover = 501
+      self.hover_button = -2
+      return
+    end
     if point_in_rect(x, y, back_button_rect()) then
       self.hover_button = -1
       return
     end
+    local deck_viewport = self:deckbuilder_scroll_viewport_rect()
+    if not point_in_rect(x, y, deck_viewport) then
+      return
+    end
     local gw = love.graphics.getWidth()
     local faction_tiles, start_x, card_y = deckbuilder_faction_layout(gw)
+    card_y = card_y - (self.deckbuilder_scroll or 0)
     for i, tile in ipairs(faction_tiles) do
       local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
       if point_in_rect(x, y, { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }) then
@@ -1504,7 +1949,7 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
       end
     end
 
-    for i, tab in ipairs(deckbuilder_tab_rects()) do
+    for i, tab in ipairs(deckbuilder_tab_rects(self.deckbuilder_scroll or 0)) do
       if point_in_rect(x, y, tab) then
         self.deckbuilder_hover = 400 + i
         self.hover_button = -2
@@ -1512,8 +1957,29 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
       end
     end
 
+    local search_r = self:deckbuilder_search_rect()
+    if point_in_rect(x, y, search_r) then
+      self.deckbuilder_hover = 600
+      self.hover_button = -2
+      return
+    end
+
+    for i, fr in ipairs(self:deckbuilder_filter_tab_rects()) do
+      if point_in_rect(x, y, fr) then
+        self.deckbuilder_hover = 700 + i
+        self.hover_button = -2
+        return
+      end
+    end
+
     local visible_cards = self:deckbuilder_visible_cards()
     local selector_layout, selector_items = self:deckbuilder_selector_items(visible_cards)
+    local sb = self:deckbuilder_scrollbar_rects(selector_layout)
+    if sb and sb.track_r and point_in_rect(x, y, sb.track_r) then
+      self.deckbuilder_hover = (sb.thumb_r and point_in_rect(x, y, sb.thumb_r)) and 501 or 500
+      self.hover_button = -2
+      return
+    end
     for _, item in ipairs(selector_items) do
       local cell = item.cell_r
       if cell.y + cell.h >= selector_layout.list_top and cell.y <= selector_layout.list_bottom then
@@ -1610,9 +2076,21 @@ end
 function MenuState:keypressed(key, scancode, isrepeat)
   if (self.screen == "browse" or self.screen == "connecting") and key == "escape" then
     self:go_back()
-  elseif self.screen == "deckbuilder" and key == "escape" then
-    self.screen = "main"
-    self.hover_button = nil
+  elseif self.screen == "deckbuilder" then
+    if key == "escape" then
+      self.deckbuilder_search_focused = false
+      self.screen = "main"
+      self.hover_button = nil
+    elseif self.deckbuilder_search_focused then
+      if key == "backspace" then
+        if #self.deckbuilder_search_text > 0 then
+          self.deckbuilder_search_text = self.deckbuilder_search_text:sub(1, -2)
+          self.deckbuilder_scroll = 0
+        end
+      elseif key == "return" or key == "kpenter" then
+        self.deckbuilder_search_focused = false
+      end
+    end
   elseif self.screen == "settings" then
     if key == "escape" then
       self:save_settings_and_back()
@@ -1632,9 +2110,7 @@ function MenuState:wheelmoved(x, y)
     local visible_cards = self:deckbuilder_visible_cards()
     local selector_layout = self:deckbuilder_selector_layout(visible_cards)
     local max_scroll = selector_layout.max_scroll
-    self.deckbuilder_scroll = (self.deckbuilder_scroll or 0) - y * 30
-    if self.deckbuilder_scroll < 0 then self.deckbuilder_scroll = 0 end
-    if self.deckbuilder_scroll > max_scroll then self.deckbuilder_scroll = max_scroll end
+    self:_set_deckbuilder_scroll((self.deckbuilder_scroll or 0) - y * 30, max_scroll)
   end
 end
 
@@ -1642,6 +2118,11 @@ function MenuState:textinput(text)
   if self.screen == "settings" then
     if #self.player_name < 20 then
       self.player_name = self.player_name .. text
+    end
+  elseif self.screen == "deckbuilder" and self.deckbuilder_search_focused then
+    if #self.deckbuilder_search_text < 80 then
+      self.deckbuilder_search_text = self.deckbuilder_search_text .. text
+      self.deckbuilder_scroll = 0
     end
   end
 end

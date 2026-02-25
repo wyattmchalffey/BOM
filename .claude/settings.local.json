@@ -10,5 +10,8 @@
       "Bash(cd /c/Users/Wyatt/Desktop/BOM && luac -p love2d/src/ui/deck_viewer.lua 2>&1 && luac -p love2d/src/state/game.lua 2>&1 && luac -p love2d/src/ui/board.lua 2>&1)",
       "Bash(cd:*)"
     ]
+  },
+  "remote": {
+    "defaultEnvironmentId": "env_01E7LvQdrzBjWYsWaALwTT9F"
   }
 }

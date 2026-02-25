@@ -806,7 +806,7 @@ return {
     health = 3,
     text = "Action — 1 Stone: Deal 2 damage to any target.",
     costs = {},
-    upkeep = {},
+    upkeep = { { type = "food", amount = 1 } },
     subtypes = { "Machine" },
     abilities = {
       {
@@ -828,7 +828,7 @@ return {
     health = 3,
     text = "Once per turn — 3 Gold: Deal 3 damage to target unit. Action — Remove 3 Knowledge Counters, Rest: Play a Machine.",
     costs = {},
-    upkeep = {},
+    upkeep = { { type = "food", amount = 1 } },
     subtypes = { "Scholar" },
     abilities = {
       {
@@ -1243,7 +1243,7 @@ return {
     health = 3,
     text = "Action — Sacrifice this Unit: Deal 3 damage to any Unit. Action — 2 Blood, Rest: Cast an Orc Blood Spell.",
     costs = {},
-    upkeep = {},
+    upkeep = { { type = "food", amount = 1 } },
     subtypes = { "Cleric" },
     abilities = {
       {
@@ -1271,7 +1271,7 @@ return {
     health = 4,
     text = "Whenever an ally Unit dies, you may rest this unit to gain 2 Bones.",
     costs = {},
-    upkeep = {},
+    upkeep = { { type = "food", amount = 1 } },
     subtypes = { "Warrior" },
     abilities = {
       {
@@ -1337,7 +1337,7 @@ return {
     health = 3,
     text = "Action — Sacrifice a Unit, Rest: Cast a Death Spell. Action — 2 Blood, 5 Bones, Rest: Summon an Undead.",
     costs = {},
-    upkeep = {},
+    upkeep = { { type = "food", amount = 1 } },
     subtypes = { "Cleric" },
     abilities = {
       {
@@ -1443,7 +1443,7 @@ return {
     health = 3,
     text = "Once per turn — 3 Bones: Summon up to 3 Tier 0 Undead from the Graveyard.",
     costs = {},
-    upkeep = {},
+    upkeep = { { type = "food", amount = 1 } },
     subtypes = { "Mage" },
     abilities = {
       {
@@ -2723,7 +2723,7 @@ return {
     population = 1,
     tier = 2,
     text = "Discard 2 Cards: Draw 1.",
-    costs = {},
+    costs = { { type = "stone", amount = 4 } },
     abilities = {
       {
         type = "activated",

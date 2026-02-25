@@ -28,8 +28,15 @@ local function is_pool_card(def, faction)
 end
 
 local function max_copies_for_card(def)
-  -- Unit, Structure, deckable Worker, and Spell population constrain copies.
-  if def.kind == "Unit" or def.kind == "Structure" or def.kind == "Worker" or def.kind == "Artifact" or def.kind == "Spell" then
+  -- Most deckable cards use population as deck copy limit (including tech/artifacts).
+  if def.kind == "Unit"
+    or def.kind == "Structure"
+    or def.kind == "Worker"
+    or def.kind == "Artifact"
+    or def.kind == "Spell"
+    or def.kind == "Technology"
+    or def.kind == "Item"
+  then
     return def.population or 1
   end
   return nil
