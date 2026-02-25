@@ -31,6 +31,12 @@ local validate_prompt_defs_static
 local validate_prompt_metadata_runtime
 local PROMPT_PAYLOAD_FIELD_SCHEMAS
 local prompt_metadata_runtime_validated = false
+local IN_GAME_BUG_REPORT_FIELDS = {
+  { id = "summary", label = "Summary", multiline = false, height = 34, placeholder = "Short title (e.g. Prince of Reason deck search desync)" },
+  { id = "what_happened", label = "What Happened", multiline = true, height = 82, placeholder = "Describe what happened..." },
+  { id = "expected", label = "Expected Behavior", multiline = true, height = 64, placeholder = "Describe what should have happened..." },
+  { id = "steps", label = "Steps To Reproduce", multiline = true, height = 96, placeholder = "1. ...\n2. ...\n3. ..." },
+}
 
 function GameState.new(opts)
   opts = opts or {}
@@ -117,6 +123,17 @@ function GameState.new(opts)
     in_game_settings_status_kind = "info",
     in_game_settings_dragging_slider = false,
     in_game_settings_settings_dirty = false,
+    in_game_settings_last_replay_export_path = nil,
+    in_game_bug_report_open = false,
+    in_game_bug_report_active_field = "summary",
+    in_game_bug_report_status = nil,
+    in_game_bug_report_status_kind = "info",
+    in_game_bug_report_fields = {
+      summary = "",
+      what_happened = "",
+      expected = "",
+      steps = "",
+    },
   }, GameState)
   -- Cache the hand cursor once
   self._cursor_hand = love.mouse.getSystemCursor("hand")
@@ -2854,7 +2871,7 @@ function GameState:_in_game_settings_layout()
 
   local button_h = 34
   local button_gap = 10
-  local button_count = self.return_to_menu and 3 or 2
+  local button_count = self.return_to_menu and 4 or 3
   local buttons_top = fullscreen_row_y + row_h + 14
   local panel_h = buttons_top + button_count * button_h + (button_count - 1) * button_gap + 20
     + 1 + 8 + (#status_lines * (status_font:getHeight() + 1)) + 14
@@ -2865,8 +2882,14 @@ function GameState:_in_game_settings_layout()
   local button_y = panel_y + buttons_top
 
   local buttons = {
-    export_replay = { x = button_x, y = button_y, w = button_w, h = button_h, label = "Export Replay JSON" },
+    report_bug = {
+      x = button_x, y = button_y, w = button_w, h = button_h,
+      label = "Report a Bug",
+    },
   }
+  button_y = button_y + button_h + button_gap
+
+  buttons.export_replay = { x = button_x, y = button_y, w = button_w, h = button_h, label = "Export Replay JSON" }
   button_y = button_y + button_h + button_gap
 
   if self.return_to_menu then
@@ -2933,12 +2956,14 @@ function GameState:_close_in_game_settings()
   self:_save_in_game_settings_if_dirty()
   self.in_game_settings_open = false
   self.in_game_settings_dragging_slider = false
+  self.in_game_bug_report_open = false
 end
 
 function GameState:_open_in_game_settings()
   self.in_game_settings_open = true
   self.in_game_settings_dragging_slider = false
   self.in_game_settings_settings_dirty = false
+  self.in_game_bug_report_open = false
   self.in_game_settings_status = nil
   self.in_game_settings_status_kind = "info"
 end
@@ -2974,7 +2999,7 @@ function GameState:_export_replay_json()
   local snapshot = self:get_command_log_snapshot()
   if type(snapshot) ~= "table" then
     self:_set_in_game_settings_status("Export failed: replay snapshot unavailable", "error")
-    return false
+    return false, nil, nil
   end
 
   local stamp = os.date("!%Y%m%d_%H%M%S")
@@ -2984,13 +3009,13 @@ function GameState:_export_replay_json()
   local ok_dir, dir_err = pcall(function() return love.filesystem.createDirectory("replays") end)
   if not ok_dir then
     self:_set_in_game_settings_status("Export failed: " .. tostring(dir_err), "error")
-    return false
+    return false, nil, nil
   end
 
   local ok_enc, encoded = pcall(json.encode, snapshot)
   if not ok_enc or type(encoded) ~= "string" then
     self:_set_in_game_settings_status("Export failed: could not encode replay JSON", "error")
-    return false
+    return false, nil, nil
   end
 
   local ok_write, write_ok_or_err = pcall(function()
@@ -2998,12 +3023,525 @@ function GameState:_export_replay_json()
   end)
   if (not ok_write) or not write_ok_or_err then
     self:_set_in_game_settings_status("Export failed: " .. tostring(write_ok_or_err), "error")
-    return false
+    return false, nil, nil
   end
 
   local save_dir = (love.filesystem.getSaveDirectory and love.filesystem.getSaveDirectory()) or ""
   local full_path = (save_dir ~= "" and (save_dir .. "/" .. filename)) or filename
+  self.in_game_settings_last_replay_export_path = full_path
   self:_set_in_game_settings_status("Replay exported: " .. full_path, "ok")
+  return true, full_path, filename
+end
+
+function GameState:_set_in_game_bug_report_status(text, kind)
+  self.in_game_bug_report_status = tostring(text or "")
+  self.in_game_bug_report_status_kind = kind or "info"
+end
+
+function GameState:_open_in_game_bug_report_form()
+  self.in_game_bug_report_open = true
+  if type(self.in_game_bug_report_fields) ~= "table" then
+    self.in_game_bug_report_fields = {}
+  end
+  for _, def in ipairs(IN_GAME_BUG_REPORT_FIELDS) do
+    if type(self.in_game_bug_report_fields[def.id]) ~= "string" then
+      self.in_game_bug_report_fields[def.id] = ""
+    end
+  end
+  if type(self.in_game_bug_report_active_field) ~= "string" then
+    self.in_game_bug_report_active_field = IN_GAME_BUG_REPORT_FIELDS[1].id
+  end
+  self:_set_in_game_bug_report_status("Fill out the form, then copy and paste it into Discord.", "info")
+end
+
+function GameState:_close_in_game_bug_report_form()
+  self.in_game_bug_report_open = false
+end
+
+function GameState:_clear_in_game_bug_report_form()
+  if type(self.in_game_bug_report_fields) ~= "table" then return end
+  for _, def in ipairs(IN_GAME_BUG_REPORT_FIELDS) do
+    self.in_game_bug_report_fields[def.id] = ""
+  end
+  self.in_game_bug_report_active_field = IN_GAME_BUG_REPORT_FIELDS[1].id
+  self:_set_in_game_bug_report_status("Bug report form cleared.", "info")
+end
+
+function GameState:_in_game_bug_report_layout()
+  local gw, gh = love.graphics.getDimensions()
+  local panel_w = math.max(520, math.min(780, gw - 40))
+  local title_font = util.get_title_font(20)
+  local body_font = util.get_font(12)
+  local field_font = util.get_font(12)
+  local hint_font = util.get_font(11)
+  local status_font = util.get_font(11)
+  local button_font = util.get_font(12)
+
+  local instructions_text =
+    "Describe the issue, then click Copy Bug Report and paste it into Discord. " ..
+    "Use Export Replay if you want to attach a replay JSON."
+  local instructions_wrap_w = panel_w - 28
+  local _, instruction_lines = hint_font:getWrap(instructions_text, instructions_wrap_w)
+  if #instruction_lines == 0 then instruction_lines = { instructions_text } end
+
+  local status_text = tostring(self.in_game_bug_report_status or "")
+  local status_wrap_w = panel_w - 28
+  local _, status_lines = status_font:getWrap(status_text, status_wrap_w)
+  if #status_lines == 0 then status_lines = { status_text } end
+
+  local rel_y = 16
+  rel_y = rel_y + title_font:getHeight() + 6
+  local instructions_y = rel_y
+  rel_y = rel_y + #instruction_lines * (hint_font:getHeight() + 1) + 10
+
+  local fields = {}
+  local label_h = body_font:getHeight()
+  for _, def in ipairs(IN_GAME_BUG_REPORT_FIELDS) do
+    local label_y = rel_y
+    local box_y = label_y + label_h + 4
+    local box_h = def.height or (def.multiline and 72 or 34)
+    fields[def.id] = {
+      id = def.id,
+      label = def.label,
+      multiline = def.multiline == true,
+      placeholder = def.placeholder,
+      label_r = { x = 14, y = label_y, w = panel_w - 28, h = label_h },
+      box_r = { x = 14, y = box_y, w = panel_w - 28, h = box_h },
+    }
+    rel_y = box_y + box_h + 10
+  end
+
+  local button_h = 34
+  local button_gap = 10
+  local button_count = 4
+  local button_w = math.floor((panel_w - 28 - button_gap * (button_count - 1)) / button_count)
+  local buttons_y = rel_y + 2
+  local buttons = {
+    copy = { x = 14, y = buttons_y, w = button_w, h = button_h, label = "Copy Bug Report" },
+    export = { x = 14 + (button_w + button_gap), y = buttons_y, w = button_w, h = button_h, label = "Export Replay" },
+    clear = { x = 14 + 2 * (button_w + button_gap), y = buttons_y, w = button_w, h = button_h, label = "Clear" },
+    close = { x = 14 + 3 * (button_w + button_gap), y = buttons_y, w = button_w, h = button_h, label = "Close" },
+  }
+  rel_y = buttons_y + button_h + 12
+  local status_y = rel_y
+  rel_y = rel_y + 1 + 8 + (#status_lines * (status_font:getHeight() + 1)) + 10
+
+  local panel_h = rel_y
+  local panel_x = math.floor((gw - panel_w) / 2)
+  local panel_y = math.floor((gh - panel_h) / 2)
+
+  local function offset_rect(r)
+    return { x = panel_x + r.x, y = panel_y + r.y, w = r.w, h = r.h }
+  end
+  for _, f in pairs(fields) do
+    f.label_r = offset_rect(f.label_r)
+    f.box_r = offset_rect(f.box_r)
+  end
+  for _, b in pairs(buttons) do
+    local abs = offset_rect(b)
+    b.x, b.y, b.w, b.h = abs.x, abs.y, abs.w, abs.h
+  end
+
+  return {
+    panel = { x = panel_x, y = panel_y, w = panel_w, h = panel_h },
+    title_font = title_font,
+    body_font = body_font,
+    field_font = field_font,
+    hint_font = hint_font,
+    status_font = status_font,
+    button_font = button_font,
+    instructions = {
+      x = panel_x + 14,
+      y = panel_y + instructions_y,
+      w = panel_w - 28,
+      text = instructions_text,
+      lines = instruction_lines,
+    },
+    fields = fields,
+    buttons = buttons,
+    status = {
+      x = panel_x + 14,
+      y = panel_y + status_y + 9,
+      w = panel_w - 28,
+      text = status_text,
+      lines = status_lines,
+    },
+  }
+end
+
+function GameState:_cycle_in_game_bug_report_field(direction)
+  direction = (direction == -1) and -1 or 1
+  local current_id = self.in_game_bug_report_active_field
+  local idx = 1
+  for i, def in ipairs(IN_GAME_BUG_REPORT_FIELDS) do
+    if def.id == current_id then idx = i; break end
+  end
+  idx = idx + direction
+  if idx < 1 then idx = #IN_GAME_BUG_REPORT_FIELDS end
+  if idx > #IN_GAME_BUG_REPORT_FIELDS then idx = 1 end
+  self.in_game_bug_report_active_field = IN_GAME_BUG_REPORT_FIELDS[idx].id
+end
+
+function GameState:_append_in_game_bug_report_text(text)
+  if type(text) ~= "string" or text == "" then return end
+  local field_id = self.in_game_bug_report_active_field
+  if type(field_id) ~= "string" then return end
+  self.in_game_bug_report_fields = self.in_game_bug_report_fields or {}
+  local cur = self.in_game_bug_report_fields[field_id] or ""
+  local next_value = cur .. text
+  if #next_value > 2000 then
+    next_value = next_value:sub(1, 2000)
+    self:_set_in_game_bug_report_status("Field text capped at 2000 characters.", "info")
+  end
+  self.in_game_bug_report_fields[field_id] = next_value
+end
+
+function GameState:_backspace_in_game_bug_report_field()
+  local field_id = self.in_game_bug_report_active_field
+  if type(field_id) ~= "string" then return end
+  self.in_game_bug_report_fields = self.in_game_bug_report_fields or {}
+  local cur = self.in_game_bug_report_fields[field_id] or ""
+  if cur == "" then return end
+  self.in_game_bug_report_fields[field_id] = cur:sub(1, #cur - 1)
+end
+
+function GameState:_build_copyable_bug_report_text()
+  local function trim_line(s)
+    s = tostring(s or "")
+    s = s:gsub("\r\n", "\n"):gsub("\r", "\n")
+    s = s:gsub("[\t]", " ")
+    return s
+  end
+  local function clip_value(value, limit)
+    local s = tostring(value == nil and "" or value)
+    if #s <= limit then return s end
+    return s:sub(1, math.max(0, limit - 3)) .. "..."
+  end
+
+  local fields = self.in_game_bug_report_fields or {}
+  local summary = trim_line(fields.summary)
+  local what_happened = trim_line(fields.what_happened)
+  local expected = trim_line(fields.expected)
+  local steps = trim_line(fields.steps)
+
+  local mode = "local"
+  if self.authoritative_adapter then
+    if self.room_code then
+      mode = "relay_multiplayer"
+    elseif self.authoritative_adapter.poll then
+      mode = "threaded_multiplayer"
+    else
+      mode = "authoritative_multiplayer"
+    end
+  end
+  if self.server_step and not self.authoritative_adapter then
+    mode = "local_host"
+  end
+
+  local g = self.game_state
+  local local_player = g and g.players and g.players[(self.local_player_index or 0) + 1] or nil
+  local entries = self.command_log and self.command_log.entries or nil
+  local last_entry = (type(entries) == "table" and #entries > 0) and entries[#entries] or nil
+  local adapter_checksum = self.authoritative_adapter and (
+    self.authoritative_adapter._checksum
+    or (self.authoritative_adapter.session and self.authoritative_adapter.session.last_checksum)
+  ) or nil
+  local adapter_state_seq = self.authoritative_adapter and (
+    self.authoritative_adapter._state_seq
+    or (self.authoritative_adapter.session and self.authoritative_adapter.session.last_state_seq)
+  ) or nil
+  local desync = self._last_desync_report
+
+  local out = {
+    "Build Version: protocol " .. tostring(config.protocol_version)
+      .. " / rules " .. tostring(config.rules_version)
+      .. " / content " .. tostring(config.content_version),
+    "Mode: " .. mode,
+    "Player Name: " .. tostring(settings_store and settings_store.values and settings_store.values.player_name or "Player"),
+    "Local Player: P" .. tostring((self.local_player_index or 0) + 1),
+    "Faction: " .. tostring(local_player and local_player.faction or "?"),
+    "Turn: " .. tostring(g and g.turnNumber or "?"),
+    "Active Player: " .. ((g and g.activePlayer ~= nil) and ("P" .. tostring(g.activePlayer + 1)) or "?"),
+    "Room Code: " .. tostring(self.room_code or "N/A"),
+    "Multiplayer Status: " .. tostring(self.multiplayer_status or "N/A"),
+    "Disconnect Cause: " .. tostring(self.reconnect_reason or self._disconnect_message or "N/A"),
+    "Authoritative State Seq: " .. tostring(adapter_state_seq or "N/A"),
+    "Authoritative Checksum: " .. tostring(adapter_checksum or "N/A"),
+    "Replay Export Path: " .. tostring(self.in_game_settings_last_replay_export_path or "N/A"),
+  }
+  if type(desync) == "table" then
+    out[#out + 1] = "Last Desync: " .. tostring(desync.kind or "hash_mismatch")
+    out[#out + 1] = "Last Desync Command: " .. tostring(desync.command_type or "N/A")
+    out[#out + 1] = "Last Desync Seq: " .. tostring(desync.state_seq or "N/A")
+  end
+  if type(last_entry) == "table" then
+    out[#out + 1] = "Last Command: "
+      .. tostring(last_entry.command_type or "?")
+      .. " / ok=" .. tostring(last_entry.ok)
+      .. " / reason=" .. tostring(last_entry.reason)
+      .. " / seq=" .. tostring(last_entry.seq or "?")
+    out[#out + 1] = "Last Post-State Hash: " .. tostring(last_entry.post_state_hash or "N/A")
+  end
+
+  local function section(label, value)
+    value = trim_line(value)
+    if value == "" then value = "(not provided)" end
+    out[#out + 1] = ""
+    out[#out + 1] = label .. ":"
+    for line in (value .. "\n"):gmatch("(.-)\n") do
+      out[#out + 1] = line
+    end
+  end
+
+  section("Summary", summary)
+  section("What happened", what_happened)
+  section("Expected behavior", expected)
+  section("Steps to reproduce", steps)
+
+  out[#out + 1] = ""
+  out[#out + 1] = "Notes:"
+  out[#out + 1] = "- Paste this in Discord and attach the replay JSON if available."
+
+  local text = table.concat(out, "\n")
+  if #text > 3800 then
+    text = clip_value(text, 3800)
+  end
+  return text
+end
+
+function GameState:_copy_in_game_bug_report_to_clipboard()
+  local text = self:_build_copyable_bug_report_text()
+  local ok_copy, copy_err = pcall(function()
+    if love.system and love.system.setClipboardText then
+      return love.system.setClipboardText(text)
+    end
+    error("Clipboard API unavailable")
+  end)
+  if not ok_copy then
+    self:_set_in_game_bug_report_status("Copy failed: " .. tostring(copy_err), "error")
+    return false
+  end
+  self:_set_in_game_bug_report_status("Bug report copied. Paste it into Discord.", "ok")
+  return true
+end
+
+function GameState:_draw_in_game_bug_report_overlay()
+  if not self.in_game_bug_report_open then return end
+
+  local layout = self:_in_game_bug_report_layout()
+  local panel = layout.panel
+  local mx, my = love.mouse.getPosition()
+
+  love.graphics.setColor(0, 0, 0, 0.42)
+  love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+
+  love.graphics.setColor(0.07, 0.08, 0.11, 0.98)
+  love.graphics.rectangle("fill", panel.x, panel.y, panel.w, panel.h, 10, 10)
+  love.graphics.setColor(0.45, 0.5, 0.63, 0.85)
+  love.graphics.rectangle("line", panel.x, panel.y, panel.w, panel.h, 10, 10)
+  love.graphics.setColor(0.95, 0.35, 0.35, 0.7)
+  love.graphics.rectangle("fill", panel.x + 1, panel.y + 1, panel.w - 2, 3, 10, 10)
+
+  love.graphics.setFont(layout.title_font)
+  love.graphics.setColor(0.96, 0.97, 1.0, 1)
+  love.graphics.print("Bug Report", panel.x + 14, panel.y + 12)
+
+  love.graphics.setFont(layout.hint_font)
+  love.graphics.setColor(0.72, 0.77, 0.88, 0.95)
+  love.graphics.printf(layout.instructions.text, layout.instructions.x, layout.instructions.y, layout.instructions.w, "left")
+
+  for _, def in ipairs(IN_GAME_BUG_REPORT_FIELDS) do
+    local field = layout.fields[def.id]
+    local box = field.box_r
+    local active = (self.in_game_bug_report_active_field == def.id)
+    local hovered = util.point_in_rect(mx, my, box.x, box.y, box.w, box.h)
+
+    love.graphics.setFont(layout.body_font)
+    love.graphics.setColor(0.88, 0.9, 0.97, 1)
+    love.graphics.print(field.label, field.label_r.x, field.label_r.y)
+
+    love.graphics.setColor(0.12, 0.13, 0.18, 0.98)
+    love.graphics.rectangle("fill", box.x, box.y, box.w, box.h, 6, 6)
+    if active then
+      love.graphics.setColor(0.95, 0.35, 0.35, 0.95)
+    elseif hovered then
+      love.graphics.setColor(0.55, 0.6, 0.75, 0.8)
+    else
+      love.graphics.setColor(1, 1, 1, 0.14)
+    end
+    love.graphics.rectangle("line", box.x, box.y, box.w, box.h, 6, 6)
+
+    local value = (self.in_game_bug_report_fields and self.in_game_bug_report_fields[def.id]) or ""
+    local text_x = box.x + 8
+    local text_y = box.y + 7
+    local text_w = box.w - 16
+    local text_h = box.h - 14
+    love.graphics.setScissor(box.x + 2, box.y + 2, box.w - 4, box.h - 4)
+    love.graphics.setFont(layout.field_font)
+    if value == "" then
+      love.graphics.setColor(0.55, 0.58, 0.66, 0.75)
+      love.graphics.printf(field.placeholder or "", text_x, text_y, text_w, "left")
+    else
+      love.graphics.setColor(0.93, 0.95, 1.0, 1)
+      love.graphics.printf(value, text_x, text_y, text_w, "left")
+    end
+    if active then
+      local blink = (math.floor(love.timer.getTime() * 2) % 2 == 0)
+      if blink then
+        love.graphics.setColor(0.95, 0.35, 0.35, 0.85)
+        love.graphics.rectangle("fill", box.x + 6, box.y + box.h - 4, box.w - 12, 1)
+      end
+    end
+    love.graphics.setScissor()
+  end
+
+  local function draw_button(r, accent)
+    local hovered = util.point_in_rect(mx, my, r.x, r.y, r.w, r.h)
+    local fill = hovered and { accent[1], accent[2], accent[3], 0.24 } or { 0.16, 0.18, 0.24, 0.95 }
+    local line = hovered and { accent[1], accent[2], accent[3], 0.95 } or { 0.35, 0.4, 0.52, 0.75 }
+    love.graphics.setColor(fill[1], fill[2], fill[3], fill[4])
+    love.graphics.rectangle("fill", r.x, r.y, r.w, r.h, 7, 7)
+    love.graphics.setColor(line[1], line[2], line[3], line[4])
+    love.graphics.rectangle("line", r.x, r.y, r.w, r.h, 7, 7)
+    love.graphics.setFont(layout.button_font)
+    love.graphics.setColor(0.93, 0.95, 1.0, 1)
+    love.graphics.printf(r.label, r.x, r.y + 9, r.w, "center")
+  end
+
+  draw_button(layout.buttons.copy, { 0.25, 0.75, 0.95 })
+  draw_button(layout.buttons.export, { 0.95, 0.7, 0.25 })
+  draw_button(layout.buttons.clear, { 0.62, 0.66, 0.78 })
+  draw_button(layout.buttons.close, { 0.95, 0.45, 0.45 })
+
+  love.graphics.setColor(1, 1, 1, 0.08)
+  love.graphics.rectangle("fill", panel.x + 14, layout.status.y - 8, panel.w - 28, 1)
+  local status_color = { 0.74, 0.78, 0.86, 0.95 }
+  if self.in_game_bug_report_status_kind == "ok" then
+    status_color = { 0.58, 0.95, 0.68, 0.98 }
+  elseif self.in_game_bug_report_status_kind == "error" then
+    status_color = { 1.0, 0.5, 0.5, 0.98 }
+  end
+  love.graphics.setFont(layout.status_font)
+  love.graphics.setColor(status_color[1], status_color[2], status_color[3], status_color[4])
+  love.graphics.printf(layout.status.text, layout.status.x, layout.status.y, layout.status.w, "left")
+end
+
+function GameState:_handle_in_game_bug_report_click(x, y)
+  if not self.in_game_bug_report_open then return false end
+  local layout = self:_in_game_bug_report_layout()
+  local panel = layout.panel
+
+  if not util.point_in_rect(x, y, panel.x, panel.y, panel.w, panel.h) then
+    self:_close_in_game_bug_report_form()
+    sound.play("click")
+    return true
+  end
+
+  for _, def in ipairs(IN_GAME_BUG_REPORT_FIELDS) do
+    local field = layout.fields[def.id]
+    local box = field and field.box_r
+    if box and util.point_in_rect(x, y, box.x, box.y, box.w, box.h) then
+      self.in_game_bug_report_active_field = def.id
+      sound.play("click", 0.5)
+      return true
+    end
+  end
+
+  local b = layout.buttons
+  if util.point_in_rect(x, y, b.copy.x, b.copy.y, b.copy.w, b.copy.h) then
+    if self:_copy_in_game_bug_report_to_clipboard() then
+      sound.play("coin")
+    else
+      sound.play("error")
+    end
+    return true
+  end
+  if util.point_in_rect(x, y, b.export.x, b.export.y, b.export.w, b.export.h) then
+    local ok_export = self:_export_replay_json()
+    if ok_export then
+      self:_set_in_game_bug_report_status("Replay exported. You can now copy the report with the replay path included.", "ok")
+      sound.play("coin")
+    else
+      self:_set_in_game_bug_report_status("Replay export failed. You can still copy the report text.", "error")
+      sound.play("error")
+    end
+    return true
+  end
+  if util.point_in_rect(x, y, b.clear.x, b.clear.y, b.clear.w, b.clear.h) then
+    self:_clear_in_game_bug_report_form()
+    sound.play("click")
+    return true
+  end
+  if util.point_in_rect(x, y, b.close.x, b.close.y, b.close.w, b.close.h) then
+    self:_close_in_game_bug_report_form()
+    sound.play("click")
+    return true
+  end
+
+  return true
+end
+
+function GameState:_handle_in_game_bug_report_keypressed(key, scancode, isrepeat)
+  if not self.in_game_bug_report_open then return false end
+
+  local ctrl_down = love.keyboard.isDown("lctrl") or love.keyboard.isDown("rctrl")
+  local shift_down = love.keyboard.isDown("lshift") or love.keyboard.isDown("rshift")
+  local active_def = nil
+  for _, def in ipairs(IN_GAME_BUG_REPORT_FIELDS) do
+    if def.id == self.in_game_bug_report_active_field then
+      active_def = def
+      break
+    end
+  end
+
+  if key == "escape" then
+    self:_close_in_game_bug_report_form()
+    sound.play("click")
+    return true
+  end
+  if key == "tab" then
+    self:_cycle_in_game_bug_report_field(shift_down and -1 or 1)
+    sound.play("click", 0.5)
+    return true
+  end
+  if key == "backspace" then
+    self:_backspace_in_game_bug_report_field()
+    return true
+  end
+  if ctrl_down and key == "v" then
+    local ok_clip, clip = pcall(function()
+      return love.system and love.system.getClipboardText and love.system.getClipboardText() or ""
+    end)
+    if ok_clip and type(clip) == "string" and clip ~= "" then
+      self:_append_in_game_bug_report_text(clip)
+      sound.play("click", 0.4)
+    end
+    return true
+  end
+  if ctrl_down and key == "c" then
+    if self:_copy_in_game_bug_report_to_clipboard() then
+      sound.play("coin")
+    else
+      sound.play("error")
+    end
+    return true
+  end
+  if key == "return" or key == "kpenter" then
+    if active_def and active_def.multiline then
+      self:_append_in_game_bug_report_text("\n")
+    else
+      self:_cycle_in_game_bug_report_field(1)
+      sound.play("click", 0.4)
+    end
+    return true
+  end
+
+  return true -- swallow other keys while form is open
+end
+
+function GameState:_handle_in_game_bug_report_textinput(text)
+  if not self.in_game_bug_report_open then return false end
+  self:_append_in_game_bug_report_text(text)
   return true
 end
 
@@ -3072,18 +3610,28 @@ function GameState:_draw_in_game_settings_overlay()
   end
 
   local function draw_button(r, accent)
-    local hovered = util.point_in_rect(mx, my, r.x, r.y, r.w, r.h)
+    local disabled = r.disabled == true
+    local hovered = (not disabled) and util.point_in_rect(mx, my, r.x, r.y, r.w, r.h)
     local fill = hovered and { accent[1], accent[2], accent[3], 0.24 } or { 0.16, 0.18, 0.24, 0.95 }
     local line = hovered and { accent[1], accent[2], accent[3], 0.95 } or { 0.35, 0.4, 0.52, 0.75 }
+    if disabled then
+      fill = { 0.13, 0.14, 0.18, 0.95 }
+      line = { 0.24, 0.27, 0.34, 0.85 }
+    end
     love.graphics.setColor(fill[1], fill[2], fill[3], fill[4])
     love.graphics.rectangle("fill", r.x, r.y, r.w, r.h, 7, 7)
     love.graphics.setColor(line[1], line[2], line[3], line[4])
     love.graphics.rectangle("line", r.x, r.y, r.w, r.h, 7, 7)
     love.graphics.setFont(util.get_font(12))
-    love.graphics.setColor(0.93, 0.95, 1.0, 1)
+    if disabled then
+      love.graphics.setColor(0.66, 0.7, 0.8, 0.95)
+    else
+      love.graphics.setColor(0.93, 0.95, 1.0, 1)
+    end
     love.graphics.printf(r.label, r.x, r.y + 9, r.w, "center")
   end
 
+  draw_button(layout.buttons.report_bug, { 0.95, 0.33, 0.33 })
   draw_button(layout.buttons.export_replay, { 0.25, 0.75, 0.95 })
   if layout.buttons.return_to_menu then
     draw_button(layout.buttons.return_to_menu, { 0.95, 0.55, 0.28 })
@@ -3102,10 +3650,15 @@ function GameState:_draw_in_game_settings_overlay()
   love.graphics.setFont(layout.status_font)
   love.graphics.setColor(status_color[1], status_color[2], status_color[3], status_color[4])
   love.graphics.printf(layout.status.text, layout.status.x, layout.status.y, layout.status.w, "left")
+
+  self:_draw_in_game_bug_report_overlay()
 end
 
 function GameState:_handle_in_game_settings_click(x, y)
   if not self.in_game_settings_open then return false end
+  if self.in_game_bug_report_open then
+    return self:_handle_in_game_bug_report_click(x, y)
+  end
   local layout = self:_in_game_settings_layout()
   local panel = layout.panel
 
@@ -3139,6 +3692,16 @@ function GameState:_handle_in_game_settings_click(x, y)
       end
       return true
     end
+  end
+
+  if layout.buttons.report_bug and util.point_in_rect(
+      x, y,
+      layout.buttons.report_bug.x, layout.buttons.report_bug.y,
+      layout.buttons.report_bug.w, layout.buttons.report_bug.h
+    ) then
+    self:_open_in_game_bug_report_form()
+    sound.play("click")
+    return true
   end
 
   if util.point_in_rect(x, y, layout.buttons.export_replay.x, layout.buttons.export_replay.y, layout.buttons.export_replay.w, layout.buttons.export_replay.h) then
@@ -5902,6 +6465,10 @@ function GameState:mousereleased(x, y, button, istouch, presses)
   if button ~= 1 then return end
   self.mouse_down = false
   if self.in_game_settings_open then
+    if self.in_game_bug_report_open then
+      self.in_game_settings_dragging_slider = false
+      return
+    end
     if self.in_game_settings_dragging_slider then
       self.in_game_settings_dragging_slider = false
       self:_save_in_game_settings_if_dirty()
@@ -6218,6 +6785,11 @@ end
 
 function GameState:mousemoved(x, y, dx, dy, istouch)
   if self.in_game_settings_open then
+    if self.in_game_bug_report_open then
+      self.hover = nil
+      self.hand_hover_index = nil
+      return
+    end
     if self.in_game_settings_dragging_slider then
       local layout = self:_in_game_settings_layout()
       self:_set_in_game_settings_volume_from_mouse_x(x, layout)
@@ -6248,6 +6820,9 @@ end
 
 function GameState:keypressed(key, scancode, isrepeat)
   if self.in_game_settings_open then
+    if self.in_game_bug_report_open and self:_handle_in_game_bug_report_keypressed(key, scancode, isrepeat) then
+      return
+    end
     if key == "escape" then
       self:_close_in_game_settings()
       sound.play("click")
@@ -6327,6 +6902,11 @@ function GameState:wheelmoved(dx, dy)
 end
 
 function GameState:textinput(text)
+  if self.in_game_settings_open and self.in_game_bug_report_open then
+    if self:_handle_in_game_bug_report_textinput(text) then
+      return
+    end
+  end
   if deck_viewer.is_open() then
     deck_viewer.textinput(text)
     return

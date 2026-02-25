@@ -37,6 +37,12 @@ local BUTTON_HOVER = 0.15
 
 local BUTTON_W = 360
 local BUTTON_H = 60
+local DISCORD_INVITE_URL = "https://discord.gg/amjtyj8Hjx"
+local DISCORD_BUTTON_HOVER = -3
+local DISCORD_BUTTON_SIZE = 56
+local DISCORD_BUTTON_PAD = 18
+local _discord_icon_image = nil
+local _discord_icon_image_loaded = false
 
 function MenuState.new(callbacks)
   callbacks = callbacks or {}
@@ -130,6 +136,33 @@ local function back_button_rect()
   return { x = 20, y = 20, w = 80, h = 36 }
 end
 
+local function discord_button_rect()
+  local gh = love.graphics.getHeight()
+  return {
+    x = DISCORD_BUTTON_PAD,
+    y = gh - DISCORD_BUTTON_PAD - DISCORD_BUTTON_SIZE,
+    w = DISCORD_BUTTON_SIZE,
+    h = DISCORD_BUTTON_SIZE,
+  }
+end
+
+local function get_discord_icon_image()
+  if _discord_icon_image_loaded then
+    return _discord_icon_image
+  end
+  _discord_icon_image_loaded = true
+  local ok_img, img_or_err = pcall(love.graphics.newImage, "assets/discord.png")
+  if ok_img and img_or_err then
+    _discord_icon_image = img_or_err
+    if _discord_icon_image.setFilter then
+      _discord_icon_image:setFilter("linear", "linear")
+    end
+  else
+    _discord_icon_image = nil
+  end
+  return _discord_icon_image
+end
+
 local function point_in_rect(px, py, r)
   return px >= r.x and px <= r.x + r.w and py >= r.y and py <= r.y + r.h
 end
@@ -179,6 +212,66 @@ local function draw_back_button(hovered)
   local font = util.get_font(14)
   love.graphics.setFont(font)
   love.graphics.printf("< Back", r.x, r.y + (r.h - font:getHeight()) / 2, r.w, "center")
+end
+
+local function draw_discord_icon_button(hovered)
+  local r = discord_button_rect()
+  local fill = hovered and { 0.28, 0.33, 0.72, 0.98 } or { 0.2, 0.23, 0.36, 0.9 }
+  local border = hovered and { 0.78, 0.84, 1.0, 0.95 } or { 1, 1, 1, 0.16 }
+  love.graphics.setColor(fill[1], fill[2], fill[3], fill[4])
+  love.graphics.rectangle("fill", r.x, r.y, r.w, r.h, 12, 12)
+  love.graphics.setColor(border[1], border[2], border[3], border[4])
+  love.graphics.setLineWidth(2)
+  love.graphics.rectangle("line", r.x, r.y, r.w, r.h, 12, 12)
+  love.graphics.setLineWidth(1)
+
+  local icon = get_discord_icon_image()
+  if icon then
+    local iw, ih = icon:getDimensions()
+    if iw > 0 and ih > 0 then
+      local pad = 10
+      local scale = math.min((r.w - pad * 2) / iw, (r.h - pad * 2) / ih)
+      local dw = iw * scale
+      local dh = ih * scale
+      local dx = r.x + (r.w - dw) / 2
+      local dy = r.y + (r.h - dh) / 2
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.draw(icon, dx, dy, 0, scale, scale)
+    end
+  else
+    love.graphics.setFont(util.get_title_font(22))
+    love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 1)
+    love.graphics.printf("D", r.x, r.y + 15, r.w, "center")
+  end
+
+  if hovered then
+    local tip_font = util.get_font(12)
+    love.graphics.setFont(tip_font)
+    local tip = "Join Discord"
+    local tip_w = math.max(90, tip_font:getWidth(tip) + 16)
+    local tip_h = tip_font:getHeight() + 8
+    local tx = r.x + r.w + 10
+    local ty = r.y + r.h - tip_h
+    love.graphics.setColor(0.06, 0.07, 0.1, 0.95)
+    love.graphics.rectangle("fill", tx, ty, tip_w, tip_h, 6, 6)
+    love.graphics.setColor(1, 1, 1, 0.18)
+    love.graphics.rectangle("line", tx, ty, tip_w, tip_h, 6, 6)
+    love.graphics.setColor(WHITE[1], WHITE[2], WHITE[3], 0.95)
+    love.graphics.printf(tip, tx, ty + 4, tip_w, "center")
+  end
+end
+
+local function try_open_discord_invite()
+  local ok_open, opened_or_err = pcall(function()
+    if love.system and love.system.openURL then
+      return love.system.openURL(DISCORD_INVITE_URL)
+    end
+    error("openURL unavailable")
+  end)
+  if ok_open and opened_or_err ~= false then
+    return true, nil
+  end
+  return false, opened_or_err
 end
 
 -- Settings screen layout constants
@@ -777,6 +870,7 @@ function MenuState:draw_main()
   for i, btn in ipairs(btns) do
     draw_button(rects[i], btn.label, btn.color, self.hover_button == i)
   end
+  draw_discord_icon_button(self.hover_button == DISCORD_BUTTON_HOVER)
 end
 
 -- Browse screen constants
@@ -1212,6 +1306,17 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
   if button ~= 1 then return end
 
   if self.screen == "main" then
+    if point_in_rect(x, y, discord_button_rect()) then
+      local ok_open, open_err = try_open_discord_invite()
+      if ok_open then
+        sound.play("click")
+      else
+        self.connect_error = "Could not open Discord invite: " .. tostring(open_err)
+        sound.play("error")
+      end
+      return
+    end
+
     local btns = main_buttons()
     local rects = button_rects(btns)
     for i = 1, #btns do
@@ -1367,6 +1472,10 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
   self.hover_button = nil
 
   if self.screen == "main" then
+    if point_in_rect(x, y, discord_button_rect()) then
+      self.hover_button = DISCORD_BUTTON_HOVER
+      return
+    end
     local btns = main_buttons()
     local rects = button_rects(btns)
     for i = 1, #btns do
