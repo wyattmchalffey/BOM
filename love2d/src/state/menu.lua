@@ -38,6 +38,10 @@ local BUTTON_HOVER = 0.15
 local BUTTON_W = 360
 local BUTTON_H = 60
 local DISCORD_INVITE_URL = "https://discord.gg/amjtyj8Hjx"
+local RELAY_HOST = "relay.wyattmchalffey.com"
+local RELAY_HTTP_BASE_URL = "https://" .. RELAY_HOST
+local RELAY_WS_BASE_URL = "wss://" .. RELAY_HOST
+local RELAY_ROOMS_URL = RELAY_HTTP_BASE_URL .. "/rooms"
 local DISCORD_BUTTON_HOVER = -3
 local DISCORD_BUTTON_SIZE = 56
 local DISCORD_BUTTON_PAD = 18
@@ -392,6 +396,10 @@ local DECK_CARD_W = 200
 local DECK_CARD_H = 118
 local DECK_CARD_GAP = 22
 local DECK_CARD_Y = 108
+local DECK_FACTION_PRESET_BTN_W = 62
+local DECK_FACTION_PRESET_BTN_H = 20
+local DECK_FACTION_PRESET_BTN_PAD = 8
+local DECK_FACTION_PRESET_HOVER_BASE = 5000
 local DECK_LIST_X_PAD = 120
 local DECK_TAB_H = 24
 local DECK_TAB_GAP = 6
@@ -487,6 +495,15 @@ local function deckbuilder_faction_layout(gw)
   local total_w = #tiles * DECK_CARD_W + (#tiles - 1) * DECK_CARD_GAP
   local start_x = (gw - total_w) / 2
   return tiles, start_x, DECK_CARD_Y
+end
+
+local function deckbuilder_faction_preset_button_rect(card_x, card_y)
+  return {
+    x = card_x + DECK_CARD_W - DECK_FACTION_PRESET_BTN_W - DECK_FACTION_PRESET_BTN_PAD,
+    y = card_y + DECK_FACTION_PRESET_BTN_PAD,
+    w = DECK_FACTION_PRESET_BTN_W,
+    h = DECK_FACTION_PRESET_BTN_H,
+  }
 end
 
 local function safe_card_def(card_id)
@@ -931,6 +948,20 @@ function MenuState:_set_deck_count(card_id, value)
   end
 end
 
+function MenuState:_apply_recommended_deck_for_faction(faction)
+  local applied = deck_profiles.apply_recommended_deck(faction)
+  self.deckbuilder_faction = faction
+  settings.values.faction = faction
+  self:refresh_deckbuilder_state()
+  if applied and applied.ok then
+    self.deckbuilder_error = nil
+  else
+    self.deckbuilder_error = "recommended_" .. tostring(applied and applied.reason or "error")
+  end
+  settings.save()
+  return applied
+end
+
 function MenuState:draw_deckbuilder()
   local gw = love.graphics.getWidth()
   draw_back_button(self.hover_button == -1)
@@ -956,13 +987,16 @@ function MenuState:draw_deckbuilder()
   local label_font = util.get_title_font(21)
   local detail_font = util.get_font(13)
   local soon_font = util.get_title_font(16)
+  local preset_font = util.get_font(11)
 
   for i, tile in ipairs(faction_tiles) do
     local fdata = factions_data[tile.id]
     local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
     local selected = tile.selectable and (self.deckbuilder_faction == tile.id)
-    local hovered = (self.deckbuilder_hover == i)
+    local preset_hovered = (self.deckbuilder_hover == (DECK_FACTION_PRESET_HOVER_BASE + i))
+    local hovered = (self.deckbuilder_hover == i) or preset_hovered
     local faded = tile.coming_soon
+    local has_recommended = tile.selectable and deck_profiles.has_recommended_deck(tile.id)
 
     -- Card background
     if selected then
@@ -999,6 +1033,36 @@ function MenuState:draw_deckbuilder()
     love.graphics.setFont(detail_font)
     love.graphics.setColor(DIM[1], DIM[2], DIM[3], faded and 0.82 or 1)
     love.graphics.printf("Max Workers: " .. (fdata.default_max_workers or 8), cx, card_y + 49, DECK_CARD_W, "center")
+
+    if tile.selectable then
+      local preset_r = deckbuilder_faction_preset_button_rect(cx, card_y)
+      if has_recommended then
+        if preset_hovered then
+          love.graphics.setColor(fdata.color[1] * 0.36, fdata.color[2] * 0.36, fdata.color[3] * 0.36, 0.98)
+        else
+          love.graphics.setColor(0.09, 0.1, 0.14, 0.92)
+        end
+      else
+        love.graphics.setColor(0.12, 0.12, 0.16, 0.65)
+      end
+      love.graphics.rectangle("fill", preset_r.x, preset_r.y, preset_r.w, preset_r.h, 5, 5)
+
+      if has_recommended then
+        local line_alpha = preset_hovered and 0.95 or 0.65
+        love.graphics.setColor(fdata.color[1], fdata.color[2], fdata.color[3], line_alpha)
+      else
+        love.graphics.setColor(1, 1, 1, 0.12)
+      end
+      love.graphics.rectangle("line", preset_r.x, preset_r.y, preset_r.w, preset_r.h, 5, 5)
+
+      love.graphics.setFont(preset_font)
+      if has_recommended then
+        love.graphics.setColor(0.94, 0.95, 0.98, 1)
+      else
+        love.graphics.setColor(0.55, 0.56, 0.62, 0.85)
+      end
+      love.graphics.printf("Preset", preset_r.x, preset_r.y + 4, preset_r.w, "center")
+    end
 
     -- Selected indicator
     if selected then
@@ -1543,7 +1607,7 @@ function MenuState:enter_browse()
   if self._room_fetcher then
     self._room_fetcher:cleanup()
   end
-  self._room_fetcher = room_list_fetcher.new("https://bom-hbfv.onrender.com/rooms")
+  self._room_fetcher = room_list_fetcher.new(RELAY_ROOMS_URL)
 end
 
 function MenuState:do_play_online()
@@ -1552,7 +1616,7 @@ function MenuState:do_play_online()
   self._host_room_code = nil
 
   -- Start threaded connection (non-blocking)
-  self._relay = threaded_relay.start("wss://bom-hbfv.onrender.com", self:get_player_name())
+  self._relay = threaded_relay.start(RELAY_WS_BASE_URL, self:get_player_name())
 
   -- Create headless host service with host player pre-registered as player 0
   self._relay_service = headless_host_service.new({
@@ -1566,7 +1630,7 @@ function MenuState:do_play_online()
 end
 
 function MenuState:do_browse_join(room_code)
-  local url = "wss://bom-hbfv.onrender.com/join/" .. room_code
+  local url = RELAY_WS_BASE_URL .. "/join/" .. room_code
   local name = self:get_player_name()
 
   -- Clean up fetcher
@@ -1737,6 +1801,13 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
     card_y = card_y - (self.deckbuilder_scroll or 0)
     for i, tile in ipairs(faction_tiles) do
       local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
+      if tile.selectable and deck_profiles.has_recommended_deck(tile.id) then
+        local preset_r = deckbuilder_faction_preset_button_rect(cx, card_y)
+        if point_in_rect(x, y, preset_r) then
+          self:_apply_recommended_deck_for_faction(tile.id)
+          return
+        end
+      end
       local r = { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }
       if point_in_rect(x, y, r) then
         if tile.selectable then
@@ -1940,6 +2011,14 @@ function MenuState:mousemoved(x, y, dx, dy, istouch)
     card_y = card_y - (self.deckbuilder_scroll or 0)
     for i, tile in ipairs(faction_tiles) do
       local cx = start_x + (i - 1) * (DECK_CARD_W + DECK_CARD_GAP)
+      if tile.selectable and deck_profiles.has_recommended_deck(tile.id) then
+        local preset_r = deckbuilder_faction_preset_button_rect(cx, card_y)
+        if point_in_rect(x, y, preset_r) then
+          self.deckbuilder_hover = DECK_FACTION_PRESET_HOVER_BASE + i
+          self.hover_button = -2
+          return
+        end
+      end
       if point_in_rect(x, y, { x = cx, y = card_y, w = DECK_CARD_W, h = DECK_CARD_H }) then
         self.deckbuilder_hover = i
         if tile.selectable then
