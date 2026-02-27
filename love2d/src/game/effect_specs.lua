@@ -248,6 +248,7 @@ local function no_args_schema()
 end
 
 local FILTER_FIELDS = {
+  kind = { kind = "nonempty_string" },
   faction = { kind = "nonempty_string" },
   tier = { kind = "nonneg_integer" },
   subtypes = { kind = "string_array" },
@@ -662,10 +663,6 @@ local by_effect = {
 }
 
 local effect_support = {
-  bonus_production = {
-    level = "partial",
-    note = "Worker identity on resource nodes is aggregate-only, so subtype production bonuses are approximate/no-op.",
-  },
   prevent_rot = {
     level = "partial",
     note = "Resource rot is not modeled in the current engine, so this effect is a no-op.",

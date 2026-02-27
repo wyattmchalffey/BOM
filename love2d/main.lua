@@ -2,7 +2,7 @@
 local exe_dir = love.filesystem.getSourceBaseDirectory():gsub("\\", "/")
 package.cpath = package.cpath .. ";" .. exe_dir .. "/?.dll"
 
--- Battles of Masadoria — Entry point
+-- Siegecraft — Entry point
 -- Delegates load/update/draw/input to current screen state.
 --
 -- Resolution-independent scaling: the entire game operates in a 1280x720

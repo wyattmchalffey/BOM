@@ -1,4 +1,4 @@
-# Battles of Masadoria — Community, Art, and Growth Plan
+# Siegecraft — Community, Art, and Growth Plan
 
 This plan is designed for a solo developer with a working alpha (multiplayer card game, 2 factions, full game loop) and minimal budget. It prioritizes getting real players into the game fast, building a community around it, and finding art contributors through that community rather than spending money you don't have.
 
@@ -65,7 +65,7 @@ Roles:
 ### Itch.io Page
 
 This is your public-facing home until you have a Steam page. Set up a free game page on itch.io with:
-- A short description (elevator pitch: "Battles of Masadoria is a competitive multiplayer card game where asymmetric factions clash through resource management, combat, and unique faction mechanics")
+- A short description (elevator pitch: "Siegecraft is a competitive multiplayer card game where asymmetric factions clash through resource management, combat, and unique faction mechanics")
 - 2–3 screenshots of actual gameplay (even with placeholder art)
 - A downloadable alpha build (Windows, since that's what your build scripts target)
 - A devlog — even one post explaining what the game is and where it's headed

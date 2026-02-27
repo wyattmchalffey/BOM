@@ -1,4 +1,4 @@
-# Battles of Masadoria - Project Outline (Archived MVP Outline)
+# Siegecraft - Project Outline (Archived MVP Outline)
 
 This file used to describe the original MVP implementation plan.
 

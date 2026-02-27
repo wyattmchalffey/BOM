@@ -179,6 +179,61 @@ local function special_worker_multiplier(sw_card_id)
   return 1
 end
 
+local function apply_bonus_production_for_resource_workers(player, per_workers, bonus)
+  if type(player.workersOn) ~= "table" then return end
+  for res, assigned in pairs(player.workersOn) do
+    local assigned_count = tonumber(assigned) or 0
+    local batches = math.floor(assigned_count / per_workers)
+    local amount = batches * bonus
+    if type(res) == "string" and amount ~= 0 and player.resources[res] ~= nil then
+      player.resources[res] = player.resources[res] + amount
+    end
+  end
+end
+
+local function apply_bonus_production_for_structure_workers(player, per_workers, bonus)
+  if type(player.board) ~= "table" then return end
+  for _, entry in ipairs(player.board) do
+    local assigned_count = tonumber(entry.workers) or 0
+    if assigned_count > 0 then
+      local batches = math.floor(assigned_count / per_workers)
+      local amount = batches * bonus
+      if amount ~= 0 then
+        local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+        if ok and card_def and type(card_def.abilities) == "table" then
+          for _, ab in ipairs(card_def.abilities) do
+            if ab.type == "static" and ab.effect == "produce" and ab.effect_args and ab.effect_args.per_worker then
+              local res = ab.effect_args.resource
+              if type(res) == "string" and player.resources[res] ~= nil then
+                player.resources[res] = player.resources[res] + amount
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+end
+
+local function apply_bonus_production_effects(player)
+  if type(player.board) ~= "table" then return end
+  for _, entry in ipairs(player.board) do
+    local ok, card_def = pcall(cards.get_card_def, entry.card_id)
+    if ok and card_def and type(card_def.abilities) == "table" then
+      for _, ab in ipairs(card_def.abilities) do
+        if ab.type == "static" and ab.effect == "bonus_production" and ab.effect_args then
+          local per_workers = tonumber(ab.effect_args.per_workers)
+          local bonus = tonumber(ab.effect_args.bonus)
+          if per_workers and per_workers > 0 and bonus and bonus ~= 0 then
+            apply_bonus_production_for_resource_workers(player, per_workers, bonus)
+            apply_bonus_production_for_structure_workers(player, per_workers, bonus)
+          end
+        end
+      end
+    end
+  end
+end
+
 local function fire_on_play_triggers(player, game_state, played_card_id)
   local _, _, aggregate = game_events.emit(game_state, {
     type = "card_played",
@@ -371,6 +426,8 @@ function actions.start_turn(g)
       end
     end
   end
+  -- Apply static bonus production effects (for example, Cottage).
+  apply_bonus_production_effects(p)
   -- Fire start_of_turn triggered abilities
   for _, entry in ipairs(p.board) do
     local ok, card_def = pcall(cards.get_card_def, entry.card_id)
@@ -1359,6 +1416,8 @@ function actions.unassign_special_worker(g, player_index, sw_index)
   return true
 end
 
+local shift_pending_combat_indices_after_destroy
+
 -- Apply ability damage to a unit. Kills it if lethal. Works on any player's board.
 function actions.apply_damage_to_unit(g, target_player_index, board_index, damage_amount)
   local p = g.players[target_player_index + 1]
@@ -1381,7 +1440,7 @@ function actions.apply_damage_to_unit(g, target_player_index, board_index, damag
   return true
 end
 
-local function shift_pending_combat_indices_after_destroy(g, target_player_index, removed_index)
+shift_pending_combat_indices_after_destroy = function(g, target_player_index, removed_index)
   local c = g and g.pendingCombat
   if not c or type(removed_index) ~= "number" then return end
   local affects_atk = (c.attacker == target_player_index)

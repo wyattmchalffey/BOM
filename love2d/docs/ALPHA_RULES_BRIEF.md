@@ -1,4 +1,4 @@
-# Battles of Masadoria - Alpha Rules (Brief)
+# Siegecraft - Alpha Rules (Brief)
 
 This is a short playtester-facing rules summary for the current alpha build.
 

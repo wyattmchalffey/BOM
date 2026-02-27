@@ -1,5 +1,5 @@
 param(
-    [string]$GameName = "BattlesOfMasadoria",
+    [string]$GameName = "Siegecraft",
     [string]$OutputDir = "$PSScriptRoot\build\windows"
 )
 

@@ -14,6 +14,22 @@ local CARD_W = 160
 local CARD_H = 220
 local FULL_CARD_ASPECT_H_OVER_W = 3.5 / 2.5
 
+-- love.graphics.setScissor expects screen-space coordinates, while card drawing
+-- may run under a translate/scale transform (hand cards). Convert local rects.
+local function set_local_scissor(x, y, w, h)
+  local x1, y1 = x, y
+  local x2, y2 = x + w, y + h
+  if love.graphics.transformPoint then
+    x1, y1 = love.graphics.transformPoint(x1, y1)
+    x2, y2 = love.graphics.transformPoint(x2, y2)
+  end
+  local sx = math.floor(math.min(x1, x2) + 0.5)
+  local sy = math.floor(math.min(y1, y2) + 0.5)
+  local sw = math.max(0, math.floor(math.abs(x2 - x1) + 0.5))
+  local sh = math.max(0, math.floor(math.abs(y2 - y1) + 0.5))
+  love.graphics.setScissor(sx, sy, sw, sh)
+end
+
 -- Get faction strip color (RGBA) from centralized data
 local function get_strip_color(faction)
   local f = factions[faction or "Neutral"]
@@ -115,7 +131,7 @@ local function ability_effect_text(ab)
   elseif e == "draw_cards" then
     return "Draw " .. (args.amount or 1) .. " Card" .. ((args.amount or 1) > 1 and "s" or "")
   elseif e == "play_unit" then
-    local sub = args.subtypes and table.concat(args.subtypes, "/") or "Unit"
+    local sub = args.subtypes and table.concat(args.subtypes, "/") or (args.kind or "Unit")
     return "Play T" .. (args.tier or "?") .. " " .. sub
   elseif e == "research" then
     return "Research T" .. (args.tier or "?")
@@ -496,6 +512,31 @@ local function is_keyword_sentence(sentence)
     return true
   end
 
+  -- Keyword headers may list multiple keywords (for example: "Trample, Vigilance.").
+  -- Treat comma- or "and"-separated keyword-only lines as keyword sentences.
+  do
+    local normalized = core_lc:gsub("%s+and%s+", ",")
+    local parts = {}
+    for token in normalized:gmatch("[^,]+") do
+      local part = trim_text(token)
+      if part ~= "" then
+        parts[#parts + 1] = part
+      end
+    end
+    if #parts >= 2 then
+      local all_keywords = true
+      for _, part in ipairs(parts) do
+        if KEYWORD_NAME_SET[part] ~= true then
+          all_keywords = false
+          break
+        end
+      end
+      if all_keywords then
+        return true
+      end
+    end
+  end
+
   -- Monument reminder cards commonly use a keyword header like "Monument 4."
   -- Treat this as a keyword line so it gets bolded + separated like other keywords.
   if core_lc:match("^monument%s+%d+$") or core_lc:match("^monument%s+x$") then
@@ -503,6 +544,46 @@ local function is_keyword_sentence(sentence)
   end
 
   return false
+end
+
+local BOLD_TRIGGER_PREFIXES = {
+  "on play:",
+  "start of turn:",
+  "end of turn:",
+  "on attack:",
+  "mass attack:",
+  "base dmg:",
+  "on death:",
+  "after combat:",
+  "fire dmg:",
+  "ally death:",
+  "non-undead ally death:",
+  "non-undead orc death:",
+}
+
+local function split_bold_prefix(sentence)
+  if type(sentence) ~= "string" then return nil, nil end
+  local trimmed = trim_text(sentence)
+  local lower = string.lower(trimmed)
+  for _, prefix in ipairs(BOLD_TRIGGER_PREFIXES) do
+    if lower:sub(1, #prefix) == prefix then
+      local rest = trim_text(trimmed:sub(#prefix + 1))
+      local display_prefix = trimmed:sub(1, #prefix)
+      return display_prefix, rest
+    end
+    -- Support cards that format trigger headers as "On attack - ..."
+    -- instead of "On attack: ...".
+    if prefix:sub(-1) == ":" then
+      local base = prefix:sub(1, -2)
+      local dash_prefix = base .. " -"
+      if lower:sub(1, #dash_prefix) == dash_prefix then
+        local rest = trim_text(trimmed:sub(#dash_prefix + 1))
+        local display_prefix = trimmed:sub(1, #dash_prefix)
+        return display_prefix, rest
+      end
+    end
+  end
+  return nil, nil
 end
 
 local function build_rule_segments_with_keywords(display_text)
@@ -527,7 +608,17 @@ local function build_rule_segments_with_keywords(display_text)
         flush_normal_parts()
         segments[#segments + 1] = { text = clean, bold = true }
       else
-        normal_parts[#normal_parts + 1] = clean
+        local bold_prefix, body = split_bold_prefix(clean)
+        if bold_prefix then
+          flush_normal_parts()
+          segments[#segments + 1] = {
+            text = body,
+            bold = false,
+            prefix_bold = bold_prefix,
+          }
+        else
+          normal_parts[#normal_parts + 1] = clean
+        end
       end
     end
   end
@@ -545,30 +636,61 @@ local function draw_rules_text_with_keyword_emphasis(display_text, x, y, max_w, 
   local draw_y = y
 
   for _, seg in ipairs(segments) do
-    local _, lines = font:getWrap(seg.text, max_w)
-    if #lines == 0 then
-      lines = { seg.text }
-    end
-
-    for _, line in ipairs(lines) do
+    if seg.prefix_bold then
       if draw_y > max_y then
         return
       end
+
+      local prefix = seg.prefix_bold
+      local body = trim_text(seg.text or "")
+      local full_text = prefix .. ((body ~= "") and (" " .. body) or "")
+      local _, lines = font:getWrap(full_text, max_w)
+      if #lines == 0 then
+        lines = { full_text }
+      end
+      local seg_start_y = draw_y
+
       love.graphics.setFont(font)
       love.graphics.setColor(text_color[1], text_color[2], text_color[3], 0.9)
-      if seg.bold then
-        -- Faux-bold for keyword lines using two close draws.
+      for _, line in ipairs(lines) do
+        if draw_y > max_y then
+          return
+        end
         love.graphics.print(line, x, draw_y)
-        love.graphics.print(line, x + 0.7, draw_y)
-      else
-        love.graphics.print(line, x, draw_y)
+        draw_y = draw_y + line_h
       end
-      draw_y = draw_y + line_h
-    end
 
-    -- Force a visual break after keyworded ability lines.
-    if seg.bold then
-      draw_y = draw_y + 1
+      -- Re-draw prefix for bold emphasis while preserving natural wrapping.
+      if seg_start_y <= max_y then
+        love.graphics.print(prefix, x, seg_start_y)
+        love.graphics.print(prefix, x + 0.7, seg_start_y)
+      end
+    else
+      local _, lines = font:getWrap(seg.text, max_w)
+      if #lines == 0 then
+        lines = { seg.text }
+      end
+
+      for _, line in ipairs(lines) do
+        if draw_y > max_y then
+          return
+        end
+        love.graphics.setFont(font)
+        love.graphics.setColor(text_color[1], text_color[2], text_color[3], 0.9)
+        if seg.bold then
+          -- Faux-bold for keyword lines using two close draws.
+          love.graphics.print(line, x, draw_y)
+          love.graphics.print(line, x + 0.7, draw_y)
+        else
+          love.graphics.print(line, x, draw_y)
+        end
+        draw_y = draw_y + line_h
+      end
+
+      -- Force a visual break after keyworded ability lines.
+      if seg.bold then
+        draw_y = draw_y + 1
+      end
     end
   end
 end
@@ -717,7 +839,7 @@ function card_frame.draw(x, y, params)
   love.graphics.rectangle("fill", x, y, w, h, 6, 6)
 
   -- Parchment texture overlay
-  love.graphics.setScissor(x, y, w, h)
+  set_local_scissor(x, y, w, h)
   textures.draw_tiled(textures.card, x, y, w, h, 0.06)
   love.graphics.setScissor()
 
@@ -832,7 +954,7 @@ function card_frame.draw(x, y, params)
 
   love.graphics.setColor(muted)
   love.graphics.setFont(type_font)
-  love.graphics.setScissor(type_x, cy, type_w, type_font:getHeight() + 1)
+  set_local_scissor(type_x, cy, type_w, type_font:getHeight() + 1)
   love.graphics.print(display_type_line, type_x, cy)
   love.graphics.setScissor()
 
@@ -867,7 +989,7 @@ function card_frame.draw(x, y, params)
   love.graphics.setColor(art_bg)
   love.graphics.rectangle("fill", cx, art_y, art_w, art_h, 4, 4)
   -- Art content (with scissor to clip to art box)
-  love.graphics.setScissor(cx, art_y, art_w, art_h)
+  set_local_scissor(cx, art_y, art_w, art_h)
   card_art.draw_card_art(cx, art_y, art_w, art_h, kind, is_base, title or faction)
   love.graphics.setScissor()  -- Clear scissor immediately after art
   -- Inner shadow on art box

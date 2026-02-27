@@ -719,6 +719,56 @@ local function is_unit_like(card_def)
   return card_def and (card_def.kind == "Unit" or card_def.kind == "Worker")
 end
 
+local function count_owned_copies_on_board(player, card_id)
+  if type(player) ~= "table" or type(player.board) ~= "table" then return 0 end
+  if type(card_id) ~= "string" or card_id == "" then return 0 end
+  local owned = 0
+  for _, entry in ipairs(player.board) do
+    if type(entry) == "table" and entry.card_id == card_id then
+      owned = owned + 1
+    end
+  end
+  return owned
+end
+
+local function effective_card_tier_for_player(player, card_def)
+  local base_tier = tonumber(card_def and card_def.tier) or 0
+  if type(card_def) ~= "table" then
+    return base_tier
+  end
+  if card_def.dynamic_tier_mode == "owned_plus_one" then
+    return count_owned_copies_on_board(player, card_def.id) + 1
+  end
+  return base_tier
+end
+
+local function card_matches_filter(player, card_def, args, default_kind)
+  if type(card_def) ~= "table" then return false end
+  args = args or {}
+  local target_kind = args.kind or default_kind
+  if target_kind and card_def.kind ~= target_kind then return false end
+  if args.faction and card_def.faction ~= args.faction then return false end
+  if args.tier ~= nil and effective_card_tier_for_player(player, card_def) ~= args.tier then
+    return false
+  end
+  if args.subtypes and card_def.subtypes then
+    local has_any = false
+    for _, req in ipairs(args.subtypes) do
+      for _, got in ipairs(card_def.subtypes) do
+        if req == got then
+          has_any = true
+          break
+        end
+      end
+      if has_any then break end
+    end
+    if not has_any then return false end
+  elseif args.subtypes then
+    return false
+  end
+  return true
+end
+
 local function trigger_once_key(player_index, source_ref, ability_index, trigger_name)
   return tostring(player_index) .. ":trigger:" .. tostring(source_ref) .. ":" .. tostring(ability_index) .. ":" .. tostring(trigger_name)
 end
@@ -819,32 +869,16 @@ effect_handlers.play_unit = function(ability, player, g)
     end
     return
   end
-  -- Fallback: auto-pick first matching Unit card from hand
-  for i, card_id in ipairs(player.hand) do
-    local ok, card_def = pcall(cards.get_card_def, card_id)
-    if ok and card_def and card_def.kind == "Unit" then
-      local match = true
-      if args.faction and card_def.faction ~= args.faction then match = false end
-      if args.tier and (card_def.tier or 0) ~= args.tier then match = false end
-      if args.subtypes and card_def.subtypes then
-        local has_subtype = false
-        for _, req_sub in ipairs(args.subtypes) do
-          for _, card_sub in ipairs(card_def.subtypes) do
-            if req_sub == card_sub then has_subtype = true; break end
-          end
-          if has_subtype then break end
-        end
-        if not has_subtype then match = false end
-      elseif args.subtypes then
-        match = false
-      end
-      if match then
-        table.remove(player.hand, i)
-        local new_entry = { card_id = card_id, state = summoned_state() }
-        ensure_board_entry_instance_id_internal(g, new_entry)
-        player.board[#player.board + 1] = new_entry
-        return
-      end
+  -- Fallback: auto-pick first matching card from hand.
+  local indices = abilities.find_matching_hand_indices(player, args)
+  if #indices > 0 then
+    local i = indices[1]
+    local card_id = player.hand[i]
+    if card_id then
+      table.remove(player.hand, i)
+      local new_entry = { card_id = card_id, state = summoned_state() }
+      ensure_board_entry_instance_id_internal(g, new_entry)
+      player.board[#player.board + 1] = new_entry
     end
   end
 end
@@ -927,8 +961,8 @@ effect_handlers.produce = function(ability, player, g, context)
 end
 
 effect_handlers.bonus_production = function(ability, player, g)
-  -- Not modeled yet: worker identity on resource nodes is aggregate-only, so
-  -- subtype-based worker production bonuses cannot be resolved exactly here.
+  -- Static bonus production is resolved in actions.start_turn where worker
+  -- assignment counts are available across resource nodes and structures.
 end
 
 effect_handlers.prevent_rot = function(ability, player, g)
@@ -1380,26 +1414,15 @@ function abilities.find_matching_hand_indices(player, effect_args)
   local indices = {}
   for i, card_id in ipairs(player.hand) do
     local ok, card_def = pcall(cards.get_card_def, card_id)
-    if ok and card_def and card_def.kind == "Unit" then
-      local match = true
-      if args.faction and card_def.faction ~= args.faction then match = false end
-      if args.tier and (card_def.tier or 0) ~= args.tier then match = false end
-      if args.subtypes and card_def.subtypes then
-        local has_subtype = false
-        for _, req in ipairs(args.subtypes) do
-          for _, got in ipairs(card_def.subtypes) do
-            if req == got then has_subtype = true; break end
-          end
-          if has_subtype then break end
-        end
-        if not has_subtype then match = false end
-      elseif args.subtypes then
-        match = false
-      end
-      if match then indices[#indices + 1] = i end
+    if ok and card_def and card_matches_filter(player, card_def, args, "Unit") then
+      indices[#indices + 1] = i
     end
   end
   return indices
+end
+
+function abilities.effective_tier_for_card(player, card_def)
+  return effective_card_tier_for_player(player, card_def)
 end
 
 -- Return board indices of non-Structure entries eligible for sacrifice (non-Undead units/workers).

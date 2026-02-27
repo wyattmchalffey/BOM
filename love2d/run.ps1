@@ -1,4 +1,4 @@
-# Run Battles of Masadoria with LÖVE. Use this if "love" is not in your PATH.
+# Run Siegecraft with LÖVE. Use this if "love" is not in your PATH.
 $lovePaths = @(
     "C:\Program Files\LOVE\love.exe",
     "C:\Program Files (x86)\LOVE\love.exe",

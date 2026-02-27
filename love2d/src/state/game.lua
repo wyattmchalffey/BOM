@@ -17,6 +17,7 @@ local sound = require("src.fx.sound")
 local cards = require("src.game.cards")
 local unit_stats = require("src.game.unit_stats")
 local abilities = require("src.game.abilities")
+local actions = require("src.game.actions")
 local card_frame = require("src.ui.card_frame")
 local textures = require("src.fx.textures")
 local particles = require("src.fx.particles")
@@ -134,6 +135,8 @@ function GameState.new(opts)
       expected = "",
       steps = "",
     },
+    end_turn_confirm_open = false,
+    end_turn_confirm_player_index = nil,
   }, GameState)
   -- Cache the hand cursor once
   self._cursor_hand = love.mouse.getSystemCursor("hand")
@@ -1637,6 +1640,7 @@ function GameState:_handle_disconnect(message)
   self.reconnect_pending = false
   self.reconnect_reason = nil
   self:_clear_prompt_stack()
+  self:_close_end_turn_confirm()
   -- Show popup and return to menu after a moment
   self._disconnect_message = message
   self._disconnect_timer = 3.0
@@ -1776,6 +1780,7 @@ function GameState:_sync_terminal_state()
   self.pending_attack_trigger_targets = {}
   self.pending_block_assignments = {}
   self.pending_damage_orders = {}
+  self:_close_end_turn_confirm()
 
   self.turn_banner_timer = 1.6
   self.turn_banner_text = terminal_title_for_player(g, self.local_player_index) or "Match Ended"
@@ -1883,6 +1888,17 @@ function GameState:update(dt)
   popup.update(dt)
   shake.update(dt)
   particles.update(dt)
+
+  if self.end_turn_confirm_open then
+    local confirm_pi = self.end_turn_confirm_player_index
+    if type(confirm_pi) ~= "number"
+      or confirm_pi ~= self.local_player_index
+      or confirm_pi ~= self.game_state.activePlayer
+      or self:_count_unassigned_workers(confirm_pi) <= 0
+    then
+      self:_close_end_turn_confirm()
+    end
+  end
 
   -- Smooth glide for dragged worker (Balatro-style)
   if self.drag then
@@ -2813,6 +2829,127 @@ function GameState:_draw_pending_spell_target_prompt()
     end
   end
   self:_draw_top_combat_prompt(spell_name .. ": select a target", { 0.7, 0.4, 0.9, 0.85 }, { 0.9, 0.8, 1.0, 1.0 })
+end
+
+function GameState:_count_unassigned_workers(player_index)
+  if type(player_index) ~= "number" then
+    return 0
+  end
+  local p = self.game_state and self.game_state.players and self.game_state.players[player_index + 1]
+  if not p then
+    return 0
+  end
+  local count = actions.count_unassigned_workers(p)
+  if type(count) ~= "number" then
+    return 0
+  end
+  return math.max(0, math.floor(count))
+end
+
+function GameState:_open_end_turn_confirm(player_index)
+  self.end_turn_confirm_open = true
+  self.end_turn_confirm_player_index = player_index
+end
+
+function GameState:_close_end_turn_confirm()
+  self.end_turn_confirm_open = false
+  self.end_turn_confirm_player_index = nil
+end
+
+function GameState:_end_turn_confirm_layout()
+  local gw, gh = love.graphics.getDimensions()
+  local panel_w = math.max(300, math.min(420, gw - 40))
+  local panel_h = 174
+  local panel_x = math.floor((gw - panel_w) / 2)
+  local panel_y = math.floor((gh - panel_h) / 2)
+  local btn_w, btn_h = 128, 34
+  local gap = 14
+  local row_w = btn_w * 2 + gap
+  local btn_x = panel_x + math.floor((panel_w - row_w) / 2)
+  local btn_y = panel_y + panel_h - btn_h - 16
+
+  return {
+    panel = { x = panel_x, y = panel_y, w = panel_w, h = panel_h },
+    buttons = {
+      confirm = { x = btn_x, y = btn_y, w = btn_w, h = btn_h, label = "End Turn" },
+      cancel = { x = btn_x + btn_w + gap, y = btn_y, w = btn_w, h = btn_h, label = "Cancel" },
+    },
+  }
+end
+
+function GameState:_draw_end_turn_confirm_overlay()
+  if not self.end_turn_confirm_open then return end
+
+  local layout = self:_end_turn_confirm_layout()
+  local panel = layout.panel
+  local buttons = layout.buttons
+  local mx, my = love.mouse.getPosition()
+  local pi = self.end_turn_confirm_player_index or self.local_player_index
+  local unassigned = self:_count_unassigned_workers(pi)
+  local worker_word = (unassigned == 1) and "worker" or "workers"
+
+  love.graphics.setColor(0, 0, 0, 0.6)
+  love.graphics.rectangle("fill", 0, 0, love.graphics.getWidth(), love.graphics.getHeight())
+
+  love.graphics.setColor(0.1, 0.1, 0.14, 0.98)
+  love.graphics.rectangle("fill", panel.x, panel.y, panel.w, panel.h, 10, 10)
+  love.graphics.setColor(0.9, 0.65, 0.28, 0.85)
+  love.graphics.rectangle("line", panel.x, panel.y, panel.w, panel.h, 10, 10)
+
+  love.graphics.setFont(util.get_title_font(20))
+  love.graphics.setColor(0.98, 0.98, 1.0, 1.0)
+  love.graphics.printf("Unassigned Workers", panel.x, panel.y + 14, panel.w, "center")
+
+  love.graphics.setFont(util.get_font(13))
+  love.graphics.setColor(0.9, 0.92, 0.97, 0.96)
+  love.graphics.printf(
+    "You have " .. unassigned .. " unassigned " .. worker_word .. ".\nEnd turn anyway?",
+    panel.x + 16,
+    panel.y + 52,
+    panel.w - 32,
+    "center"
+  )
+
+  local function draw_button(btn, accent)
+    local hovered = util.point_in_rect(mx, my, btn.x, btn.y, btn.w, btn.h)
+    local fill = hovered and { accent[1], accent[2], accent[3], 0.26 } or { 0.16, 0.18, 0.25, 0.95 }
+    local line = hovered and { accent[1], accent[2], accent[3], 0.95 } or { 0.38, 0.42, 0.54, 0.85 }
+    love.graphics.setColor(fill[1], fill[2], fill[3], fill[4])
+    love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h, 7, 7)
+    love.graphics.setColor(line[1], line[2], line[3], line[4])
+    love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h, 7, 7)
+    love.graphics.setColor(0.95, 0.97, 1.0, 1.0)
+    love.graphics.setFont(util.get_font(12))
+    love.graphics.printf(btn.label, btn.x, btn.y + 9, btn.w, "center")
+  end
+
+  draw_button(buttons.confirm, { 0.95, 0.55, 0.22 })
+  draw_button(buttons.cancel, { 0.72, 0.76, 0.86 })
+end
+
+function GameState:_handle_end_turn_confirm_click(x, y)
+  if not self.end_turn_confirm_open then return false end
+
+  local layout = self:_end_turn_confirm_layout()
+  local b = layout.buttons
+  if util.point_in_rect(x, y, b.confirm.x, b.confirm.y, b.confirm.w, b.confirm.h) then
+    local pi = self.end_turn_confirm_player_index or self.local_player_index
+    if pi ~= self.game_state.activePlayer or (self.authoritative_adapter and pi ~= self.local_player_index) then
+      self:_close_end_turn_confirm()
+      sound.play("error")
+      return true
+    end
+    self:_close_end_turn_confirm()
+    self:_execute_end_turn(pi)
+    return true
+  end
+  if util.point_in_rect(x, y, b.cancel.x, b.cancel.y, b.cancel.w, b.cancel.h) then
+    self:_close_end_turn_confirm()
+    sound.play("click")
+    return true
+  end
+
+  return true
 end
 
 function GameState:_has_in_game_settings_blocker()
@@ -3925,7 +4062,7 @@ function GameState:draw()
             upkeep = def.upkeep,
             attack = preview_attack,
             health = preview_health,
-            tier = def.tier,
+            tier = abilities.effective_tier_for_card(player, def),
             abilities_list = def.abilities,
             used_abilities = used_abs,
             can_activate_abilities = can_act_abs,
@@ -3986,7 +4123,7 @@ function GameState:draw()
             upkeep = def.upkeep,
             attack = def.attack,
             health = def.health or def.baseHealth,
-            tier = def.tier,
+            tier = abilities.effective_tier_for_card(player, def),
             abilities_list = def.abilities,
             show_ability_text = true,
           })
@@ -4039,7 +4176,7 @@ function GameState:draw()
             upkeep = def.upkeep,
             attack = def.attack,
             health = def.health or def.baseHealth,
-            tier = def.tier,
+            tier = abilities.effective_tier_for_card(player, def),
             abilities_list = def.abilities,
             show_ability_text = true,
           })
@@ -4362,6 +4499,7 @@ function GameState:draw()
   -- Vignette: drawn last, on top of everything
   textures.draw_vignette()
   self:_draw_in_game_settings_overlay()
+  self:_draw_end_turn_confirm_overlay()
 end
 
 
@@ -5452,56 +5590,20 @@ function GameState:_start_activated_play_unit_prompt(pi, p, info, ab)
   if #eligible == 0 then
     sound.play("error")
     return true
-  elseif #eligible == 1 then
-    -- Only one match: auto-play immediately
-    local before_res = {}
-    for k, v in pairs(p.resources) do before_res[k] = v end
-    local result = self:dispatch_command({
-      type = "PLAY_UNIT_FROM_HAND",
-      player_index = pi,
-      source = { type = info.source, index = info.board_index },
-      ability_index = info.ability_index,
-      hand_index = eligible[1],
-      fast_ability = ab.fast or false,
-    })
-    if result.ok then
-      sound.play("coin")
-      local pi_panel = self:player_to_panel(pi)
-      local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-      for _, c in ipairs(ab.cost or {}) do
-        if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
-          local rb_x, rb_y = board.resource_bar_rect(pi_panel)
-          popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
-        end
-      end
-      local card_id = result.meta and result.meta.card_id
-      local unit_name = "Unit"
-      if card_id then
-        local ok_d, udef = pcall(cards.get_card_def, card_id)
-        if ok_d and udef then unit_name = udef.name end
-      end
-      popup.create(unit_name .. " played!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.4, 0.9, 1.0 })
-      self.hand_selected_index = nil
-      self:_clear_prompt("play_unit")
-      while #self.hand_y_offsets > #p.hand do
-        table.remove(self.hand_y_offsets)
-      end
-    end
-    return true
-  else
-    -- Multiple matches: enter pending selection mode
-    self:_set_prompt("play_unit", {
-      source = { type = info.source, index = info.board_index },
-      ability_index = info.ability_index,
-      effect_args = ab.effect_args,
-      eligible_indices = eligible,
-      cost = ab.cost,
-      fast = ab.fast or false,
-    })
-    self.hand_selected_index = nil
-    sound.play("click")
-    return true
   end
+
+  -- Always require explicit hand-card confirmation, even with one eligible card.
+  self:_set_prompt("play_unit", {
+    source = { type = info.source, index = info.board_index },
+    ability_index = info.ability_index,
+    effect_args = ab.effect_args,
+    eligible_indices = eligible,
+    cost = ab.cost,
+    fast = ab.fast or false,
+  })
+  self.hand_selected_index = nil
+  sound.play("click")
+  return true
 end
 
 function GameState:_start_activated_sacrifice_upgrade_prompt(pi, p, info, ab)
@@ -5637,77 +5739,17 @@ function GameState:_start_activated_play_spell_prompt(pi, p, info, ab)
     return true
   end
 
-  local function do_cast_spell(hand_idx)
-    local spell_id = p.hand[hand_idx]
-    local spell_def = nil
-    if spell_id then
-      local ok_s, sd = pcall(cards.get_card_def, spell_id)
-      if ok_s and sd then spell_def = sd end
-    end
-    local targeted_ab = find_targeted_spell_on_cast_ability(spell_def)
-    if targeted_ab then
-      local args = targeted_ab.effect_args or {}
-      local opponent_pi, dmg_eligible = collect_targeted_spell_eligible_indices(self.game_state, pi, targeted_ab)
-      if #dmg_eligible == 0 then
-        sound.play("error")
-        return
-      end
-      self:_set_prompt("spell_target", {
-        hand_index = hand_idx,
-        effect_args = args,
-        eligible_player_index = opponent_pi,
-        eligible_board_indices = dmg_eligible,
-        via_ability_source = { type = info.source, index = info.board_index },
-        via_ability_ability_index = info.ability_index,
-        fast = ab.fast or false,
-      })
-      self:_clear_prompt("play_spell")
-      sound.play("click")
-    else
-      local before_res = {}
-      for k, v in pairs(p.resources) do before_res[k] = v end
-      local result = self:dispatch_command({
-        type = "PLAY_SPELL_VIA_ABILITY",
-        player_index = pi,
-        source = { type = info.source, index = info.board_index },
-        ability_index = info.ability_index,
-        hand_index = hand_idx,
-        fast_ability = ab.fast or false,
-      })
-      if result.ok then
-        sound.play("coin")
-        local pi_panel = self:player_to_panel(pi)
-        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
-        for _, c in ipairs(ab.cost or {}) do
-          if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
-            local rb_x, rb_y = board.resource_bar_rect(pi_panel)
-            popup.create("-" .. c.amount .. string.upper(string.sub(c.type, 1, 1)), rb_x + 25, rb_y - 4, { 1.0, 0.5, 0.25 })
-          end
-        end
-        local sname = spell_def and spell_def.name or "Spell"
-        popup.create(sname .. "!", px_b + pw_b / 2, py_b + ph_b - 80, { 0.7, 0.85, 1.0 })
-        self:_clear_prompt("play_spell")
-        while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
-      else
-        sound.play("error")
-      end
-    end
-  end
-
-  if #eligible == 1 then
-    do_cast_spell(eligible[1])
-  else
-    self:_set_prompt("play_spell", {
-      source = { type = info.source, index = info.board_index },
-      ability_index = info.ability_index,
-      cost = ab.cost,
-      effect_args = ab.effect_args,
-      eligible_indices = eligible,
-      fast = ab.fast or false,
-    })
-    self.hand_selected_index = nil
-    sound.play("click")
-  end
+  -- Always require explicit hand-card confirmation, even with one eligible spell.
+  self:_set_prompt("play_spell", {
+    source = { type = info.source, index = info.board_index },
+    ability_index = info.ability_index,
+    cost = ab.cost,
+    effect_args = ab.effect_args,
+    eligible_indices = eligible,
+    fast = ab.fast or false,
+  })
+  self.hand_selected_index = nil
+  sound.play("click")
   return true
 end
 
@@ -5839,10 +5881,86 @@ function GameState:_try_start_activated_prompt(pi, p, info, ab)
   return method(self, pi, p, info, ab)
 end
 
+function GameState:_execute_end_turn(pi)
+  sound.play("whoosh")
+  self:_close_end_turn_confirm()
+
+  -- Feature 3: Capture resources before/after start_turn for production popups
+  local before = {}
+  local after = {}
+  local new_active
+  local p
+  if self.authoritative_adapter then
+    -- In multiplayer, the host executes START_TURN automatically after END_TURN.
+    -- Capture the next player's resources before dispatch.
+    local next_pi = 1 - self.game_state.activePlayer
+    p = self.game_state.players[next_pi + 1]
+    for _, key in ipairs(config.resource_types) do
+      before[key] = p.resources[key] or 0
+    end
+    self:dispatch_command({ type = "END_TURN", player_index = pi })
+    -- State now includes START_TURN effects from the host
+    new_active = self.game_state.activePlayer
+    p = self.game_state.players[new_active + 1]
+    for _, key in ipairs(config.resource_types) do
+      after[key] = p.resources[key] or 0
+    end
+  else
+    -- Local mode: send END_TURN and START_TURN separately
+    self:dispatch_command({ type = "END_TURN", player_index = pi })
+    new_active = self.game_state.activePlayer
+    p = self.game_state.players[new_active + 1]
+    for _, key in ipairs(config.resource_types) do
+      before[key] = p.resources[key] or 0
+    end
+    self:dispatch_command({ type = "START_TURN", player_index = new_active })
+    for _, key in ipairs(config.resource_types) do
+      after[key] = p.resources[key] or 0
+    end
+  end
+  -- Spawn production popups near the resource bar
+  local new_panel = self:player_to_panel(new_active)
+  local rbx, rby, rbw, rbh = board.resource_bar_rect(new_panel)
+  local badge_offset = 0
+  for _, key in ipairs(config.resource_types) do
+    local gained = after[key] - before[key]
+    local rdef = res_registry[key]
+    if gained > 0 and rdef then
+      local letter = rdef.letter
+      local color = rdef.color or {0.3, 0.9, 0.4}
+      popup.create("+" .. gained .. letter, rbx + 8 + badge_offset + 25, rby - 4, color, { font_size = 12, lifetime = 1.0, vy = -25 })
+      sound.play("coin", 0.4)
+    end
+    -- Advance offset only for resources the player actually has (matching the badge display)
+    if p.resources[key] and p.resources[key] > 0 then
+      badge_offset = badge_offset + 54
+    end
+  end
+  -- Clear hand selection and pending state on turn change
+  self.hand_selected_index = nil
+  self:_clear_prompt("play_unit")
+  self:_clear_prompt("sacrifice")
+  self:_clear_prompt("upgrade")
+  self:_clear_prompt("monument")
+  self:_clear_prompt("graveyard_return")
+  self:_clear_prompt("discard_draw")
+  self:_clear_pending_attack_declarations()
+  self:_clear_pending_attack_trigger_targets()
+  self.pending_block_assignments = {}
+  self.pending_damage_orders = {}
+  -- Show turn banner
+  self.turn_banner_timer = 1.2
+  self.turn_banner_text = (self.game_state.activePlayer == self.local_player_index) and "Your Turn" or "Opponent's Turn"
+end
+
 function GameState:mousepressed(x, y, button, istouch, presses)
   if button ~= 1 then return end -- left click only
   if self.in_game_settings_open then
     self:_handle_in_game_settings_click(x, y)
+    return
+  end
+  if self.end_turn_confirm_open then
+    self:_handle_end_turn_confirm_click(x, y)
     return
   end
   if self.game_state and self.game_state.is_terminal then return end
@@ -6092,73 +6210,12 @@ function GameState:mousepressed(x, y, button, istouch, presses)
   if kind == "end_turn" then
     if self.authoritative_adapter and pi ~= self.local_player_index then return end
     if pi ~= self.game_state.activePlayer then return end
-    sound.play("whoosh")
-    -- Feature 3: Capture resources before/after start_turn for production popups
-    local before = {}
-    local after = {}
-    local new_active
-    local p
-    if self.authoritative_adapter then
-      -- In multiplayer, the host executes START_TURN automatically after END_TURN.
-      -- Capture the next player's resources before dispatch.
-      local next_pi = 1 - self.game_state.activePlayer
-      p = self.game_state.players[next_pi + 1]
-      for _, key in ipairs(config.resource_types) do
-        before[key] = p.resources[key] or 0
-      end
-      self:dispatch_command({ type = "END_TURN", player_index = pi })
-      -- State now includes START_TURN effects from the host
-      new_active = self.game_state.activePlayer
-      p = self.game_state.players[new_active + 1]
-      for _, key in ipairs(config.resource_types) do
-        after[key] = p.resources[key] or 0
-      end
-    else
-      -- Local mode: send END_TURN and START_TURN separately
-      self:dispatch_command({ type = "END_TURN", player_index = pi })
-      new_active = self.game_state.activePlayer
-      p = self.game_state.players[new_active + 1]
-      for _, key in ipairs(config.resource_types) do
-        before[key] = p.resources[key] or 0
-      end
-      self:dispatch_command({ type = "START_TURN", player_index = new_active })
-      for _, key in ipairs(config.resource_types) do
-        after[key] = p.resources[key] or 0
-      end
+    if pi == self.local_player_index and self:_count_unassigned_workers(pi) > 0 then
+      self:_open_end_turn_confirm(pi)
+      sound.play("click")
+      return
     end
-    -- Spawn production popups near the resource bar
-    local new_panel = self:player_to_panel(new_active)
-    local rbx, rby, rbw, rbh = board.resource_bar_rect(new_panel)
-    local badge_offset = 0
-    for _, key in ipairs(config.resource_types) do
-      local gained = after[key] - before[key]
-      local rdef = res_registry[key]
-      if gained > 0 and rdef then
-        local letter = rdef.letter
-        local color = rdef.color or {0.3, 0.9, 0.4}
-        popup.create("+" .. gained .. letter, rbx + 8 + badge_offset + 25, rby - 4, color, { font_size = 12, lifetime = 1.0, vy = -25 })
-        sound.play("coin", 0.4)
-      end
-      -- Advance offset only for resources the player actually has (matching the badge display)
-      if p.resources[key] and p.resources[key] > 0 then
-        badge_offset = badge_offset + 54
-      end
-    end
-    -- Clear hand selection and pending state on turn change
-    self.hand_selected_index = nil
-    self:_clear_prompt("play_unit")
-    self:_clear_prompt("sacrifice")
-    self:_clear_prompt("upgrade")
-    self:_clear_prompt("monument")
-    self:_clear_prompt("graveyard_return")
-    self:_clear_prompt("discard_draw")
-    self:_clear_pending_attack_declarations()
-    self:_clear_pending_attack_trigger_targets()
-    self.pending_block_assignments = {}
-    self.pending_damage_orders = {}
-    -- Show turn banner
-    self.turn_banner_timer = 1.2
-    self.turn_banner_text = (self.game_state.activePlayer == self.local_player_index) and "Your Turn" or "Opponent's Turn"
+    self:_execute_end_turn(pi)
     return
   end
 
@@ -6475,6 +6532,9 @@ function GameState:mousereleased(x, y, button, istouch, presses)
     end
     return
   end
+  if self.end_turn_confirm_open then
+    return
+  end
   if self.game_state and self.game_state.is_terminal then
     self.drag = nil
     return
@@ -6487,6 +6547,7 @@ function GameState:mousereleased(x, y, button, istouch, presses)
     pending_attack_declarations = self.pending_attack_declarations,
     pending_block_assignments = self.pending_block_assignments,
     pending_attack_trigger_targets = self.pending_attack_trigger_targets,
+    ignore_ability_buttons = true,
   })
 
   -- Feature 2: Invalid drop zone -> snap back
@@ -6506,6 +6567,23 @@ function GameState:mousereleased(x, y, button, istouch, presses)
 
   local from = self.drag.from
   local res_left = (self.game_state.players[pi + 1].faction == "Human") and "wood" or "food"
+
+  -- Resource circles should behave like dropping on their resource node.
+  if kind == "worker_left" then
+    kind = "resource_left"
+  elseif kind == "worker_right" then
+    kind = "resource_right"
+  elseif kind == "special_worker_resource" then
+    local drop_player = self.game_state.players[pi + 1]
+    local target_sw = drop_player and drop_player.specialWorkers and drop_player.specialWorkers[drop_extra]
+    local assigned_to = target_sw and target_sw.assigned_to
+    if assigned_to == res_left then
+      kind = "resource_left"
+    elseif assigned_to == "stone" then
+      kind = "resource_right"
+    end
+  end
+
   local did_drop = false
 
   if from == "attack_unit" then
@@ -6798,6 +6876,11 @@ function GameState:mousemoved(x, y, dx, dy, istouch)
     self.hand_hover_index = nil
     return
   end
+  if self.end_turn_confirm_open then
+    self.hover = nil
+    self.hand_hover_index = nil
+    return
+  end
   -- Update hover state for UI highlights
   local kind, pi, idx = board.hit_test(x, y, self.game_state, self.hand_y_offsets, self.local_player_index, {
     pending_attack_declarations = self.pending_attack_declarations,
@@ -6825,6 +6908,13 @@ function GameState:keypressed(key, scancode, isrepeat)
     end
     if key == "escape" then
       self:_close_in_game_settings()
+      sound.play("click")
+    end
+    return
+  end
+  if self.end_turn_confirm_open then
+    if key == "escape" then
+      self:_close_end_turn_confirm()
       sound.play("click")
     end
     return

@@ -1,6 +1,6 @@
 # BOM Relay Server
 
-Websocket relay for Battles of Masadoria internet play.
+Websocket relay for Siegecraft internet play.
 
 The relay pairs a host and a joiner via room code, then forwards websocket frames in both directions. The game simulation remains authoritative on the host side.
 

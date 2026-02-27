@@ -107,6 +107,85 @@ local function pending_upkeep_by_resource(player)
   return due
 end
 
+local function has_static_effect(card_def, effect_name)
+  if not card_def or not card_def.abilities then return false end
+  for _, ab in ipairs(card_def.abilities) do
+    if ab.type == "static" and ab.effect == effect_name then
+      return true
+    end
+  end
+  return false
+end
+
+local function can_attack_multiple_times(card_def)
+  return has_static_effect(card_def, "can_attack_multiple_times")
+    or has_static_effect(card_def, "can_attack_twice")
+end
+
+local function can_stage_attack_target(game_state, attacker_pi, attacker_board_index, target_pi, target_index)
+  local atk_player = game_state.players[attacker_pi + 1]
+  local def_player = game_state.players[target_pi + 1]
+  if not atk_player or not def_player then return false end
+
+  local atk_entry = atk_player.board and atk_player.board[attacker_board_index]
+  if not atk_entry then return false end
+  local atk_ok, atk_def = pcall(cards.get_card_def, atk_entry.card_id)
+  if not atk_ok or not atk_def then return false end
+  if atk_def.kind ~= "Unit" and atk_def.kind ~= "Worker" then return false end
+
+  local atk_state = atk_entry.state or {}
+  if unit_stats.effective_attack(atk_def, atk_state, game_state, attacker_pi) <= 0 then return false end
+  if atk_state.rested then return false end
+  if atk_state.attacked_turn == game_state.turnNumber and not can_attack_multiple_times(atk_def) then
+    return false
+  end
+
+  local immediate_attack = false
+  for _, kw in ipairs(atk_def.keywords or {}) do
+    local low = string.lower(kw)
+    if low == "rush" or low == "haste" then
+      immediate_attack = true
+      break
+    end
+  end
+  if atk_state.summoned_turn == game_state.turnNumber and not immediate_attack then
+    return false
+  end
+
+  if target_index == 0 then
+    return true
+  end
+
+  local target_entry = def_player.board and def_player.board[target_index]
+  if not target_entry then return false end
+  local tgt_ok, tgt_def = pcall(cards.get_card_def, target_entry.card_id)
+  if not tgt_ok or not tgt_def then return false end
+  if tgt_def.kind ~= "Unit" and tgt_def.kind ~= "Worker" and tgt_def.kind ~= "Structure" and tgt_def.kind ~= "Artifact" then
+    return false
+  end
+  if (tgt_def.kind == "Structure" or tgt_def.kind == "Artifact") and tgt_def.health == nil then
+    return false
+  end
+
+  if tgt_def.kind == "Unit" or tgt_def.kind == "Worker" then
+    local target_state = target_entry.state or {}
+    if target_state.rested then return true end
+    return has_static_effect(atk_def, "can_attack_non_rested")
+  end
+
+  return true
+end
+
+local function is_worker_drag_source(from)
+  return from == "unassigned"
+    or from == "left"
+    or from == "right"
+    or from == "structure"
+    or from == "special"
+    or from == "special_field"
+    or from == "unit_worker_card"
+end
+
 -- Get max_workers from a card def's produce ability (0 if none)
 local function get_max_workers(card_def)
   if not card_def or not card_def.abilities then return 0 end
@@ -1344,6 +1423,53 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
       end
     end
 
+    -- Attack declaration drag overlay: show legal enemy targets for the dragged attacker.
+    if drag and drag.from == "attack_unit" and drag.player_index == local_player_index and pi == (1 - drag.player_index) then
+      local attacker_pi = drag.player_index
+      local attacker_board_index = drag.board_index
+      local pulse = 0.35 + 0.25 * math.sin(t * 4)
+
+      for gi, group in ipairs(struct_groups) do
+        local tile_x = struct_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if can_stage_attack_target(game_state, attacker_pi, attacker_board_index, pi, group.first_si) then
+          love.graphics.setColor(1.0, 0.82, 0.28, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, back_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, back_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+        end
+      end
+
+      for gi, group in ipairs(unit_groups) do
+        local tile_x = unit_start_x + (gi - 1) * (BFIELD_TILE_W + BFIELD_GAP)
+        if can_stage_attack_target(game_state, attacker_pi, attacker_board_index, pi, group.first_si) then
+          love.graphics.setColor(1.0, 0.82, 0.28, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tile_x - 2, front_ay - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+          love.graphics.setLineWidth(1)
+        else
+          love.graphics.setColor(0, 0, 0, 0.5)
+          love.graphics.rectangle("fill", tile_x, front_ay, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+        end
+      end
+
+      if can_stage_attack_target(game_state, attacker_pi, attacker_board_index, pi, 0) then
+        love.graphics.setColor(1.0, 0.82, 0.28, pulse)
+        love.graphics.setLineWidth(2)
+        love.graphics.rectangle("line", base_bx - 2, base_by - 2, BFIELD_TILE_W + 4, BFIELD_TILE_H + 4, 6, 6)
+        love.graphics.setLineWidth(1)
+      else
+        love.graphics.setColor(0, 0, 0, 0.5)
+        love.graphics.rectangle("fill", base_bx, base_by, BFIELD_TILE_W, BFIELD_TILE_H, 5, 5)
+      end
+
+      love.graphics.setFont(util.get_font(12))
+      love.graphics.setColor(1.0, 0.84, 0.35, 0.7 + 0.2 * math.sin(t * 3))
+      love.graphics.printf("Select an attack target", px, front_ay - 20, pw, "center")
+    end
+
     -- Sacrifice selection overlay: highlight eligible tiles, dim others
     local sac_indices = hand_state and hand_state.sacrifice_eligible_indices
     if sac_indices and panel == 0 then
@@ -1581,8 +1707,8 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local rl_x, rl_y, rl_w, rl_h = board.resource_left_rect(px, py, pw, ph, panel)
 
     -- Drop zone glow on resource nodes when dragging
-    if drag and drag.player_index == pi then
-      if drag.from ~= "left" or drag.from == "special" then
+    if drag and drag.player_index == pi and is_worker_drag_source(drag.from) then
+      if drag.from ~= "left" then
         draw_drop_zone_glow(rl_x, rl_y, rl_w, rl_h, t)
       end
     end
@@ -1604,7 +1730,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local rr_x, rr_y, rr_w, rr_h = board.resource_right_rect(px, py, pw, ph, panel)
 
     -- Drop zone glow on right resource when dragging
-    if drag and drag.player_index == pi then
+    if drag and drag.player_index == pi and is_worker_drag_source(drag.from) then
       if drag.from ~= "right" then
         draw_drop_zone_glow(rr_x, rr_y, rr_w, rr_h, t)
       end
@@ -1628,7 +1754,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
 
     -- Drop zone glow on unassigned pool when dragging from a resource
-    if drag and drag.player_index == pi and drag.from ~= "unassigned" then
+    if drag and drag.player_index == pi and is_worker_drag_source(drag.from) and drag.from ~= "unassigned" then
       draw_drop_zone_glow(uax, uay, uaw, uah, t)
     end
 
@@ -1809,7 +1935,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
             text = def.text,
             costs = def.costs,
             upkeep = def.upkeep,
-            tier = def.tier,
+            tier = abilities.effective_tier_for_card(local_p, def),
             abilities_list = def.abilities,
             show_ability_text = true,
           })
@@ -1886,7 +2012,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
           upkeep = def.upkeep,
           attack = def.attack,
           health = def.health or def.baseHealth,
-          tier = def.tier,
+          tier = abilities.effective_tier_for_card(local_p, def),
           abilities_list = def.abilities,
           show_ability_text = true,
         })
@@ -1918,7 +2044,7 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     -- "Select a unit" prompt during pending selection
     if eligible_set then
       local prompt_font = util.get_font(14)
-      local prompt_text = "Select a unit to play"
+      local prompt_text = "Select a card to play"
       local prompt_w = prompt_font:getWidth(prompt_text) + 24
       local prompt_h = prompt_font:getHeight() + 12
       local prompt_x = (gw - prompt_w) / 2
@@ -1940,6 +2066,7 @@ end
 -- | "resource_*" | "unassigned_pool" | "pass" | "end_turn" | "hand_card" | nil
 function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, combat_ui)
   local_player_index = local_player_index or 0
+  local ignore_ability_buttons = type(combat_ui) == "table" and combat_ui.ignore_ability_buttons == true
   -- Check hand cards first (drawn on top of everything; local player only)
   local local_p = game_state.players[local_player_index + 1]
   if #local_p.hand > 0 then
@@ -1975,7 +2102,7 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
     local base_def = cards.get_card_def(player.baseId)
     local base_tx, base_ty = board.base_rect(px, py, pw, ph, panel)
     if util.point_in_rect(mx, my, base_tx, base_ty, BFIELD_TILE_W, BFIELD_TILE_H) then
-      if base_def.abilities then
+      if not ignore_ability_buttons and base_def.abilities then
         local ab_btn_y = base_ty + 36
         for ai, ab in ipairs(base_def.abilities) do
           if ab.type == "activated" then
@@ -2017,7 +2144,7 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
         local tw, th = BFIELD_TILE_W, BFIELD_TILE_H
         if util.point_in_rect(mx, my, tx, row_ay, tw, th) then
           local si = group.first_si
-          if s_ok and sdef and sdef.abilities then
+          if (not ignore_ability_buttons) and s_ok and sdef and sdef.abilities then
             local ab_btn_y = row_ay + 34
             for ai, ab in ipairs(sdef.abilities) do
               if ab.type == "activated" then

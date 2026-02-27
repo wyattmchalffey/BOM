@@ -21,6 +21,7 @@ local game_events = require("src.game.events")
 local game_state = require("src.game.state")
 local host_mod = require("src.net.host")
 local replay = require("src.game.replay")
+local spell_cast = require("src.game.spell_cast")
 local unit_stats = require("src.game.unit_stats")
 
 local tests = {}
@@ -395,6 +396,132 @@ add_test("commands PLAY_SPELL_FROM_HAND uses shared direct spell-cast action pat
   assert_equal(p1.graveyard[1].card_id, "ORC_SPELL_MORTAL_COIL", "unexpected graveyard spell")
   assert_equal(#p2.board, 0, "expected mortal coil to destroy enemy target")
   assert_true(type(res.meta) == "table" and type(res.meta.resolve_result) == "table", "expected resolve_result metadata")
+end)
+
+add_test("combat King of Man on_attack trigger can be skipped without paying", function()
+  local g = game_state.create_initial_game_state({
+    first_player = 0,
+    players = {
+      { faction = "Human" },
+      { faction = "Orc" },
+    },
+  })
+  g.activePlayer = 0
+  g.phase = "MAIN"
+
+  local atk = g.players[1]
+  atk.board = {
+    { card_id = "HUMAN_UNIT_KING_OF_MAN", state = {} },
+    { card_id = "HUMAN_UNIT_SOLDIER", state = {} },
+    { card_id = "HUMAN_UNIT_ALCHEMIST", state = {} }, -- Scholar for scaling if activated
+  }
+  atk.resources.gold = 5
+
+  local decl = commands.execute(g, {
+    type = "DECLARE_ATTACKERS",
+    player_index = 0,
+    declarations = {
+      { attacker_board_index = 1, target = { type = "base" } },
+      { attacker_board_index = 2, target = { type = "base" } },
+    },
+  })
+  assert_true(type(decl) == "table" and decl.ok == true, "expected DECLARE_ATTACKERS to succeed")
+  assert_equal(g.pendingCombat and g.pendingCombat.stage, "AWAITING_ATTACK_TARGETS", "expected attack-trigger targeting stage")
+
+  local before_gold = atk.resources.gold
+  local resolve = commands.execute(g, {
+    type = "ASSIGN_ATTACK_TRIGGER_TARGETS",
+    player_index = 0,
+    targets = {},
+  })
+  assert_true(type(resolve) == "table" and resolve.ok == true, "expected ASSIGN_ATTACK_TRIGGER_TARGETS to succeed when skipping optional trigger")
+  assert_equal(g.pendingCombat and g.pendingCombat.stage, "DECLARED", "expected stage to return to DECLARED")
+  assert_equal(atk.resources.gold, before_gold, "expected skipping optional trigger to spend no gold")
+  assert_equal(atk.board[1].state and atk.board[1].state.temp_attack_bonus, nil, "expected no King buff when skipped")
+  assert_equal(atk.board[2].state and atk.board[2].state.temp_attack_bonus, nil, "expected no allied warrior buff when skipped")
+end)
+
+add_test("combat King of Man on_attack trigger pays cost and applies buff when activated", function()
+  local g = game_state.create_initial_game_state({
+    first_player = 0,
+    players = {
+      { faction = "Human" },
+      { faction = "Orc" },
+    },
+  })
+  g.activePlayer = 0
+  g.phase = "MAIN"
+
+  local atk = g.players[1]
+  atk.board = {
+    { card_id = "HUMAN_UNIT_KING_OF_MAN", state = {} },
+    { card_id = "HUMAN_UNIT_SOLDIER", state = {} },
+    { card_id = "HUMAN_UNIT_ALCHEMIST", state = {} }, -- Scholar count = 1
+  }
+  atk.resources.gold = 5
+
+  local decl = commands.execute(g, {
+    type = "DECLARE_ATTACKERS",
+    player_index = 0,
+    declarations = {
+      { attacker_board_index = 1, target = { type = "base" } },
+      { attacker_board_index = 2, target = { type = "base" } },
+    },
+  })
+  assert_true(type(decl) == "table" and decl.ok == true, "expected DECLARE_ATTACKERS to succeed")
+  assert_equal(g.pendingCombat and g.pendingCombat.stage, "AWAITING_ATTACK_TARGETS", "expected attack-trigger targeting stage")
+
+  local resolve = commands.execute(g, {
+    type = "ASSIGN_ATTACK_TRIGGER_TARGETS",
+    player_index = 0,
+    targets = {
+      { attacker_board_index = 1, ability_index = 1, activate = true },
+    },
+  })
+  assert_true(type(resolve) == "table" and resolve.ok == true, "expected ASSIGN_ATTACK_TRIGGER_TARGETS activation to succeed")
+  assert_equal(g.pendingCombat and g.pendingCombat.stage, "DECLARED", "expected stage to return to DECLARED")
+  assert_equal(atk.resources.gold, 3, "expected King trigger activation to spend 2 gold")
+  assert_equal(atk.board[1].state and atk.board[1].state.temp_attack_bonus, 1, "expected King to gain +1 attack from own effect")
+  assert_equal(atk.board[2].state and atk.board[2].state.temp_attack_bonus, 1, "expected attacking warrior ally to gain +1 attack")
+end)
+
+add_test("spell_cast deal_damage_aoe applies to each attacking unit", function()
+  local g = game_state.create_initial_game_state({
+    first_player = 0,
+    players = {
+      { faction = "Human" },
+      { faction = "Orc" },
+    },
+  })
+
+  local caster = g.players[1]
+  local atk_player = g.players[2]
+  atk_player.board = {
+    { card_id = "ORC_UNIT_BRITTLE_SKELETON", state = {} },
+    { card_id = "ORC_UNIT_BRITTLE_SKELETON", state = {} },
+    { card_id = "ORC_UNIT_BRITTLE_SKELETON", state = {} },
+  }
+  g.pendingCombat = {
+    attacker = 1,
+    defender = 0,
+    stage = "DECLARED",
+    attackers = {
+      { board_index = 1, target = { type = "base" }, invalidated = false },
+      { board_index = 2, target = { type = "base" }, invalidated = false },
+      { board_index = 3, target = { type = "base" }, invalidated = false },
+    },
+    blockers = {},
+    attack_triggers = {},
+  }
+
+  local spell_def = cards.get_card_def("HUMAN_SPELL_ACID_BOMB")
+  local resolve_result = spell_cast.resolve_on_cast(g, caster, 0, spell_def, nil, nil)
+  assert_true(type(resolve_result) == "table", "expected resolve result table")
+  assert_equal(#atk_player.board, 0, "expected all attacking units to be damaged and destroyed")
+  assert_true(type(resolve_result.events) == "table" and #resolve_result.events > 0, "expected spell resolve events")
+  local aoe_event = resolve_result.events[1]
+  assert_equal(aoe_event.type, "damage_aoe_applied", "expected AOE damage event")
+  assert_equal(aoe_event.affected, 3, "expected all attacking units to be affected")
 end)
 
 add_test("abilities collects declarative worker sacrifice play-cost metadata", function()
@@ -991,6 +1118,61 @@ add_test("commands BUILD_STRUCTURE exposes resolve_result metadata", function()
   assert_true(type(res.meta.resolve_result) == "table", "expected resolve_result in command meta")
 end)
 
+add_test("actions.start_turn applies Cottage bonus production per 3 workers on a resource node", function()
+  local function wood_after_start_turn(wood_workers)
+    local g = game_state.create_initial_game_state({
+      first_player = 0,
+      players = {
+        { faction = "Human" },
+        { faction = "Orc" },
+      },
+    })
+    g.activePlayer = 0
+    g.phase = "MAIN"
+
+    local p = g.players[1]
+    p.deck = {}
+    p.hand = {}
+    p.board = {
+      { card_id = "HUMAN_STRUCTURE_COTTAGE", state = {} },
+    }
+    p.workersOn = { food = 0, wood = wood_workers, stone = 0 }
+    p.resources.wood = 0
+
+    actions.start_turn(g)
+    return p.resources.wood
+  end
+
+  assert_equal(wood_after_start_turn(3), 4, "expected 3 wood workers to produce base 3 + cottage 1")
+  assert_equal(wood_after_start_turn(5), 6, "expected 5 wood workers to produce base 5 + cottage 1")
+  assert_equal(wood_after_start_turn(6), 8, "expected 6 wood workers to produce base 6 + cottage 2")
+end)
+
+add_test("actions.start_turn applies Cottage bonus to per-worker structure production", function()
+  local g = game_state.create_initial_game_state({
+    first_player = 0,
+    players = {
+      { faction = "Human" },
+      { faction = "Orc" },
+    },
+  })
+  g.activePlayer = 0
+  g.phase = "MAIN"
+
+  local p = g.players[1]
+  p.deck = {}
+  p.hand = {}
+  p.board = {
+    { card_id = "HUMAN_STRUCTURE_COTTAGE", state = {} },
+    { card_id = "HUMAN_STRUCTURE_MINT", workers = 3, state = {} },
+  }
+  p.workersOn = { food = 0, wood = 0, stone = 0 }
+  p.resources.gold = 0
+
+  actions.start_turn(g)
+  assert_equal(p.resources.gold, 4, "expected Mint base 3 + Cottage bonus 1")
+end)
+
 add_test("cards expose support warnings for partial mechanics", function()
   local def, warnings = find_card_with_support_warning()
   assert_true(type(def) == "table", "expected at least one card with support warnings")
@@ -1241,6 +1423,86 @@ add_test("host submit returns per-player checksum and increments state_seq", fun
   local visible_state = submit_res.meta.state
   assert_true(type(visible_state) == "table", "expected visible state snapshot in submit meta")
   assert_equal(submit_res.meta.checksum, checksum.game_state(visible_state), "submit checksum should hash returned visible snapshot")
+end)
+
+add_test("abilities play_unit matching supports Technology kind and dynamic Melee Age Up tier", function()
+  local player = {
+    board = {},
+    hand = {
+      "HUMAN_TECHNOLOGY_MELEE_AGE_UP",
+      "HUMAN_UNIT_CATAPULT",
+    },
+  }
+
+  local tier1 = abilities.find_matching_hand_indices(player, { kind = "Technology", tier = 1 })
+  assert_equal(#tier1, 1, "expected one tier-1 technology candidate")
+  assert_equal(tier1[1], 1, "expected Melee Age Up to match tier 1 before any are owned")
+
+  local tier2_none = abilities.find_matching_hand_indices(player, { kind = "Technology", tier = 2 })
+  assert_equal(#tier2_none, 0, "expected no tier-2 technology before owning Melee Age Up")
+
+  player.board[#player.board + 1] = { card_id = "HUMAN_TECHNOLOGY_MELEE_AGE_UP", state = {} }
+  local tier2 = abilities.find_matching_hand_indices(player, { kind = "Technology", tier = 2 })
+  assert_equal(#tier2, 1, "expected Melee Age Up to become tier 2 after one copy is owned")
+  assert_equal(tier2[1], 1, "expected hand Melee Age Up to match dynamic tier 2")
+end)
+
+add_test("commands PLAY_UNIT_FROM_HAND blacksmith research uses hand copy and dynamic tech tiers", function()
+  local g = game_state.create_initial_game_state({
+    first_player = 0,
+    players = {
+      { faction = "Human" },
+      { faction = "Orc" },
+    },
+  })
+  g.activePlayer = 0
+  g.phase = "MAIN"
+
+  local p = g.players[1]
+  p.resources = p.resources or {}
+  p.resources.metal = 10
+  p.board = {
+    { card_id = "HUMAN_STRUCTURE_BLACKSMITH", state = {} },
+  }
+  p.hand = {
+    "HUMAN_TECHNOLOGY_MELEE_AGE_UP",
+    "HUMAN_TECHNOLOGY_MELEE_AGE_UP",
+  }
+  p.deck = {
+    "HUMAN_TECHNOLOGY_MELEE_AGE_UP",
+  }
+
+  local first = commands.execute(g, {
+    type = "PLAY_UNIT_FROM_HAND",
+    player_index = 0,
+    source = { type = "board", index = 1 },
+    ability_index = 1, -- Research T1 Technology
+    hand_index = 1,
+  })
+  assert_true(type(first) == "table" and first.ok == true, "expected first Melee Age Up research to succeed")
+  assert_equal(#p.hand, 1, "expected first researched copy removed from hand")
+  assert_equal(#p.deck, 1, "expected research to consume hand, not deck")
+
+  local bad_tier = commands.execute(g, {
+    type = "PLAY_UNIT_FROM_HAND",
+    player_index = 0,
+    source = { type = "board", index = 1 },
+    ability_index = 1, -- still T1, should now fail
+    hand_index = 1,
+  })
+  assert_false(type(bad_tier) == "table" and bad_tier.ok == true, "expected T1 research to fail after owning one copy")
+  assert_equal(bad_tier.reason, "hand_card_not_eligible", "expected dynamic tier mismatch reason")
+
+  local second = commands.execute(g, {
+    type = "PLAY_UNIT_FROM_HAND",
+    player_index = 0,
+    source = { type = "board", index = 1 },
+    ability_index = 2, -- Research T2 Technology
+    hand_index = 1,
+  })
+  assert_true(type(second) == "table" and second.ok == true, "expected second Melee Age Up research via T2 to succeed")
+  assert_equal(#p.hand, 0, "expected second researched copy removed from hand")
+  assert_equal(#p.deck, 1, "expected deck copy unchanged after second research")
 end)
 
 local passed, failed = 0, 0

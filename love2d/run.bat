@@ -1,6 +1,6 @@
 @echo off
 setlocal
-REM Run Battles of Masadoria with LÖVE. Use this if "love" is not in your PATH.
+REM Run Siegecraft with LÖVE. Use this if "love" is not in your PATH.
 set "LOVE="
 if exist "C:\Program Files\LOVE\love.exe" set "LOVE=C:\Program Files\LOVE\love.exe"
 if exist "C:\Program Files (x86)\LOVE\love.exe" set "LOVE=C:\Program Files (x86)\LOVE\love.exe"

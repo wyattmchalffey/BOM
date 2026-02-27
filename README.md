@@ -1,6 +1,6 @@
-# Battles of Masadoria
+# Siegecraft
 
-Digital card game prototype built in LOVE (LÖVE 2D) with a Lua simulation core and an authoritative multiplayer stack.
+Siegecraft is a digital card game prototype built in LOVE (LÖVE 2D) with a Lua simulation core and an authoritative multiplayer stack.
 
 ## Where To Start
 

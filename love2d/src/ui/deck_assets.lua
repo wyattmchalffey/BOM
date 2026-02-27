@@ -18,8 +18,8 @@ function deck_assets.get_blueprint_back()
     blueprint_back = load_image(
       "blueprint_back.png",
       "assets/blueprint_back.png",
-      "Battles of Masadoria - Blueprints.png",
-      "assets/Battles of Masadoria - Blueprints.png"
+      "Siegecraft - Blueprints.png",
+      "assets/Siegecraft - Blueprints.png"
     ) or false
   end
   return blueprint_back ~= false and blueprint_back or nil
@@ -30,8 +30,8 @@ function deck_assets.get_unit_back()
     unit_back = load_image(
       "unit_back.png",
       "assets/unit_back.png",
-      "Battles of Masadoria - Creatures.png",
-      "assets/Battles of Masadoria - Creatures.png"
+      "Siegecraft - Creatures.png",
+      "assets/Siegecraft - Creatures.png"
     ) or false
   end
   return unit_back ~= false and unit_back or nil

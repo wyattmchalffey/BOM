@@ -1,6 +1,6 @@
 # Windows Multiplayer Setup (Non-Technical Guide)
 
-For players/testers who want to run Battles of Masadoria on Windows without programming knowledge.
+For players/testers who want to run Siegecraft on Windows without programming knowledge.
 
 ## What You Need
 
@@ -110,7 +110,7 @@ Replay files are saved under the game's LÖVE save folder in a `replays` subfold
 From PowerShell in the `love2d` folder:
 
 ```powershell
-.\build_windows.ps1 -GameName "BattlesOfMasadoria"
+.\build_windows.ps1 -GameName "Siegecraft"
 ```
 
 Then open `love2d\build\windows\` and zip/share the folder contents.
@@ -171,4 +171,4 @@ lua -e "require('ssl'); print('ssl ok')"
 - Join multiplayer: `.\run_multiplayer.ps1 -Mode websocket -Url "ws://HOST:8080" -PlayerName "Me" -MatchId "match1"`
 - Install host deps: `.\install_multiplayer_dependencies.ps1`
 - Host LAN: `.\run_websocket_host.ps1 -Host 0.0.0.0 -Port 8080 -MatchId "match1"`
-- Build package: `.\build_windows.ps1 -GameName "BattlesOfMasadoria"`
+- Build package: `.\build_windows.ps1 -GameName "Siegecraft"`

@@ -1,7 +1,7 @@
 {
   "name": "bom-relay",
   "version": "1.0.0",
-  "description": "Relay server for Battles of Masadoria internet play",
+  "description": "Relay server for Siegecraft internet play",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"

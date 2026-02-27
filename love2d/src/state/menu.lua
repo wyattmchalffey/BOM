@@ -37,8 +37,8 @@ local BUTTON_HOVER = 0.15
 
 local BUTTON_W = 360
 local BUTTON_H = 60
-local DISCORD_INVITE_URL = "https://discord.gg/amjtyj8Hjx"
-local RELAY_HOST = "relay.wyattmchalffey.com"
+local DISCORD_INVITE_URL = "https://discord.gg/eSHFbDcXqZ"
+local RELAY_HOST = "bom-hbfv.onrender.com"
 local RELAY_HTTP_BASE_URL = "https://" .. RELAY_HOST
 local RELAY_WS_BASE_URL = "wss://" .. RELAY_HOST
 local RELAY_ROOMS_URL = RELAY_HTTP_BASE_URL .. "/rooms"
@@ -1304,7 +1304,7 @@ function MenuState:draw_main()
   local title_font = util.get_title_font(48)
   love.graphics.setFont(title_font)
   love.graphics.setColor(GOLD[1], GOLD[2], GOLD[3], 1)
-  love.graphics.printf("Battles of Masadoria", 0, 100, gw, "center")
+  love.graphics.printf("Siegecraft", 0, 100, gw, "center")
 
   local subtitle_font = util.get_font(14)
   love.graphics.setFont(subtitle_font)

@@ -1,4 +1,4 @@
-# Battles of Masadoria (LOVE / LÖVE 2D)
+# Siegecraft (LOVE / LÖVE 2D)
 
 Authoritative multiplayer-ready card game prototype built in Lua + LÖVE.
 
@@ -91,7 +91,7 @@ From `love2d/`:
 - `.\install_multiplayer_dependencies.ps1`
 - `.\run_multiplayer.ps1 ...`
 - `.\run_websocket_host.ps1 ...`
-- `.\build_windows.ps1 -GameName "BattlesOfMasadoria"`
+- `.\build_windows.ps1 -GameName "Siegecraft"`
 
 From repo root:
 

@@ -133,6 +133,15 @@ function client_session:submit(command)
   end
 
   if response.type == "error" then
+    if type(response.payload) == "table" then
+      if response.payload.next_expected_seq then
+        self.next_seq = response.payload.next_expected_seq
+      end
+      if response.payload.checksum then
+        self.last_checksum = response.payload.checksum
+      end
+      self.last_state_seq = tonumber(response.payload.state_seq) or self.last_state_seq or 0
+    end
     return fail(response.reason, response.payload)
   end
 

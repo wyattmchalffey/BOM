@@ -105,6 +105,19 @@ local session = client_session.new({
     deck = deck,
 })
 
+local function ingest_state_sync(payload)
+    if type(payload) ~= "table" then
+        return
+    end
+    if type(payload.checksum) == "string" and payload.checksum ~= "" then
+        session.last_checksum = payload.checksum
+    end
+    local seq = tonumber(payload.state_seq)
+    if seq ~= nil then
+        session.last_state_seq = seq
+    end
+end
+
 -- Connect (blocking handshake)
 local connect_result
 if type(reconnect_match_id) == "string" and reconnect_match_id ~= ""
@@ -173,6 +186,16 @@ while true do
                 submit_result = session:submit_with_resync(cmd)
             end
 
+            -- If submit still failed (non-resync error), pull an authoritative
+            -- snapshot so the main thread can roll back optimistic local state.
+            local forced_snapshot = nil
+            if not submit_result.ok then
+                local snap = session:request_snapshot()
+                if snap and snap.ok and type(snap.meta) == "table" then
+                    forced_snapshot = snap.meta
+                end
+            end
+
             response_ch:push(json.encode({
                 ok = submit_result.ok,
                 reason = submit_result.reason,
@@ -181,6 +204,12 @@ while true do
                 next_expected_seq = submit_result.meta and submit_result.meta.next_expected_seq,
                 submit_seq = submit_result.meta and submit_result.meta.seq,
                 local_submit_id = local_submit_id,
+                events = submit_result.meta and submit_result.meta.events,
+                state = (submit_result.meta and submit_result.meta.state) or (forced_snapshot and forced_snapshot.state),
+                active_player = (submit_result.meta and submit_result.meta.active_player) or (forced_snapshot and forced_snapshot.active_player),
+                turn_number = (submit_result.meta and submit_result.meta.turn_number) or (forced_snapshot and forced_snapshot.turn_number),
+                checksum_fallback = forced_snapshot and forced_snapshot.checksum or nil,
+                state_seq_fallback = forced_snapshot and forced_snapshot.state_seq or nil,
             }))
         end)
         if not ok_cmd then
@@ -210,6 +239,7 @@ while true do
                 if ok_recv and frame_or_err then
                     local ok_dec, decoded = pcall(json.decode, frame_or_err)
                     if ok_dec and type(decoded) == "table" and decoded.type == "state_push" then
+                        ingest_state_sync(decoded.payload)
                         push_ch:push(frame_or_err)
                         received_push = true
                     end
@@ -227,6 +257,7 @@ while true do
         if ok_recv and frame_or_err then
             local ok_dec, decoded = pcall(json.decode, frame_or_err)
             if ok_dec and type(decoded) == "table" and decoded.type == "state_push" then
+                ingest_state_sync(decoded.payload)
                 push_ch:push(frame_or_err)
                 received_push = true
             end
@@ -281,6 +312,18 @@ local function deep_copy(value)
     out[k] = deep_copy(v)
   end
   return out
+end
+
+local function should_apply_state_update(current_seq, incoming_seq)
+  local cur = tonumber(current_seq)
+  local inc = tonumber(incoming_seq)
+  if inc == nil then
+    return true
+  end
+  if cur == nil then
+    return true
+  end
+  return inc >= cur
 end
 
 function threaded_client_adapter.start(opts)
@@ -427,30 +470,33 @@ function threaded_client_adapter:poll()
     local ok_dec, push = pcall(json.decode, push_json)
     if ok_dec and push.type == "state_push" and push.payload then
       if push.payload.state then
-        local payload_checksum = push.payload.checksum
-        local local_push_checksum = nil
-        local ok_hash, hash_or_err = pcall(checksum.game_state, push.payload.state)
-        if ok_hash then
-          local_push_checksum = hash_or_err
-        else
-          print("[threaded_client_adapter] push hash compute failed: " .. tostring(hash_or_err))
+        local incoming_seq = tonumber(push.payload.state_seq)
+        if should_apply_state_update(self._state_seq, incoming_seq) then
+          local payload_checksum = push.payload.checksum
+          local local_push_checksum = nil
+          local ok_hash, hash_or_err = pcall(checksum.game_state, push.payload.state)
+          if ok_hash then
+            local_push_checksum = hash_or_err
+          else
+            print("[threaded_client_adapter] push hash compute failed: " .. tostring(hash_or_err))
+          end
+          if type(payload_checksum) == "string" and type(local_push_checksum) == "string"
+            and payload_checksum ~= local_push_checksum
+          then
+            self._desync_reports[#self._desync_reports + 1] = {
+              kind = "push_payload_hash_mismatch",
+              authoritative_hash = payload_checksum,
+              local_hash = local_push_checksum,
+              state_seq = tonumber(push.payload.state_seq) or nil,
+            }
+            print("[threaded_client_adapter] state_push hash mismatch local="
+              .. tostring(local_push_checksum) .. " host=" .. tostring(payload_checksum))
+          end
+          self._state = push.payload.state
+          self._checksum = push.payload.checksum
+          self._state_seq = incoming_seq or self._state_seq or 0
+          self.state_changed = true
         end
-        if type(payload_checksum) == "string" and type(local_push_checksum) == "string"
-          and payload_checksum ~= local_push_checksum
-        then
-          self._desync_reports[#self._desync_reports + 1] = {
-            kind = "push_payload_hash_mismatch",
-            authoritative_hash = payload_checksum,
-            local_hash = local_push_checksum,
-            state_seq = tonumber(push.payload.state_seq) or nil,
-          }
-          print("[threaded_client_adapter] state_push hash mismatch local="
-            .. tostring(local_push_checksum) .. " host=" .. tostring(payload_checksum))
-        end
-        self._state = push.payload.state
-        self._checksum = push.payload.checksum
-        self._state_seq = tonumber(push.payload.state_seq) or self._state_seq or 0
-        self.state_changed = true
       end
     end
   end
@@ -463,20 +509,23 @@ function threaded_client_adapter:poll()
 
       local ok_dec, resp = pcall(json.decode, resp_json)
       if ok_dec then
+        local response_checksum = resp.checksum or resp.checksum_fallback
+        local response_state_seq = tonumber(resp.state_seq) or tonumber(resp.state_seq_fallback) or nil
         local submit_ack = {
           ok = resp.ok == true,
           reason = resp.reason,
-          checksum = resp.checksum,
-          state_seq = tonumber(resp.state_seq) or nil,
+          checksum = response_checksum,
+          state_seq = response_state_seq,
           submit_seq = tonumber(resp.submit_seq) or nil,
           local_submit_id = tonumber(resp.local_submit_id) or nil,
         }
         self._submit_acks[#self._submit_acks + 1] = submit_ack
 
-        if type(submit_ack.checksum) == "string" then
+        local ack_is_fresh = should_apply_state_update(self._state_seq, submit_ack.state_seq)
+        if type(submit_ack.checksum) == "string" and (ack_is_fresh or submit_ack.state_seq == nil) then
           self._checksum = submit_ack.checksum
         end
-        if submit_ack.state_seq ~= nil then
+        if submit_ack.state_seq ~= nil and ack_is_fresh then
           self._state_seq = submit_ack.state_seq
         end
 
@@ -508,10 +557,12 @@ function threaded_client_adapter:poll()
 
         -- Update state from successful submit response
         if resp.state then
-          self._state = resp.state
-          self._checksum = resp.checksum
-          self._state_seq = tonumber(resp.state_seq) or self._state_seq or 0
-          self.state_changed = true
+          if should_apply_state_update(self._state_seq, response_state_seq) then
+            self._state = resp.state
+            self._checksum = response_checksum or self._checksum
+            self._state_seq = response_state_seq or self._state_seq or 0
+            self.state_changed = true
+          end
         end
         if not resp.ok then
           print("[threaded_client_adapter] submit error: " .. tostring(resp.reason))
