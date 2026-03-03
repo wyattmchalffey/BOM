@@ -3918,45 +3918,53 @@ function GameState:draw()
 
   -- Feature 2: Draw returning workers (snap-back animation)
   for _, rw in ipairs(self.returning_workers) do
-    local r = board.WORKER_R
-    local draw_r = r * (rw.scale or 1)
-    local a = rw.alpha or 1
-    love.graphics.setColor(0, 0, 0, 0.35 * a)
-    love.graphics.circle("fill", rw.x + 2, rw.y + 3, draw_r + 2)
-    love.graphics.setColor(0.9, 0.9, 1.0, a)
-    love.graphics.circle("fill", rw.x, rw.y, draw_r)
-    love.graphics.setColor(0.5, 0.55, 1.0, a * 0.8)
-    love.graphics.setLineWidth(1.5)
-    love.graphics.circle("line", rw.x, rw.y, draw_r)
-    love.graphics.setLineWidth(1)
+    local return_player = (type(rw.player_index) == "number") and self.game_state.players[rw.player_index + 1] or nil
+    local return_is_active = return_player and (rw.player_index == self.game_state.activePlayer) or true
+    board.draw_worker_token(rw.x, rw.y, {
+      special = rw.special == true,
+      active_panel = return_is_active,
+      draggable = false,
+      hovered = false,
+      resource = rw.resource,
+      faction = return_player and return_player.faction or nil,
+      task = rw.task,
+      alpha = rw.alpha or 1,
+      scale = rw.scale or 1,
+      anim_seed = rw.anim_seed,
+    })
   end
 
   -- Dragged worker / unit follows cursor (drawn on top so it's always visible)
   if self.drag and self.drag.from ~= "attack_unit" and self.drag.from ~= "block_unit" and self.drag.from ~= "order_attacker" then
     local dx, dy = self.drag.display_x, self.drag.display_y
-    local r = board.WORKER_R
-    local drag_r = r * 1.2
-    -- Soft shadow (offset) for a lifted look
-    love.graphics.setColor(0, 0, 0, 0.45)
-    love.graphics.circle("fill", dx + 3, dy + 5, drag_r + 3)
-    if self.drag.from == "special" or self.drag.from == "special_field" then
-      -- Gold special worker
-      love.graphics.setColor(1.0, 0.85, 0.3, 1.0)
-      love.graphics.circle("fill", dx, dy, drag_r)
-      love.graphics.setColor(0.85, 0.65, 0.1, 1.0)
-      love.graphics.setLineWidth(2)
-      love.graphics.circle("line", dx, dy, drag_r)
-      love.graphics.setLineWidth(1)
-    else
-      -- Main fill (slightly brighter when dragging)
-      love.graphics.setColor(0.95, 0.95, 1.0, 1.0)
-      love.graphics.circle("fill", dx, dy, drag_r)
-      -- Outline
-      love.graphics.setColor(0.5, 0.55, 1.0, 1.0)
-      love.graphics.setLineWidth(2)
-      love.graphics.circle("line", dx, dy, drag_r)
-      love.graphics.setLineWidth(1)
+    local drag_seed = ((self.drag.player_index or 0) + 1) * 100000
+      + ((self.drag.board_index or 0) + 1) * 257
+      + ((self.drag.sw_index or 0) + 1) * 521
+      + #(self.drag.from or "") * 97
+    local drag_player = self.game_state.players[self.drag.player_index + 1]
+    local drag_resource = nil
+    local drag_task = "idle"
+    if self.drag.from == "left" then
+      drag_resource = (drag_player and drag_player.faction == "Human") and "wood" or "food"
+      drag_task = "harvest"
+    elseif self.drag.from == "right" then
+      drag_resource = "stone"
+      drag_task = "harvest"
+    elseif self.drag.from == "structure" or self.drag.from == "unit_worker_card" or self.drag.from == "special_field" then
+      drag_task = "work"
     end
+    board.draw_worker_token(dx, dy, {
+      special = (self.drag.from == "special" or self.drag.from == "special_field"),
+      active_panel = true,
+      draggable = true,
+      hovered = false,
+      resource = drag_resource,
+      faction = drag_player and drag_player.faction or nil,
+      task = drag_task,
+      scale = 1.2,
+      alpha = 1.0,
+      anim_seed = drag_seed,
+    })
   end
 
   if deck_viewer.is_open() then
@@ -6496,6 +6504,9 @@ function GameState:_get_worker_origin(pi, from)
   elseif from == "unit_worker_card" then
     local fax, fay, faw = board.front_row_rect(px, py, pw, ph, panel)
     return fax + faw / 2, fay + board.BFIELD_TILE_H / 2
+  elseif from == "special_field" then
+    local fax, fay, faw = board.front_row_rect(px, py, pw, ph, panel)
+    return fax + faw / 2, fay + board.BFIELD_TILE_H / 2
   end
   return px + pw / 2, py + ph / 2
 end
@@ -6504,6 +6515,23 @@ end
 function GameState:_spawn_snap_back()
   if not self.drag then return end
   local origin_x, origin_y = self:_get_worker_origin(self.drag.player_index, self.drag.from)
+  local drag_seed = ((self.drag.player_index or 0) + 1) * 100000
+    + ((self.drag.board_index or 0) + 1) * 257
+    + ((self.drag.sw_index or 0) + 1) * 521
+    + #(self.drag.from or "") * 97
+  local drag_player = self.game_state.players[self.drag.player_index + 1]
+  local drag_resource = nil
+  local drag_task = "idle"
+  if self.drag.from == "left" then
+    drag_resource = (drag_player and drag_player.faction == "Human") and "wood" or "food"
+    drag_task = "harvest"
+  elseif self.drag.from == "right" then
+    drag_resource = "stone"
+    drag_task = "harvest"
+  elseif self.drag.from == "structure" or self.drag.from == "unit_worker_card" or self.drag.from == "special_field" then
+    drag_task = "work"
+  end
+  local is_special = (self.drag.from == "special" or self.drag.from == "special_field")
   self.returning_workers[#self.returning_workers + 1] = {
     x = self.drag.display_x,
     y = self.drag.display_y,
@@ -6515,6 +6543,11 @@ function GameState:_spawn_snap_back()
     duration = 0.25,
     alpha = 1,
     scale = 1.2,
+    special = is_special,
+    resource = drag_resource,
+    task = drag_task,
+    player_index = self.drag.player_index,
+    anim_seed = drag_seed,
   }
 end
 

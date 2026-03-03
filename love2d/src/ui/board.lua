@@ -588,96 +588,365 @@ local function draw_turn_ownership_badges(px, py, pw, panel, is_active, accent, 
   love.graphics.printf(turn_label, turn_x, turn_y + 4, turn_w, "center")
 end
 
--- Draw worker token with 3D sphere shading, shadow, optional glow
-local function draw_worker_circle(cx, cy, is_active_panel, is_draggable, is_hovered_worker)
-  local t = love.timer.getTime()
-  local r = WORKER_R
-  if is_draggable then
-    r = WORKER_R + 0.8 * math.sin(t * 3)
-  end
-  local alpha = is_active_panel and 1.0 or 0.7
-  -- Drop shadow
-  love.graphics.setColor(0, 0, 0, 0.4 * alpha)
-  love.graphics.circle("fill", cx + 2, cy + 3, r + 1)
-  -- Hover glow
-  if is_hovered_worker and is_active_panel then
-    love.graphics.setColor(0.4, 0.5, 1.0, 0.25 + 0.1 * math.sin(t * 4))
-    love.graphics.circle("fill", cx, cy, r + 4)
-  end
-  -- Radial gradient: draw 4 concentric fills lighter -> darker
-  local layers = 4
-  for i = layers, 1, -1 do
-    local frac = i / layers
-    local lr = r * frac
-    -- Shift highlight toward top-left
-    local offx = -r * 0.15 * (1 - frac)
-    local offy = -r * 0.2 * (1 - frac)
-    local brightness
-    if is_active_panel then
-      brightness = 0.55 + 0.45 * (1 - frac)
-    else
-      brightness = 0.4 + 0.3 * (1 - frac)
+local worker_sprite_cache = {
+  initialized = false,
+  by_faction = {},
+  fallback = {},
+}
+local WORKER_SPRITE_SIZE_MULT = 7
+
+local function dedupe_paths(paths)
+  local out = {}
+  local seen = {}
+  for _, path in ipairs(paths or {}) do
+    if type(path) == "string" and path ~= "" and not seen[path] then
+      out[#out + 1] = path
+      seen[path] = true
     end
-    love.graphics.setColor(brightness * 0.9, brightness * 0.9, brightness * 1.1, alpha)
-    love.graphics.circle("fill", cx + offx, cy + offy, lr)
   end
-  -- Specular highlight (small bright spot top-left)
-  love.graphics.setColor(1, 1, 1, 0.35 * alpha)
-  love.graphics.circle("fill", cx - r * 0.25, cy - r * 0.25, r * 0.3)
-  -- Rim outline
-  if is_active_panel then
-    love.graphics.setColor(0.45, 0.5, 0.9, 0.7)
-  else
-    love.graphics.setColor(0.35, 0.38, 0.55, 0.5)
-  end
-  love.graphics.circle("line", cx, cy, r)
+  return out
 end
 
--- Draw special worker token with gold/amber ring and warm sphere shading
-local function draw_special_worker_circle(cx, cy, is_active_panel, is_draggable, is_hovered_worker)
-  local t = love.timer.getTime()
-  local r = WORKER_R
-  if is_draggable then
-    r = WORKER_R + 0.8 * math.sin(t * 3)
+local function load_worker_image(path)
+  local ok, img = pcall(love.graphics.newImage, path)
+  if ok and img then
+    img:setFilter("nearest", "nearest")
+    return img
   end
-  local alpha = is_active_panel and 1.0 or 0.7
-  -- Drop shadow
+  return nil
+end
+
+local function build_worker_anim_from_image(img, fps)
+  if not img then return nil end
+  local iw, ih = img:getWidth(), img:getHeight()
+  if iw <= 0 or ih <= 0 then return nil end
+
+  local frame_w, frame_h = iw, ih
+  local frame_count = 1
+  local vertical_strip = false
+
+  local h_ratio = iw / ih
+  local rounded_h = math.floor(h_ratio + 0.5)
+  if h_ratio >= 1.9 and math.abs(h_ratio - rounded_h) < 0.08 then
+    frame_count = math.max(1, rounded_h)
+    frame_w = math.floor(iw / frame_count)
+    frame_h = ih
+  else
+    local v_ratio = ih / iw
+    local rounded_v = math.floor(v_ratio + 0.5)
+    if v_ratio >= 1.9 and math.abs(v_ratio - rounded_v) < 0.08 then
+      frame_count = math.max(1, rounded_v)
+      frame_w = iw
+      frame_h = math.floor(ih / frame_count)
+      vertical_strip = true
+    end
+  end
+
+  local quads = nil
+  if frame_count > 1 then
+    quads = {}
+    for i = 1, frame_count do
+      local qx = vertical_strip and 0 or (i - 1) * frame_w
+      local qy = vertical_strip and (i - 1) * frame_h or 0
+      quads[i] = love.graphics.newQuad(qx, qy, frame_w, frame_h, iw, ih)
+    end
+  end
+
+  return {
+    img = img,
+    quads = quads,
+    frame_w = frame_w,
+    frame_h = frame_h,
+    frame_count = frame_count,
+    fps = fps or 8,
+  }
+end
+
+local function load_first_worker_anim(paths, fps)
+  for _, path in ipairs(dedupe_paths(paths)) do
+    local img = load_worker_image(path)
+    if img then
+      local anim = build_worker_anim_from_image(img, fps)
+      if anim then
+        anim.path = path
+        return anim
+      end
+    end
+  end
+  return nil
+end
+
+local function pawn_base_dir(color_name)
+  return "assets/Tiny Swords (Free Pack)/Units/" .. color_name .. " Units/Pawn/"
+end
+
+local function load_pawn_anim_set(color_name)
+  local base = pawn_base_dir(color_name)
+  local set = {}
+  set.idle = load_first_worker_anim({
+    base .. "Pawn_Idle.png",
+    base .. "Pawn_Run.png",
+  }, 7)
+  set.harvest_wood = load_first_worker_anim({
+    base .. "Pawn_Interact Axe.png",
+    base .. "Pawn_Idle Axe.png",
+    base .. "Pawn_Run Axe.png",
+    base .. "Pawn_Idle Wood.png",
+    base .. "Pawn_Run Wood.png",
+  }, 10)
+  set.harvest_food = load_first_worker_anim({
+    base .. "Pawn_Interact Knife.png",
+    base .. "Pawn_Idle Knife.png",
+    base .. "Pawn_Run Knife.png",
+    base .. "Pawn_Idle Meat.png",
+    base .. "Pawn_Run Meat.png",
+  }, 10)
+  set.harvest_stone = load_first_worker_anim({
+    base .. "Pawn_Interact Pickaxe.png",
+    base .. "Pawn_Idle Pickaxe.png",
+    base .. "Pawn_Run Pickaxe.png",
+  }, 10)
+  set.work_structure = load_first_worker_anim({
+    base .. "Pawn_Interact Hammer.png",
+    base .. "Pawn_Idle Hammer.png",
+    base .. "Pawn_Run Hammer.png",
+  }, 9)
+  return set
+end
+
+local function with_set_fallbacks(primary, fallback)
+  return {
+    idle = primary.idle or fallback.idle,
+    harvest_wood = primary.harvest_wood or primary.idle or fallback.harvest_wood or fallback.idle,
+    harvest_food = primary.harvest_food or primary.idle or fallback.harvest_food or fallback.idle,
+    harvest_stone = primary.harvest_stone or primary.idle or fallback.harvest_stone or fallback.idle,
+    work_structure = primary.work_structure or primary.idle or fallback.work_structure or fallback.idle,
+  }
+end
+
+local function init_worker_sprite_cache()
+  if worker_sprite_cache.initialized then return end
+  worker_sprite_cache.initialized = true
+
+  local fallback_idle = load_first_worker_anim({
+    "assets/worker_idle.png",
+    "assets/worker.png",
+    "assets/swordman.png",
+  }, 7)
+  local fallback_harvest = load_first_worker_anim({
+    "assets/worker_harvest.png",
+    "assets/worker_gather.png",
+    "assets/worker_mine.png",
+    "assets/swordman.png",
+  }, 9) or fallback_idle
+  worker_sprite_cache.fallback = {
+    idle = fallback_idle,
+    harvest_wood = fallback_harvest,
+    harvest_food = fallback_harvest,
+    harvest_stone = fallback_harvest,
+    work_structure = fallback_harvest,
+  }
+
+  local blue_set = with_set_fallbacks(load_pawn_anim_set("Blue"), worker_sprite_cache.fallback)
+  local red_set = with_set_fallbacks(load_pawn_anim_set("Red"), worker_sprite_cache.fallback)
+  red_set.harvest_food = load_first_worker_anim({
+    pawn_base_dir("Red") .. "Pawn_Idle Meat.png",
+    pawn_base_dir("Red") .. "Pawn_Run Meat.png",
+  }, 7) or red_set.harvest_food
+  worker_sprite_cache.by_faction.Human = blue_set
+  worker_sprite_cache.by_faction.Orc = red_set
+  worker_sprite_cache.by_faction.default = blue_set
+end
+
+local function normalize_worker_faction(faction)
+  if type(faction) ~= "string" then return "Human" end
+  local low = string.lower(faction)
+  if low == "orc" then return "Orc" end
+  if low == "human" then return "Human" end
+  return "Human"
+end
+
+local function select_worker_anim(opts)
+  init_worker_sprite_cache()
+  local faction_key = normalize_worker_faction(opts and opts.faction)
+  local set = worker_sprite_cache.by_faction[faction_key] or worker_sprite_cache.by_faction.default or worker_sprite_cache.fallback
+  local task = (opts and opts.task) or ((opts and opts.resource) and "harvest" or "idle")
+  local resource = opts and opts.resource or nil
+  if task == "harvest" then
+    if resource == "wood" then return set.harvest_wood or set.idle end
+    if resource == "food" then return set.harvest_food or set.idle end
+    if resource == "stone" then return set.harvest_stone or set.idle end
+    return set.harvest_wood or set.harvest_food or set.harvest_stone or set.idle
+  end
+  if task == "work" then
+    return set.work_structure or set.idle
+  end
+  return set.idle
+end
+
+local function draw_worker_orb_fallback(cx, cy, opts)
+  local base_r = opts.radius or WORKER_R
+  local r = base_r * (opts.scale or 1)
+  local alpha = (opts.alpha ~= nil) and opts.alpha or (opts.active_panel and 1.0 or 0.7)
+  local is_orc = normalize_worker_faction(opts.faction) == "Orc"
+  local orb_r, orb_g, orb_b = is_orc and 1.0 or 0.9, is_orc and 0.45 or 0.9, is_orc and 0.45 or 1.0
+
   love.graphics.setColor(0, 0, 0, 0.4 * alpha)
   love.graphics.circle("fill", cx + 2, cy + 3, r + 1)
-  -- Hover glow (gold)
-  if is_hovered_worker and is_active_panel then
-    love.graphics.setColor(0.9, 0.7, 0.2, 0.25 + 0.1 * math.sin(t * 4))
-    love.graphics.circle("fill", cx, cy, r + 4)
-  end
-  -- Radial gradient: warm gold tones
+
   local layers = 4
   for i = layers, 1, -1 do
     local frac = i / layers
     local lr = r * frac
     local offx = -r * 0.15 * (1 - frac)
     local offy = -r * 0.2 * (1 - frac)
-    local brightness
-    if is_active_panel then
-      brightness = 0.55 + 0.45 * (1 - frac)
+    local brightness = opts.active_panel and (0.55 + 0.45 * (1 - frac)) or (0.4 + 0.3 * (1 - frac))
+    if opts.special then
+      love.graphics.setColor(brightness * 1.1, brightness * 0.85, brightness * 0.3, alpha)
     else
-      brightness = 0.4 + 0.3 * (1 - frac)
+      love.graphics.setColor(brightness * orb_r, brightness * orb_g, brightness * orb_b, alpha)
     end
-    -- Gold/amber tones instead of blue/gray
-    love.graphics.setColor(brightness * 1.1, brightness * 0.85, brightness * 0.3, alpha)
     love.graphics.circle("fill", cx + offx, cy + offy, lr)
   end
-  -- Specular highlight
-  love.graphics.setColor(1, 1, 0.8, 0.4 * alpha)
-  love.graphics.circle("fill", cx - r * 0.25, cy - r * 0.25, r * 0.3)
-  -- Gold rim outline
-  if is_active_panel then
-    love.graphics.setColor(0.85, 0.65, 0.1, 0.9)
+
+  if opts.special then
+    love.graphics.setColor(1, 1, 0.8, 0.4 * alpha)
   else
-    love.graphics.setColor(0.6, 0.5, 0.2, 0.6)
+    love.graphics.setColor(1, 1, 1, 0.35 * alpha)
   end
-  love.graphics.setLineWidth(2)
-  love.graphics.circle("line", cx, cy, r)
-  love.graphics.setLineWidth(1)
+  love.graphics.circle("fill", cx - r * 0.25, cy - r * 0.25, r * 0.3)
+
+  if opts.special then
+    love.graphics.setColor(opts.active_panel and 0.85 or 0.6, opts.active_panel and 0.65 or 0.5, opts.active_panel and 0.1 or 0.2, opts.active_panel and 0.9 or 0.6)
+    love.graphics.setLineWidth(2)
+    love.graphics.circle("line", cx, cy, r)
+    love.graphics.setLineWidth(1)
+  end
+end
+
+local function worker_anim_phase(seed)
+  local n = 0
+  if type(seed) == "number" then
+    n = seed
+  elseif type(seed) == "string" then
+    for i = 1, #seed do
+      n = n * 131 + string.byte(seed, i)
+    end
+  end
+  local x = math.sin(n * 12.9898 + 78.233) * 43758.5453
+  return x - math.floor(x)
+end
+
+local worker_anim_slot_state = {}
+
+local function worker_anim_started_at_for_slot(slot_key, signature, now)
+  if type(slot_key) ~= "string" or slot_key == "" then
+    return now
+  end
+  local entry = worker_anim_slot_state[slot_key]
+  if not entry or entry.signature ~= signature then
+    worker_anim_slot_state[slot_key] = {
+      signature = signature,
+      started_at = now,
+    }
+    return now
+  end
+  return entry.started_at or now
+end
+
+local function draw_worker_sprite_token(cx, cy, opts)
+  opts = opts or {}
+  local anim = select_worker_anim(opts)
+  if not anim then
+    draw_worker_orb_fallback(cx, cy, opts)
+    return
+  end
+
+  local base_r = opts.radius or WORKER_R
+  local scale = (opts.scale or 1)
+  local draw_r = base_r * scale
+  local alpha = (opts.alpha ~= nil) and opts.alpha or (opts.active_panel and 1.0 or 0.7)
+
+  love.graphics.setColor(0, 0, 0, 0.35 * alpha)
+  love.graphics.ellipse("fill", cx + draw_r * 0.25, cy + draw_r * 0.56, draw_r * 0.9, draw_r * 0.4)
+
+  local frame_index = 1
+  local fps = anim.fps or 8
+  if anim.frame_count and anim.frame_count > 1 then
+    local anim_time
+    if type(opts.anim_started_at) == "number" then
+      anim_time = math.max(0, love.timer.getTime() - opts.anim_started_at)
+    else
+      local seed = opts.anim_seed
+      if seed == nil then
+        seed = math.floor(cx) * 131 + math.floor(cy) * 137 + (opts.special and 17 or 0)
+      end
+      local phase = worker_anim_phase(seed)
+      local cycle = anim.frame_count / fps
+      anim_time = love.timer.getTime() + phase * cycle
+    end
+    frame_index = (math.floor(anim_time * fps) % anim.frame_count) + 1
+  end
+
+  local tint_r, tint_g, tint_b = 1.0, 1.0, 1.0
+  if opts.special then
+    tint_r, tint_g, tint_b = 1.0, 0.92, 0.66
+  end
+  if not opts.active_panel then
+    tint_r, tint_g, tint_b = tint_r * 0.86, tint_g * 0.86, tint_b * 0.86
+  end
+  love.graphics.setColor(tint_r, tint_g, tint_b, alpha)
+
+  local fw, fh = anim.frame_w, anim.frame_h
+  local draw_scale_x = (draw_r * WORKER_SPRITE_SIZE_MULT) / fw
+  local draw_scale_y = (draw_r * WORKER_SPRITE_SIZE_MULT) / fh
+  local quad = anim.quads and anim.quads[frame_index] or nil
+  if quad then
+    love.graphics.draw(anim.img, quad, cx, cy, 0, draw_scale_x, draw_scale_y, fw / 2, fh / 2)
+  else
+    love.graphics.draw(anim.img, cx, cy, 0, draw_scale_x, draw_scale_y, fw / 2, fh / 2)
+  end
+
+  if opts.special then
+    love.graphics.setColor(0.88, 0.7, 0.2, 0.85 * alpha)
+    love.graphics.setLineWidth(2)
+    love.graphics.circle("line", cx, cy, draw_r)
+    love.graphics.setLineWidth(1)
+  end
+end
+
+local function draw_worker_circle(cx, cy, is_active_panel, is_draggable, is_hovered_worker, resource, faction, radius, alpha, scale, task, anim_seed, anim_started_at)
+  draw_worker_sprite_token(cx, cy, {
+    special = false,
+    active_panel = is_active_panel,
+    draggable = is_draggable,
+    hovered = is_hovered_worker,
+    resource = resource,
+    faction = faction,
+    radius = radius,
+    alpha = alpha,
+    scale = scale,
+    task = task,
+    anim_seed = anim_seed,
+    anim_started_at = anim_started_at,
+  })
+end
+
+local function draw_special_worker_circle(cx, cy, is_active_panel, is_draggable, is_hovered_worker, resource, faction, radius, alpha, scale, task, anim_seed, anim_started_at)
+  draw_worker_sprite_token(cx, cy, {
+    special = true,
+    active_panel = is_active_panel,
+    draggable = is_draggable,
+    hovered = is_hovered_worker,
+    resource = resource,
+    faction = faction,
+    radius = radius,
+    alpha = alpha,
+    scale = scale,
+    task = task,
+    anim_seed = anim_seed,
+    anim_started_at = anim_started_at,
+  })
 end
 
 -- Helper: draw a beveled button (gradient fill, top/bottom edge highlights, hover glow, press offset)
@@ -1221,25 +1490,15 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
       for slot = 1, total_slots do
         local scx = wcx_start + (slot - 1) * spacing + wr
         if slot_filled[slot] == "regular" then
-          love.graphics.setColor(0, 0, 0, 0.3)
-          love.graphics.circle("fill", scx + 1, wcy + 2, wr + 1)
-          love.graphics.setColor(0.75, 0.75, 0.9, is_active and 1.0 or 0.6)
-          love.graphics.circle("fill", scx, wcy, wr)
-          love.graphics.setColor(1, 1, 1, 0.3)
-          love.graphics.circle("fill", scx - wr * 0.2, wcy - wr * 0.2, wr * 0.3)
-          love.graphics.setColor(0.45, 0.5, 0.9, 0.7)
-          love.graphics.circle("line", scx, wcy, wr)
+          local slot_key = "p" .. tostring(pi) .. ":struct:" .. tostring(group.first_si or 0) .. ":r:" .. tostring(slot)
+          local slot_sig = tostring(player.faction) .. ":work:regular"
+          local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+          draw_worker_circle(scx, wcy, is_active, false, false, nil, player.faction, wr, nil, 1.0, "work", nil, anim_started_at)
         elseif slot_filled[slot] == "special" then
-          love.graphics.setColor(0, 0, 0, 0.3)
-          love.graphics.circle("fill", scx + 1, wcy + 2, wr + 1)
-          love.graphics.setColor(0.9, 0.75, 0.25, is_active and 1.0 or 0.6)
-          love.graphics.circle("fill", scx, wcy, wr)
-          love.graphics.setColor(1, 1, 0.8, 0.35)
-          love.graphics.circle("fill", scx - wr * 0.2, wcy - wr * 0.2, wr * 0.3)
-          love.graphics.setColor(0.85, 0.65, 0.1, 0.9)
-          love.graphics.setLineWidth(1.5)
-          love.graphics.circle("line", scx, wcy, wr)
-          love.graphics.setLineWidth(1)
+          local slot_key = "p" .. tostring(pi) .. ":struct:" .. tostring(group.first_si or 0) .. ":s:" .. tostring(slot)
+          local slot_sig = tostring(player.faction) .. ":work:special"
+          local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+          draw_special_worker_circle(scx, wcy, is_active, false, false, nil, player.faction, wr, nil, 1.0, "work", nil, anim_started_at)
         else
           love.graphics.setColor(0.25, 0.27, 0.35, is_active and 0.6 or 0.3)
           love.graphics.circle("line", scx, wcy, wr)
@@ -1720,11 +1979,17 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local total_left_draw = n_left + n_special_left
     for i = 1, n_left do
       local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", i, total_left_draw, panel)
-      draw_worker_circle(wcx, wcy, is_active, is_active)
+      local slot_key = "p" .. tostring(pi) .. ":res:" .. tostring(res_left_resource) .. ":r:" .. tostring(i)
+      local slot_sig = tostring(player.faction) .. ":" .. tostring(res_left_resource) .. ":regular"
+      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+      draw_worker_circle(wcx, wcy, is_active, is_active, false, res_left_resource, player.faction, nil, nil, nil, "harvest", nil, anim_started_at)
     end
     for i = 1, n_special_left do
       local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", n_left + i, total_left_draw, panel)
-      draw_special_worker_circle(wcx, wcy, is_active, is_active)
+      local slot_key = "p" .. tostring(pi) .. ":res:" .. tostring(res_left_resource) .. ":s:" .. tostring(i)
+      local slot_sig = tostring(player.faction) .. ":" .. tostring(res_left_resource) .. ":special"
+      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+      draw_special_worker_circle(wcx, wcy, is_active, is_active, false, res_left_resource, player.faction, nil, nil, nil, "harvest", nil, anim_started_at)
     end
 
     local rr_x, rr_y, rr_w, rr_h = board.resource_right_rect(px, py, pw, ph, panel)
@@ -1743,11 +2008,17 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local total_stone_draw = n_stone + n_special_stone
     for i = 1, n_stone do
       local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", i, total_stone_draw, panel)
-      draw_worker_circle(wcx, wcy, is_active, is_active)
+      local slot_key = "p" .. tostring(pi) .. ":res:stone:r:" .. tostring(i)
+      local slot_sig = tostring(player.faction) .. ":stone:regular"
+      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+      draw_worker_circle(wcx, wcy, is_active, is_active, false, "stone", player.faction, nil, nil, nil, "harvest", nil, anim_started_at)
     end
     for i = 1, n_special_stone do
       local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", n_stone + i, total_stone_draw, panel)
-      draw_special_worker_circle(wcx, wcy, is_active, is_active)
+      local slot_key = "p" .. tostring(pi) .. ":res:stone:s:" .. tostring(i)
+      local slot_sig = tostring(player.faction) .. ":stone:special"
+      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+      draw_special_worker_circle(wcx, wcy, is_active, is_active, false, "stone", player.faction, nil, nil, nil, "harvest", nil, anim_started_at)
     end
 
     -- Unassigned workers pool (next to base); hide one if we're dragging from this pool
@@ -1783,7 +2054,10 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     for i = 1, draw_count do
       local wcx = start_x + (i - 1) * (WORKER_R * 2 + 4)
       local wcy = uay + uah / 2
-      draw_worker_circle(wcx, wcy, is_active, is_active)
+      local slot_key = "p" .. tostring(pi) .. ":pool:r:" .. tostring(i)
+      local slot_sig = tostring(player.faction) .. ":idle:regular"
+      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+      draw_worker_circle(wcx, wcy, is_active, is_active, false, nil, player.faction, nil, nil, nil, "idle", nil, anim_started_at)
     end
     -- Draw unassigned special workers (gold) to the right of regular workers
     local sw_draw_idx = 0
@@ -1792,7 +2066,10 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
         sw_draw_idx = sw_draw_idx + 1
         local wcx = start_x + (draw_count + sw_draw_idx - 1) * (WORKER_R * 2 + 4)
         local wcy = uay + uah / 2
-        draw_special_worker_circle(wcx, wcy, is_active, is_active)
+        local slot_key = "p" .. tostring(pi) .. ":pool:s:" .. tostring(sw_draw_idx)
+        local slot_sig = tostring(player.faction) .. ":idle:special"
+        local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+        draw_special_worker_circle(wcx, wcy, is_active, is_active, false, nil, player.faction, nil, nil, nil, "idle", nil, anim_started_at)
       end
     end
     -- Worker count label (top-right corner of pool)
@@ -2352,6 +2629,42 @@ board.HAND_HOVER_RISE = HAND_HOVER_RISE
 board.BFIELD_TILE_W = BFIELD_TILE_W
 board.BFIELD_TILE_H = BFIELD_TILE_H
 board.BFIELD_GAP = BFIELD_GAP
+
+function board.draw_worker_token(cx, cy, opts)
+  opts = opts or {}
+  local is_active_panel = (opts.active_panel ~= false)
+  if opts.special then
+    draw_special_worker_circle(
+      cx, cy,
+      is_active_panel,
+      opts.draggable == true,
+      opts.hovered == true,
+      opts.resource,
+      opts.faction,
+      opts.radius,
+      opts.alpha,
+      opts.scale,
+      opts.task,
+      opts.anim_seed,
+      opts.anim_started_at
+    )
+  else
+    draw_worker_circle(
+      cx, cy,
+      is_active_panel,
+      opts.draggable == true,
+      opts.hovered == true,
+      opts.resource,
+      opts.faction,
+      opts.radius,
+      opts.alpha,
+      opts.scale,
+      opts.task,
+      opts.anim_seed,
+      opts.anim_started_at
+    )
+  end
+end
 
 
 function board.base_center_for_player(panel_player_index, local_player_index)
