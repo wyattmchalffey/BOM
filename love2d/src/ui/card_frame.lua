@@ -11,8 +11,8 @@ local res_icons = require("src.ui.res_icons")
 local card_frame = {}
 
 local CARD_W = 160
-local CARD_H = 220
-local FULL_CARD_ASPECT_H_OVER_W = 3.5 / 2.5
+local CARD_H = 224        -- 5:7 aspect ratio (MTG standard)
+local FULL_CARD_ASPECT_H_OVER_W = 7 / 5
 
 -- love.graphics.setScissor expects screen-space coordinates, while card drawing
 -- may run under a translate/scale transform (hand cards). Convert local rects.
@@ -814,72 +814,76 @@ function card_frame.draw(x, y, params)
   local show_ability_text = params.show_ability_text or false
 
   local strip_color = get_strip_color(faction)
-  local bg_dark = { 0.08, 0.09, 0.13, 1.0 }
   local bg_card = { 0.15, 0.17, 0.22, 1.0 }
-  local border = { 0.22, 0.24, 0.3, 1.0 }
-  local gold_border = { 0.96, 0.78, 0.42, 1.0 }
   local text_color = { 0.82, 0.83, 0.88, 1.0 }
   local muted = { 0.58, 0.6, 0.68, 1.0 }
   local art_bg = { 0.1, 0.11, 0.15, 1.0 }
+  local gold_border = { 0.96, 0.78, 0.42, 1.0 }
 
   local pad = 6
+  local cr = 8  -- corner radius
+  local frame_inset = 3  -- faction-colored frame thickness inside border
 
   -- ===================== CARD SHADOW =====================
   if is_base then
-    -- Warm golden shadow for bases
-    love.graphics.setColor(0.2, 0.15, 0.05, 0.45)
-    love.graphics.rectangle("fill", x + 4, y + 5, w + 2, h + 2, 8, 8)
+    love.graphics.setColor(0.2, 0.15, 0.05, 0.5)
+    love.graphics.rectangle("fill", x + 4, y + 5, w + 2, h + 2, cr + 1, cr + 1)
   else
-    love.graphics.setColor(0, 0, 0, 0.45)
-    love.graphics.rectangle("fill", x + 3, y + 4, w, h, 8, 8)
+    love.graphics.setColor(0, 0, 0, 0.5)
+    love.graphics.rectangle("fill", x + 3, y + 4, w, h, cr + 1, cr + 1)
   end
 
   -- ===================== CARD BODY =====================
+  -- Outer black border fill
+  love.graphics.setColor(0.04, 0.04, 0.06, 1.0)
+  love.graphics.rectangle("fill", x, y, w, h, cr, cr)
+
+  -- Faction-colored inner frame
+  local fi = frame_inset
+  love.graphics.setColor(strip_color[1] * 0.45, strip_color[2] * 0.45, strip_color[3] * 0.45, 1.0)
+  love.graphics.rectangle("fill", x + fi, y + fi, w - fi * 2, h - fi * 2, cr - 1, cr - 1)
+
+  -- Card body (inset within frame)
+  local body_inset = fi + 2
   love.graphics.setColor(bg_card)
-  love.graphics.rectangle("fill", x, y, w, h, 6, 6)
+  love.graphics.rectangle("fill", x + body_inset, y + body_inset, w - body_inset * 2, h - body_inset * 2, cr - 2, cr - 2)
 
   -- Parchment texture overlay
-  set_local_scissor(x, y, w, h)
-  textures.draw_tiled(textures.card, x, y, w, h, 0.06)
+  set_local_scissor(x + body_inset, y + body_inset, w - body_inset * 2, h - body_inset * 2)
+  textures.draw_tiled(textures.card, x, y, w, h, 0.05)
   love.graphics.setScissor()
 
-  -- Subtle inner glow at top
-  love.graphics.setColor(1, 1, 1, 0.04)
-  love.graphics.rectangle("fill", x + 3, y + 2, w - 6, 2)
-
-  -- ===================== BORDER =====================
+  -- ===================== OUTER BORDER LINE =====================
   love.graphics.setLineWidth(2)
   if is_base then
-    -- Double border for bases: outer gold, inner dark
-    love.graphics.setColor(gold_border[1], gold_border[2], gold_border[3], 0.5)
-    love.graphics.rectangle("line", x - 1, y - 1, w + 2, h + 2, 7, 7)
+    love.graphics.setColor(gold_border[1], gold_border[2], gold_border[3], 0.6)
+    love.graphics.rectangle("line", x - 1, y - 1, w + 2, h + 2, cr + 1, cr + 1)
     love.graphics.setColor(gold_border)
-    love.graphics.rectangle("line", x, y, w, h, 6, 6)
+    love.graphics.rectangle("line", x, y, w, h, cr, cr)
   else
-    love.graphics.setColor(border)
-    love.graphics.rectangle("line", x, y, w, h, 6, 6)
+    love.graphics.setColor(0.18, 0.19, 0.24, 1.0)
+    love.graphics.rectangle("line", x, y, w, h, cr, cr)
   end
+  -- Inner frame edge highlight
+  love.graphics.setColor(strip_color[1] * 0.7, strip_color[2] * 0.7, strip_color[3] * 0.7, 0.4)
+  love.graphics.rectangle("line", x + fi, y + fi, w - fi * 2, h - fi * 2, cr - 1, cr - 1)
   love.graphics.setLineWidth(1)
-
-  -- ===================== FACTION STRIP (left edge) =====================
-  for i = 0, 3 do
-    local a = 0.5 * (1 - i / 4)
-    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], a)
-    love.graphics.rectangle("fill", x + i + 1, y + 6, 1, h - 12)
-  end
 
   local cx, cy = x + pad, y + pad
 
-  -- ===================== HEADER =====================
+  -- ===================== HEADER (name bar) =====================
   local header_h = 22
   local header_w = w - pad * 2
 
   -- Header background (dark recessed bar)
-  love.graphics.setColor(0.06, 0.07, 0.1, 0.8)
-  love.graphics.rectangle("fill", cx, cy, header_w, header_h, 3, 3)
-  -- Faction-colored top edge on header
-  love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.6)
+  love.graphics.setColor(0.06, 0.07, 0.1, 0.85)
+  love.graphics.rectangle("fill", cx, cy, header_w, header_h, 4, 4)
+  -- Faction-colored top edge
+  love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.55)
   love.graphics.rectangle("fill", cx + 2, cy, header_w - 4, 2, 1, 1)
+  -- Bottom edge bevel
+  love.graphics.setColor(0, 0, 0, 0.2)
+  love.graphics.rectangle("fill", cx + 2, cy + header_h - 1, header_w - 4, 1)
 
   -- Title text
   love.graphics.setColor(1, 1, 1, 1)
@@ -895,13 +899,45 @@ function card_frame.draw(x, y, params)
     draw_cost_cluster(costs, cost_x, cost_y, icon_s)
   end
 
-  cy = cy + header_h + 3
+  cy = cy + header_h + 2
 
-  -- ===================== TYPE LINE + TIER BADGE =====================
+  -- ===================== ART BOX =====================
+  -- Proportional art height (MTG-inspired: ~38% of inner card height, min 62px)
+  local inner_h = h - pad * 2
+  local art_h = is_base and math.min(math.floor(inner_h * 0.35), h - 130) or math.max(62, math.floor(inner_h * 0.38))
+  local art_w = header_w
+  local art_y = cy
+
+  -- Art background
+  love.graphics.setColor(art_bg)
+  love.graphics.rectangle("fill", cx, art_y, art_w, art_h, 3, 3)
+  -- Art content (clipped)
+  set_local_scissor(cx, art_y, art_w, art_h)
+  card_art.draw_card_art(cx, art_y, art_w, art_h, kind, is_base, title or faction)
+  love.graphics.setScissor()
+  -- Inner shadow on art box
+  textures.draw_inner_shadow(cx, art_y, art_w, art_h, 4, 0.3)
+  -- Art frame border (faction-tinted)
+  love.graphics.setColor(strip_color[1] * 0.5, strip_color[2] * 0.5, strip_color[3] * 0.5, 0.8)
+  love.graphics.setLineWidth(1.5)
+  love.graphics.rectangle("line", cx, art_y, art_w, art_h, 3, 3)
+  love.graphics.setLineWidth(1)
+
+  cy = art_y + art_h + 2
+
+  -- ===================== TYPE LINE BAR (with upkeep right-aligned) =====================
+  local type_bar_h = 16
+  -- Type bar background
+  love.graphics.setColor(0.06, 0.07, 0.1, 0.75)
+  love.graphics.rectangle("fill", cx, cy, header_w, type_bar_h, 3, 3)
+  -- Subtle top highlight
+  love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.2)
+  love.graphics.rectangle("fill", cx + 1, cy, header_w - 2, 1)
+
+  -- Build display type line
   local display_type_line
   local tier_badge_label = nil
   if subtypes ~= nil then
-    -- New format: [T{tier} badge] {faction} - {subtype(s)/kind}
     local parts = {}
     if tier then
       tier_badge_label = "T" .. tostring(tier)
@@ -918,129 +954,67 @@ function card_frame.draw(x, y, params)
   end
 
   local type_font = util.get_font(9)
-  local type_x = cx + 2
-  local type_w = header_w - 4
+  local type_text_x = cx + 3
+  local type_text_w = header_w - 6
 
+  -- Tier badge (left of type text)
   if tier_badge_label then
     local badge_font = util.get_font(8)
     local badge_text_w = badge_font:getWidth(tier_badge_label)
-    local badge_w = badge_text_w + 10
+    local badge_w = badge_text_w + 8
     local badge_h = 12
-    local badge_x = cx + 1
-    local badge_y = cy
+    local badge_x = cx + 2
+    local badge_y = cy + (type_bar_h - badge_h) / 2
 
-    -- Badge shadow
-    love.graphics.setColor(0, 0, 0, 0.2)
-    love.graphics.rectangle("fill", badge_x + 1, badge_y + 1, badge_w, badge_h, 3, 3)
-    -- Badge body
     love.graphics.setColor(0.08, 0.1, 0.15, 0.95)
     love.graphics.rectangle("fill", badge_x, badge_y, badge_w, badge_h, 3, 3)
-    -- Faction-tinted fill + border
-    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.22)
+    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.25)
     love.graphics.rectangle("fill", badge_x, badge_y, badge_w, badge_h, 3, 3)
-    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.8)
+    love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.7)
     love.graphics.rectangle("line", badge_x, badge_y, badge_w, badge_h, 3, 3)
-    -- Top highlight
-    love.graphics.setColor(1, 1, 1, 0.08)
-    love.graphics.rectangle("fill", badge_x + 1, badge_y + 1, badge_w - 2, 1, 2, 2)
-    -- Badge text
     love.graphics.setFont(badge_font)
     love.graphics.setColor(0.96, 0.97, 1.0, 1.0)
-    love.graphics.printf(tier_badge_label, badge_x, badge_y + 2, badge_w, "center")
+    love.graphics.printf(tier_badge_label, badge_x, badge_y + 1, badge_w, "center")
 
-    type_x = badge_x + badge_w + 5
-    type_w = math.max(10, (cx + header_w) - type_x - 1)
+    type_text_x = badge_x + badge_w + 4
+    type_text_w = math.max(10, (cx + header_w) - type_text_x - 3)
   end
 
+  -- Upkeep icons (right-aligned on type bar, where MTG set symbol goes)
+  if upkeep and #upkeep > 0 then
+    local up_icon_s = 10
+    local up_cost_w = measure_cost_cluster(upkeep, up_icon_s)
+    local up_x = cx + header_w - up_cost_w - 4
+    local up_y = cy + (type_bar_h - up_icon_s) / 2
+    -- Subtle red tint behind upkeep icons
+    love.graphics.setColor(0.4, 0.15, 0.15, 0.3)
+    love.graphics.rectangle("fill", up_x - 3, cy + 1, up_cost_w + 6, type_bar_h - 2, 2, 2)
+    draw_cost_cluster(upkeep, up_x, up_y, up_icon_s, 0.9)
+    type_text_w = math.max(10, up_x - type_text_x - 4)
+  end
+
+  -- Type text
   love.graphics.setColor(muted)
   love.graphics.setFont(type_font)
-  set_local_scissor(type_x, cy, type_w, type_font:getHeight() + 1)
-  love.graphics.print(display_type_line, type_x, cy)
+  local type_text_y = cy + (type_bar_h - type_font:getHeight()) / 2
+  set_local_scissor(type_text_x, cy, type_text_w, type_bar_h)
+  love.graphics.print(display_type_line, type_text_x, type_text_y)
   love.graphics.setScissor()
 
-  -- Upkeep strip for units/resources that must be paid at end of turn.
-  if upkeep and #upkeep > 0 then
-    local up_h = 14
-    love.graphics.setColor(0.28, 0.12, 0.12, 0.45)
-    love.graphics.rectangle("fill", cx, cy + 12, header_w, up_h, 3, 3)
-    love.graphics.setColor(0.8, 0.35, 0.35, 0.65)
-    love.graphics.rectangle("line", cx, cy + 12, header_w, up_h, 3, 3)
-    love.graphics.setFont(util.get_font(8))
-    love.graphics.setColor(0.95, 0.75, 0.75, 0.95)
-    love.graphics.print("Upkeep", cx + 4, cy + 15)
-    local icon_s = 10
-    local cost_w = measure_cost_cluster(upkeep, icon_s)
-    local ux = cx + header_w - cost_w - 4
-    local uy = cy + 14
-    draw_cost_cluster(upkeep, ux, uy, icon_s, 0.95)
-    cy = cy + 28
-  else
-    cy = cy + 13
-  end
+  cy = cy + type_bar_h + 3
 
-  cy = cy + 2
-
-  -- ===================== ART BOX =====================
-  -- For base cards the art shrinks based on h; regular cards always use full 62px.
-  local art_h = is_base and math.min(62, h - 130) or 62
-  local art_w = header_w
-  local art_y = cy
-  -- Art background
-  love.graphics.setColor(art_bg)
-  love.graphics.rectangle("fill", cx, art_y, art_w, art_h, 4, 4)
-  -- Art content (with scissor to clip to art box)
-  set_local_scissor(cx, art_y, art_w, art_h)
-  card_art.draw_card_art(cx, art_y, art_w, art_h, kind, is_base, title or faction)
-  love.graphics.setScissor()  -- Clear scissor immediately after art
-  -- Inner shadow on art box
-  textures.draw_inner_shadow(cx, art_y, art_w, art_h, 3, 0.25)
-  -- Art border
-  love.graphics.setColor(0.15, 0.16, 0.2, 1)
-  love.graphics.rectangle("line", cx, art_y, art_w, art_h, 4, 4)
-
-  -- Overlay ATK/HP badges in the bottom corners for full-card previews.
-  if attack ~= nil or health ~= nil then
-    local stat_font = util.get_font(9)
-    local badge_w = 52
-    local badge_h = 20
-    local corner_inset = 6
-    local badge_y = y + h - badge_h - corner_inset
-    local function draw_stat_badge(label, value, bx, bw, fill_rgb, border_rgb)
-      love.graphics.setColor(0, 0, 0, 0.35)
-      love.graphics.rectangle("fill", bx + 1, badge_y + 1, bw, badge_h, 5, 5)
-      love.graphics.setColor(fill_rgb[1], fill_rgb[2], fill_rgb[3], 0.92)
-      love.graphics.rectangle("fill", bx, badge_y, bw, badge_h, 5, 5)
-      love.graphics.setColor(border_rgb[1], border_rgb[2], border_rgb[3], 0.95)
-      love.graphics.rectangle("line", bx, badge_y, bw, badge_h, 5, 5)
-      love.graphics.setFont(stat_font)
-      love.graphics.setColor(1, 1, 1, 1)
-      love.graphics.printf(label .. " " .. tostring(value), bx, badge_y + math.floor((badge_h - stat_font:getHeight()) / 2), bw, "center")
-    end
-
-    if attack ~= nil then
-      draw_stat_badge("ATK", attack, x + corner_inset, badge_w, { 0.38, 0.14, 0.10 }, { 0.95, 0.45, 0.28 })
-    end
-    if health ~= nil then
-      draw_stat_badge("HP", health, x + w - badge_w - corner_inset, badge_w, { 0.10, 0.28, 0.18 }, { 0.45, 0.95, 0.55 })
-    end
-  end
-
-  cy = art_y + art_h + 4
-
-  -- ===================== DIVIDER =====================
-  love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.25)
-  love.graphics.rectangle("fill", cx + 4, cy - 2, art_w - 8, 1)
+  -- ===================== TEXT BOX BACKGROUND =====================
+  -- Draw a slightly recessed text box area (MTG-style)
+  local text_box_bottom = y + h - pad
+  local text_box_h = math.max(1, text_box_bottom - cy)
+  love.graphics.setColor(0.12, 0.13, 0.17, 0.5)
+  love.graphics.rectangle("fill", cx, cy, header_w, text_box_h, 3, 3)
+  -- Text box inner border
+  love.graphics.setColor(strip_color[1] * 0.35, strip_color[2] * 0.35, strip_color[3] * 0.35, 0.3)
+  love.graphics.rectangle("line", cx, cy, header_w, text_box_h, 3, 3)
 
   -- ===================== ABILITIES / TEXT AREA =====================
-  -- Calculate how much vertical space we have
-  local text_area_bottom = y + h - pad - 2
-  local text_area_h = math.max(1, text_area_bottom - cy)  -- Ensure positive height
-
-  -- Note: Scissor clipping disabled for scaled cards (hand) as it uses screen coords
-  -- Content will render without clipping - text overflow is handled by printf width limit
-
-  -- Draw standardized ability lines (new system)
-  local ab_y = cy
+  local ab_y = cy + 2
   local has_activated_abilities = false
   local ability_bottom_limit = y + h - pad - 22
   
@@ -1095,7 +1069,7 @@ function card_frame.draw(x, y, params)
   -- Always clear scissor at end of text area
   love.graphics.setScissor()
 
-  -- Counter display
+  -- Counter display (bottom-left, inside text box)
   local counters = params.counters
   if type(counters) == "table" then
     local counter_colors = {
@@ -1106,7 +1080,7 @@ function card_frame.draw(x, y, params)
     }
     local default_color = { bg = {0.2, 0.2, 0.25}, border = {0.5, 0.5, 0.6}, text = {0.9, 0.9, 0.95} }
     local cfont = util.get_font(9)
-    local counter_y = y + h - pad - 2
+    local counter_y = y + h - pad - 4
     for name, count in pairs(counters) do
       local colors = counter_colors[name] or default_color
       local label = tostring(count) .. " " .. name:sub(1, 1):upper() .. name:sub(2)
@@ -1120,6 +1094,43 @@ function card_frame.draw(x, y, params)
       love.graphics.setFont(cfont)
       love.graphics.printf(label, cx, counter_y + 2, cw, "center")
       counter_y = counter_y + ch + 2
+    end
+  end
+
+  -- ===================== ATK/HP STAT BADGES (MTG P/T style) =====================
+  -- Drawn last so they overlay on top of everything
+  if attack ~= nil or health ~= nil then
+    local stat_font = util.get_title_font(11)
+    local badge_w = 40
+    local badge_h = 22
+    local badge_y = y + h - badge_h - 4
+
+    local function draw_stat_badge(value, bx, fill_rgb, border_rgb)
+      -- Shadow
+      love.graphics.setColor(0, 0, 0, 0.45)
+      love.graphics.rectangle("fill", bx + 1, badge_y + 2, badge_w, badge_h, 4, 4)
+      -- Fill
+      love.graphics.setColor(fill_rgb[1], fill_rgb[2], fill_rgb[3], 0.95)
+      love.graphics.rectangle("fill", bx, badge_y, badge_w, badge_h, 4, 4)
+      -- Top highlight
+      love.graphics.setColor(1, 1, 1, 0.12)
+      love.graphics.rectangle("fill", bx + 2, badge_y + 1, badge_w - 4, 2, 2, 2)
+      -- Border
+      love.graphics.setColor(border_rgb[1], border_rgb[2], border_rgb[3], 1.0)
+      love.graphics.setLineWidth(1.5)
+      love.graphics.rectangle("line", bx, badge_y, badge_w, badge_h, 4, 4)
+      love.graphics.setLineWidth(1)
+      -- Value text (large, centered)
+      love.graphics.setFont(stat_font)
+      love.graphics.setColor(1, 1, 1, 1)
+      love.graphics.printf(tostring(value), bx, badge_y + math.floor((badge_h - stat_font:getHeight()) / 2), badge_w, "center")
+    end
+
+    if attack ~= nil then
+      draw_stat_badge(attack, x + pad, { 0.45, 0.12, 0.08 }, { 0.95, 0.4, 0.25 })
+    end
+    if health ~= nil then
+      draw_stat_badge(health, x + w - badge_w - pad, { 0.08, 0.32, 0.15 }, { 0.35, 0.9, 0.45 })
     end
   end
 end
@@ -1185,12 +1196,14 @@ function card_frame.get_ability_rects(card_x, card_y, card_w, card_h, abilities_
   if not abilities_list then return {} end
   local rects = {}
   local pad = 6
-  local header_h = 22 + 3  -- header + gap
-  local type_h = 13 + 2    -- type line + gap
-  local art_h = 62 + 4  -- regular cards always use 62px art
-  local ab_y = card_y + pad + header_h + type_h + art_h
+  local header_h = 22 + 2  -- header + gap
+  local inner_h = card_h - pad * 2
+  local art_h = math.max(62, math.floor(inner_h * 0.38))
+  local type_bar_h = 16 + 3  -- type bar + gap
+  local text_box_top = 2  -- text box inset
+  local ab_y = card_y + pad + header_h + art_h + 2 + type_bar_h + text_box_top
   local ab_w = card_w - pad * 2
-  local line_h = 29  -- ability line height (26) + gap (3); variable-height buttons tracked below
+  local line_h = 29
 
   for ai, ab in ipairs(abilities_list) do
     if ab.type == "activated" then
@@ -1204,10 +1217,11 @@ end
 -- Legacy: rect for single activate icon (for base cards using old system)
 function card_frame.activate_icon_rect(card_x, card_y, card_w, card_h)
   local pad = 6
-  local header_h = 22 + 3
-  local type_h = 13 + 2
-  local art_h = math.min(62, card_h - 130) + 4
-  local ab_y = card_y + pad + header_h + type_h + art_h
+  local header_h = 22 + 2
+  local inner_h = card_h - pad * 2
+  local art_h = math.min(math.floor(inner_h * 0.35), card_h - 130) + 2
+  local type_bar_h = 16 + 3
+  local ab_y = card_y + pad + header_h + art_h + type_bar_h + 2
   local ab_w = card_w - pad * 2
   return card_x + pad, ab_y, ab_w, 26
 end

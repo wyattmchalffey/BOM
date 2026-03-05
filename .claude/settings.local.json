@@ -8,7 +8,13 @@
       "Bash(cd /c/Users/Wyatt/Desktop/BOM && luac -p love2d/src/ui/card_frame.lua 2>&1)",
       "Bash(cd /c/Users/Wyatt/Desktop/BOM && luac -p love2d/src/state/menu.lua 2>&1)",
       "Bash(cd /c/Users/Wyatt/Desktop/BOM && luac -p love2d/src/ui/deck_viewer.lua 2>&1 && luac -p love2d/src/state/game.lua 2>&1 && luac -p love2d/src/ui/board.lua 2>&1)",
-      "Bash(cd:*)"
+      "Bash(cd:*)",
+      "WebSearch",
+      "WebFetch(domain:printmtg.com)",
+      "WebFetch(domain:draftsim.com)",
+      "WebFetch(domain:www.qpmarketnetwork.com)",
+      "WebFetch(domain:raphaelaleixo.medium.com)",
+      "Bash(luac:*)"
     ]
   },
   "remote": {

@@ -590,9 +590,14 @@ local function draw_turn_ownership_badges(px, py, pw, panel, is_active, accent, 
 end
 
 -- Worker sprite drawing: delegated to src.ui.worker_sprite module.
-local draw_worker_circle         = worker_sprite.draw_worker_circle
-local draw_special_worker_circle = worker_sprite.draw_special_worker_circle
+local draw_token = worker_sprite.draw_token
 local worker_anim_started_at_for_slot = worker_sprite.anim_started_at_for_slot
+
+-- Helper: draw an animated worker token with slot-based anim tracking
+local function draw_slot_worker(cx, cy, slot_key, slot_sig, t, opts)
+  opts.anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
+  draw_token(cx, cy, opts)
+end
 
 -- Helper: draw a beveled button (gradient fill, top/bottom edge highlights, hover glow, press offset)
 local function draw_button(bx, by, bw, bh, label, is_hov, is_press, accent_r, accent_g, accent_b)
@@ -1135,15 +1140,15 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
       for slot = 1, total_slots do
         local scx = wcx_start + (slot - 1) * spacing + wr
         if slot_filled[slot] == "regular" then
-          local slot_key = "p" .. tostring(pi) .. ":struct:" .. tostring(group.first_si or 0) .. ":r:" .. tostring(slot)
-          local slot_sig = tostring(player.faction) .. ":work:regular"
-          local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
-          draw_worker_circle(scx, wcy, is_active, false, false, nil, player.faction, wr, nil, 1.0, "work", nil, anim_started_at)
+          local sk = "p" .. tostring(pi) .. ":struct:" .. tostring(group.first_si or 0) .. ":r:" .. tostring(slot)
+          draw_slot_worker(scx, wcy, sk, player.faction .. ":work:regular", t, {
+            active_panel = is_active, faction = player.faction, radius = wr, scale = 1.0, task = "work",
+          })
         elseif slot_filled[slot] == "special" then
-          local slot_key = "p" .. tostring(pi) .. ":struct:" .. tostring(group.first_si or 0) .. ":s:" .. tostring(slot)
-          local slot_sig = tostring(player.faction) .. ":work:special"
-          local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
-          draw_special_worker_circle(scx, wcy, is_active, false, false, nil, player.faction, wr, nil, 1.0, "work", nil, anim_started_at)
+          local sk = "p" .. tostring(pi) .. ":struct:" .. tostring(group.first_si or 0) .. ":s:" .. tostring(slot)
+          draw_slot_worker(scx, wcy, sk, player.faction .. ":work:special", t, {
+            special = true, active_panel = is_active, faction = player.faction, radius = wr, scale = 1.0, task = "work",
+          })
         else
           love.graphics.setColor(0.25, 0.27, 0.35, is_active and 0.6 or 0.3)
           love.graphics.circle("line", scx, wcy, wr)
@@ -1624,17 +1629,17 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local total_left_draw = n_left + n_special_left
     for i = 1, n_left do
       local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", i, total_left_draw, panel)
-      local slot_key = "p" .. tostring(pi) .. ":res:" .. tostring(res_left_resource) .. ":r:" .. tostring(i)
-      local slot_sig = tostring(player.faction) .. ":" .. tostring(res_left_resource) .. ":regular"
-      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
-      draw_worker_circle(wcx, wcy, is_active, is_active, false, res_left_resource, player.faction, nil, nil, nil, "harvest", nil, anim_started_at)
+      local sk = "p" .. tostring(pi) .. ":res:" .. res_left_resource .. ":r:" .. tostring(i)
+      draw_slot_worker(wcx, wcy, sk, player.faction .. ":" .. res_left_resource .. ":regular", t, {
+        active_panel = is_active, draggable = is_active, resource = res_left_resource, faction = player.faction, task = "harvest",
+      })
     end
     for i = 1, n_special_left do
       local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "left", n_left + i, total_left_draw, panel)
-      local slot_key = "p" .. tostring(pi) .. ":res:" .. tostring(res_left_resource) .. ":s:" .. tostring(i)
-      local slot_sig = tostring(player.faction) .. ":" .. tostring(res_left_resource) .. ":special"
-      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
-      draw_special_worker_circle(wcx, wcy, is_active, is_active, false, res_left_resource, player.faction, nil, nil, nil, "harvest", nil, anim_started_at)
+      local sk = "p" .. tostring(pi) .. ":res:" .. res_left_resource .. ":s:" .. tostring(i)
+      draw_slot_worker(wcx, wcy, sk, player.faction .. ":" .. res_left_resource .. ":special", t, {
+        special = true, active_panel = is_active, draggable = is_active, resource = res_left_resource, faction = player.faction, task = "harvest",
+      })
     end
 
     local rr_x, rr_y, rr_w, rr_h = board.resource_right_rect(px, py, pw, ph, panel)
@@ -1653,17 +1658,17 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local total_stone_draw = n_stone + n_special_stone
     for i = 1, n_stone do
       local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", i, total_stone_draw, panel)
-      local slot_key = "p" .. tostring(pi) .. ":res:stone:r:" .. tostring(i)
-      local slot_sig = tostring(player.faction) .. ":stone:regular"
-      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
-      draw_worker_circle(wcx, wcy, is_active, is_active, false, "stone", player.faction, nil, nil, nil, "harvest", nil, anim_started_at)
+      local sk = "p" .. tostring(pi) .. ":res:stone:r:" .. tostring(i)
+      draw_slot_worker(wcx, wcy, sk, player.faction .. ":stone:regular", t, {
+        active_panel = is_active, draggable = is_active, resource = "stone", faction = player.faction, task = "harvest",
+      })
     end
     for i = 1, n_special_stone do
       local wcx, wcy = board.worker_circle_center(px, py, pw, ph, "right", n_stone + i, total_stone_draw, panel)
-      local slot_key = "p" .. tostring(pi) .. ":res:stone:s:" .. tostring(i)
-      local slot_sig = tostring(player.faction) .. ":stone:special"
-      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
-      draw_special_worker_circle(wcx, wcy, is_active, is_active, false, "stone", player.faction, nil, nil, nil, "harvest", nil, anim_started_at)
+      local sk = "p" .. tostring(pi) .. ":res:stone:s:" .. tostring(i)
+      draw_slot_worker(wcx, wcy, sk, player.faction .. ":stone:special", t, {
+        special = true, active_panel = is_active, draggable = is_active, resource = "stone", faction = player.faction, task = "harvest",
+      })
     end
 
     -- Unassigned workers pool (next to base); hide one if we're dragging from this pool
@@ -1699,10 +1704,10 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     for i = 1, draw_count do
       local wcx = start_x + (i - 1) * (WORKER_R * 2 + 4)
       local wcy = uay + uah / 2
-      local slot_key = "p" .. tostring(pi) .. ":pool:r:" .. tostring(i)
-      local slot_sig = tostring(player.faction) .. ":idle:regular"
-      local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
-      draw_worker_circle(wcx, wcy, is_active, is_active, false, nil, player.faction, nil, nil, nil, "idle", nil, anim_started_at)
+      local sk = "p" .. tostring(pi) .. ":pool:r:" .. tostring(i)
+      draw_slot_worker(wcx, wcy, sk, player.faction .. ":idle:regular", t, {
+        active_panel = is_active, draggable = is_active, faction = player.faction, task = "idle",
+      })
     end
     -- Draw unassigned special workers (gold) to the right of regular workers
     local sw_draw_idx = 0
@@ -1711,10 +1716,10 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
         sw_draw_idx = sw_draw_idx + 1
         local wcx = start_x + (draw_count + sw_draw_idx - 1) * (WORKER_R * 2 + 4)
         local wcy = uay + uah / 2
-        local slot_key = "p" .. tostring(pi) .. ":pool:s:" .. tostring(sw_draw_idx)
-        local slot_sig = tostring(player.faction) .. ":idle:special"
-        local anim_started_at = worker_anim_started_at_for_slot(slot_key, slot_sig, t)
-        draw_special_worker_circle(wcx, wcy, is_active, is_active, false, nil, player.faction, nil, nil, nil, "idle", nil, anim_started_at)
+        local sk = "p" .. tostring(pi) .. ":pool:s:" .. tostring(sw_draw_idx)
+        draw_slot_worker(wcx, wcy, sk, player.faction .. ":idle:special", t, {
+          special = true, active_panel = is_active, draggable = is_active, faction = player.faction, task = "idle",
+        })
       end
     end
     -- Worker count label (top-right corner of pool)

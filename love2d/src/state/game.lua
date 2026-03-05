@@ -3937,24 +3937,9 @@ function GameState:draw()
   -- Dragged worker / unit follows cursor (drawn on top so it's always visible)
   if self.drag and self.drag.from ~= "attack_unit" and self.drag.from ~= "block_unit" and self.drag.from ~= "order_attacker" then
     local dx, dy = self.drag.display_x, self.drag.display_y
-    local drag_seed = ((self.drag.player_index or 0) + 1) * 100000
-      + ((self.drag.board_index or 0) + 1) * 257
-      + ((self.drag.sw_index or 0) + 1) * 521
-      + #(self.drag.from or "") * 97
-    local drag_player = self.game_state.players[self.drag.player_index + 1]
-    local drag_resource = nil
-    local drag_task = "idle"
-    if self.drag.from == "left" then
-      drag_resource = (drag_player and drag_player.faction == "Human") and "wood" or "food"
-      drag_task = "harvest"
-    elseif self.drag.from == "right" then
-      drag_resource = "stone"
-      drag_task = "harvest"
-    elseif self.drag.from == "structure" or self.drag.from == "unit_worker_card" or self.drag.from == "special_field" then
-      drag_task = "work"
-    end
+    local drag_seed, drag_resource, drag_task, is_special, drag_player = self:_drag_visual_props()
     board.draw_worker_token(dx, dy, {
-      special = (self.drag.from == "special" or self.drag.from == "special_field"),
+      special = is_special,
       active_panel = true,
       draggable = true,
       hovered = false,
@@ -6501,37 +6486,41 @@ function GameState:_get_worker_origin(pi, from)
     -- Snap back to unassigned pool center
     local uax, uay, uaw, uah = board.unassigned_pool_rect(px, py, pw, ph, player, panel)
     return uax + uaw / 2, uay + uah / 2
-  elseif from == "unit_worker_card" then
-    local fax, fay, faw = board.front_row_rect(px, py, pw, ph, panel)
-    return fax + faw / 2, fay + board.BFIELD_TILE_H / 2
-  elseif from == "special_field" then
+  elseif from == "unit_worker_card" or from == "special_field" then
     local fax, fay, faw = board.front_row_rect(px, py, pw, ph, panel)
     return fax + faw / 2, fay + board.BFIELD_TILE_H / 2
   end
   return px + pw / 2, py + ph / 2
 end
 
+-- Derive visual properties (seed, resource, task, special) from the current drag state
+function GameState:_drag_visual_props()
+  local d = self.drag
+  local seed = ((d.player_index or 0) + 1) * 100000
+    + ((d.board_index or 0) + 1) * 257
+    + ((d.sw_index or 0) + 1) * 521
+    + #(d.from or "") * 97
+  local player = self.game_state.players[d.player_index + 1]
+  local resource = nil
+  local task = "idle"
+  if d.from == "left" then
+    resource = (player and player.faction == "Human") and "wood" or "food"
+    task = "harvest"
+  elseif d.from == "right" then
+    resource = "stone"
+    task = "harvest"
+  elseif d.from == "structure" or d.from == "unit_worker_card" or d.from == "special_field" then
+    task = "work"
+  end
+  local is_special = (d.from == "special" or d.from == "special_field")
+  return seed, resource, task, is_special, player
+end
+
 -- Spawn a snap-back animation from current drag position to origin
 function GameState:_spawn_snap_back()
   if not self.drag then return end
   local origin_x, origin_y = self:_get_worker_origin(self.drag.player_index, self.drag.from)
-  local drag_seed = ((self.drag.player_index or 0) + 1) * 100000
-    + ((self.drag.board_index or 0) + 1) * 257
-    + ((self.drag.sw_index or 0) + 1) * 521
-    + #(self.drag.from or "") * 97
-  local drag_player = self.game_state.players[self.drag.player_index + 1]
-  local drag_resource = nil
-  local drag_task = "idle"
-  if self.drag.from == "left" then
-    drag_resource = (drag_player and drag_player.faction == "Human") and "wood" or "food"
-    drag_task = "harvest"
-  elseif self.drag.from == "right" then
-    drag_resource = "stone"
-    drag_task = "harvest"
-  elseif self.drag.from == "structure" or self.drag.from == "unit_worker_card" or self.drag.from == "special_field" then
-    drag_task = "work"
-  end
-  local is_special = (self.drag.from == "special" or self.drag.from == "special_field")
+  local drag_seed, drag_resource, drag_task, is_special = self:_drag_visual_props()
   self.returning_workers[#self.returning_workers + 1] = {
     x = self.drag.display_x,
     y = self.drag.display_y,

@@ -416,75 +416,10 @@ local function draw_sprite_token(cx, cy, opts)
 end
 
 ---------------------------------------------------------------------------
--- Public API  (matches existing call signatures in board.lua)
+-- Public API
 ---------------------------------------------------------------------------
-function worker_sprite.draw_worker_circle(cx, cy, is_active_panel, is_draggable, is_hovered_worker, resource, faction, radius, alpha, scale, task, anim_seed, anim_started_at)
-  draw_sprite_token(cx, cy, {
-    special        = false,
-    active_panel   = is_active_panel,
-    draggable      = is_draggable,
-    hovered        = is_hovered_worker,
-    resource       = resource,
-    faction        = faction,
-    radius         = radius,
-    alpha          = alpha,
-    scale          = scale,
-    task           = task,
-    anim_seed      = anim_seed,
-    anim_started_at = anim_started_at,
-  })
-end
-
-function worker_sprite.draw_special_worker_circle(cx, cy, is_active_panel, is_draggable, is_hovered_worker, resource, faction, radius, alpha, scale, task, anim_seed, anim_started_at)
-  draw_sprite_token(cx, cy, {
-    special        = true,
-    active_panel   = is_active_panel,
-    draggable      = is_draggable,
-    hovered        = is_hovered_worker,
-    resource       = resource,
-    faction        = faction,
-    radius         = radius,
-    alpha          = alpha,
-    scale          = scale,
-    task           = task,
-    anim_seed      = anim_seed,
-    anim_started_at = anim_started_at,
-  })
-end
-
 function worker_sprite.draw_token(cx, cy, opts)
-  opts = opts or {}
-  if opts.special then
-    worker_sprite.draw_special_worker_circle(
-      cx, cy,
-      opts.active_panel ~= false,
-      opts.draggable == true,
-      opts.hovered == true,
-      opts.resource,
-      opts.faction,
-      opts.radius,
-      opts.alpha,
-      opts.scale,
-      opts.task,
-      opts.anim_seed,
-      opts.anim_started_at
-    )
-  else
-    worker_sprite.draw_worker_circle(
-      cx, cy,
-      opts.active_panel ~= false,
-      opts.draggable == true,
-      opts.hovered == true,
-      opts.resource,
-      opts.faction,
-      opts.radius,
-      opts.alpha,
-      opts.scale,
-      opts.task,
-      opts.anim_seed,
-      opts.anim_started_at
-    )
-  end
+  draw_sprite_token(cx, cy, opts or {})
 end
 
 return worker_sprite
