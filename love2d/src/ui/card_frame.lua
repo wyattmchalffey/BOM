@@ -14,8 +14,10 @@ local CARD_W = 160
 local CARD_H = 224        -- 5:7 aspect ratio (MTG standard)
 local FULL_CARD_ASPECT_H_OVER_W = 7 / 5
 
--- love.graphics.setScissor expects screen-space coordinates, while card drawing
--- may run under a translate/scale transform (hand cards). Convert local rects.
+-- Scissor helper: converts local coordinates to screen-space via the current
+-- transform stack, then sets the scissor using the raw (screen-space) function.
+-- This avoids double-conversion when the overridden setScissor also applies
+-- the global ui_scale transform.
 local function set_local_scissor(x, y, w, h)
   local x1, y1 = x, y
   local x2, y2 = x + w, y + h
@@ -27,7 +29,13 @@ local function set_local_scissor(x, y, w, h)
   local sy = math.floor(math.min(y1, y2) + 0.5)
   local sw = math.max(0, math.floor(math.abs(x2 - x1) + 0.5))
   local sh = math.max(0, math.floor(math.abs(y2 - y1) + 0.5))
-  love.graphics.setScissor(sx, sy, sw, sh)
+  -- Use the raw setScissor since transformPoint already gives screen coords
+  local raw = love.graphics._rawSetScissor
+  if raw then
+    raw(sx, sy, sw, sh)
+  else
+    love.graphics.setScissor(sx, sy, sw, sh)
+  end
 end
 
 -- Get faction strip color (RGBA) from centralized data

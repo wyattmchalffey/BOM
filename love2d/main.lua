@@ -2,6 +2,15 @@
 local exe_dir = love.filesystem.getSourceBaseDirectory():gsub("\\", "/")
 package.cpath = package.cpath .. ";" .. exe_dir .. "/?.dll"
 
+-- Force per-monitor DPI awareness so Love2D renders at native pixel resolution
+-- instead of the DPI-scaled logical resolution.
+pcall(function()
+  local ffi = require("ffi")
+  ffi.cdef[[long SetProcessDpiAwareness(int value);]]
+  local shcore = ffi.load("shcore")
+  shcore.SetProcessDpiAwareness(2) -- PROCESS_PER_MONITOR_DPI_AWARE
+end)
+
 -- Siegecraft — Entry point
 -- Delegates load/update/draw/input to current screen state.
 --
@@ -17,6 +26,7 @@ local runtime_multiplayer = require("src.net.runtime_multiplayer")
 local websocket_provider = require("src.net.websocket_provider")
 local settings = require("src.settings")
 local sound = require("src.fx.sound")
+local util = require("src.ui.util")
 
 local current_state
 
@@ -95,6 +105,8 @@ local function update_scale()
   ui_scale = math.min(w / BASE_W, h / BASE_H)
   ui_offset_x = (w - BASE_W * ui_scale) / 2
   ui_offset_y = (h - BASE_H * ui_scale) / 2
+  -- Update font DPI so text is rasterized at the actual screen resolution
+  util.set_font_dpi(ui_scale)
 end
 
 -- Override Love2D functions so all game code uses logical coordinates
@@ -118,14 +130,28 @@ love.graphics.setScissor = function(x, y, w, h)
     _real_gfx_setScissor(sx, sy, sw, sh)
   end
 end
-
+-- Expose real (screen-space) setScissor for code that computes screen coords
+-- itself (e.g. via transformPoint under nested transforms).
+love.graphics._rawSetScissor = _real_gfx_setScissor
 function love.load()
   math.randomseed(os.time())
+
+  -- Use linear filtering by default so icons/images scale smoothly.
+  -- Pixel-art sprites override to "nearest" individually.
+  love.graphics.setDefaultFilter("linear", "linear")
 
   -- Load persisted settings and apply them
   settings.load()
   sound.set_master_volume(settings.values.sfx_volume)
-  love.window.setFullscreen(settings.values.fullscreen)
+
+  -- Recreate window so it picks up DPI awareness (actual pixel resolution)
+  local _, _, flags = love.window.getMode()
+  love.window.setMode(flags.width or 1920, flags.height or 1080, {
+    resizable = true,
+    highdpi = true,
+    msaa = 4,
+  })
+  love.window.setFullscreen(settings.values.fullscreen, "desktop")
 
   -- State transition closures
   start_game = function(opts)

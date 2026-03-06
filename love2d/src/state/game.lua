@@ -3121,7 +3121,7 @@ end
 
 function GameState:_toggle_in_game_settings_fullscreen()
   local next_value = not (settings_store.values.fullscreen == true)
-  local ok_fs, fs_err = pcall(function() love.window.setFullscreen(next_value) end)
+  local ok_fs, fs_err = pcall(function() love.window.setFullscreen(next_value, "desktop") end)
   if not ok_fs then
     self:_set_in_game_settings_status("Fullscreen toggle failed: " .. tostring(fs_err), "error")
     return false

@@ -8,7 +8,10 @@ local blueprint_back, unit_back
 local function load_image(...)
   for _, path in ipairs({...}) do
     local ok, img = pcall(love.graphics.newImage, path)
-    if ok and img then return img end
+    if ok and img then
+      img:setFilter("linear", "linear")
+      return img
+    end
   end
   return nil
 end

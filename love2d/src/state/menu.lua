@@ -1909,7 +1909,7 @@ function MenuState:mousepressed(x, y, button, istouch, presses)
     local tog_r = { x = SETTINGS_INPUT_X, y = row_y, w = SETTINGS_TOGGLE_W, h = SETTINGS_TOGGLE_H }
     if point_in_rect(x, y, tog_r) then
       self.settings_fullscreen = not self.settings_fullscreen
-      love.window.setFullscreen(self.settings_fullscreen)
+      love.window.setFullscreen(self.settings_fullscreen, "desktop")
       return
     end
 

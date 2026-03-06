@@ -13,6 +13,7 @@ local function get_image_cached(path)
   end
   local ok, img = pcall(love.graphics.newImage, path)
   if ok and img then
+    img:setFilter("linear", "linear")
     card_art._image_cache[path] = img
     return img
   end

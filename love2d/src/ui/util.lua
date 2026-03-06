@@ -1,20 +1,30 @@
 local util = {}
 
--- Font cache: avoids creating a new font object every frame
+-- Font DPI scale: set from main.lua when the window is resized so fonts are
+-- rasterized at the actual screen resolution while reporting logical metrics.
+local _font_dpi = 1
 local _font_cache = {}
+local _title_font_cache = {}
+
+function util.set_font_dpi(ui_scale)
+  local new_dpi = math.max(1, math.ceil(ui_scale * 2) / 2)  -- round up to nearest 0.5
+  if new_dpi ~= _font_dpi then
+    _font_dpi = new_dpi
+    _font_cache = {}
+    _title_font_cache = {}
+  end
+end
+
 function util.get_font(size)
   if not _font_cache[size] then
-    _font_cache[size] = love.graphics.newFont(size)
+    _font_cache[size] = love.graphics.newFont(size, "normal", _font_dpi)
   end
   return _font_cache[size]
 end
 
--- Title font cache. Uses the default font for readability.
-local _title_font_cache = {}
-
 function util.get_title_font(size)
   if not _title_font_cache[size] then
-    _title_font_cache[size] = love.graphics.newFont(size)
+    _title_font_cache[size] = love.graphics.newFont(size, "normal", _font_dpi)
   end
   return _title_font_cache[size]
 end
