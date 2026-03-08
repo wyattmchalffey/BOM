@@ -955,7 +955,11 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
   end
 
   local alpha = is_active and 1.0 or 0.6
-  local ab_btn_y = is_base and (ty + 36) or (ty + 34)
+  -- Bottom-justify ability buttons: anchor last ability just above stat badges
+  local num_activated = count_activated_abilities(sdef)
+  local has_stats = (sdef.attack ~= nil or sdef.health ~= nil) or is_base
+  local ab_bottom = has_stats and (ty + th - 20 - 6) or (ty + th - 4)
+  local ab_btn_y = ab_bottom - num_activated * STRUCT_TILE_AB_H
   local has_non_activated_hint = nil
   local _c_rnd = game_state.pendingCombat
   local _in_blocker_window_rnd = _c_rnd and _c_rnd.stage == "DECLARED"
@@ -1971,7 +1975,9 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
     local base_tx, base_ty = board.base_rect(px, py, pw, ph, panel)
     if util.point_in_rect(mx, my, base_tx, base_ty, BFIELD_TILE_W, BFIELD_TILE_H) then
       if not ignore_ability_buttons and base_def.abilities then
-        local ab_btn_y = base_ty + 36
+        local base_num_act = count_activated_abilities(base_def)
+        local base_ab_bottom = base_ty + BFIELD_TILE_H - 20 - 6
+        local ab_btn_y = base_ab_bottom - base_num_act * STRUCT_TILE_AB_H
         for ai, ab in ipairs(base_def.abilities) do
           if ab.type == "activated" then
             if util.point_in_rect(mx, my, base_tx + 4, ab_btn_y, BFIELD_TILE_W - 8, 24) then
@@ -2013,7 +2019,10 @@ function board.hit_test(mx, my, game_state, hand_y_offsets, local_player_index, 
         if util.point_in_rect(mx, my, tx, row_ay, tw, th) then
           local si = group.first_si
           if (not ignore_ability_buttons) and s_ok and sdef and sdef.abilities then
-            local ab_btn_y = row_ay + 34
+            local row_num_act = count_activated_abilities(sdef)
+            local row_has_stats = (sdef.attack ~= nil or sdef.health ~= nil)
+            local row_ab_bottom = row_has_stats and (row_ay + th - 20 - 6) or (row_ay + th - 4)
+            local ab_btn_y = row_ab_bottom - row_num_act * STRUCT_TILE_AB_H
             for ai, ab in ipairs(sdef.abilities) do
               if ab.type == "activated" then
                 if util.point_in_rect(mx, my, tx + 4, ab_btn_y, tw - 8, 24) then

@@ -4226,7 +4226,7 @@ function GameState:draw()
         local chip_font = util.get_font(8)
 
         local pad_x, pad_y = 12, 10
-        local inner_w = math.max(200, math.min(340, gw - 36) - pad_x * 2)
+        local inner_w = math.max(140, math.min(220, gw - 36) - pad_x * 2)
         local tw = inner_w + pad_x * 2
 
         local _, body_lines = body_font:getWrap(body_text, inner_w)
