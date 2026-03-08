@@ -4489,8 +4489,7 @@ function GameState:draw()
     love.graphics.printf(status_text, box_x + pad_x, box_y + pad_y, box_w - pad_x * 2, "left")
   end
 
-  -- Vignette: drawn last, on top of everything
-  textures.draw_vignette()
+
   self:_draw_in_game_settings_overlay()
   self:_draw_end_turn_confirm_overlay()
 end

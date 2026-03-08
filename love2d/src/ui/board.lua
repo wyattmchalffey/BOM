@@ -1170,18 +1170,17 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
   local gh = love.graphics.getHeight()
   local t = love.timer.getTime()
 
-  -- Background gradient (dark navy to dark gray, top to bottom)
-  local grad_steps = 32
-  for i = 0, grad_steps - 1 do
-    local frac = i / grad_steps
-    local gy = frac * gh
-    local step_h = gh / grad_steps + 1
-    local r = 0.06 + frac * 0.04
-    local g = 0.07 + frac * 0.03
-    local b = 0.12 - frac * 0.02
-    love.graphics.setColor(r, g, b, 1.0)
-    love.graphics.rectangle("fill", 0, gy, gw, step_h)
-  end
+  -- Background gradient (dark navy to dark gray, top to bottom) via mesh for smooth interpolation
+  local top_r, top_g, top_b = 0.06, 0.07, 0.12
+  local bot_r, bot_g, bot_b = 0.10, 0.10, 0.10
+  local bg_mesh = love.graphics.newMesh({
+    {0,  0,  0, 0, top_r, top_g, top_b, 1},
+    {gw, 0,  1, 0, top_r, top_g, top_b, 1},
+    {gw, gh, 1, 1, bot_r, bot_g, bot_b, 1},
+    {0,  gh, 0, 1, bot_r, bot_g, bot_b, 1},
+  }, "fan")
+  love.graphics.setColor(1, 1, 1, 1)
+  love.graphics.draw(bg_mesh)
 
   -- Noise texture overlay on background
   textures.draw_tiled(textures.noise, 0, 0, gw, gh, 0.04)

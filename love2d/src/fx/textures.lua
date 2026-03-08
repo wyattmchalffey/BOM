@@ -76,11 +76,11 @@ local _initialized = false
 
 function textures.init()
   if _initialized then return end
-  _initialized = true
   textures.noise = make_noise_image(NOISE_SIZE, NOISE_SIZE, 0.3)
   textures.panel = make_panel_texture()
   textures.card = make_card_texture()
   textures.vignette = make_vignette(VIGNETTE_W, VIGNETTE_H)
+  _initialized = true
   -- Reset graphics state to clean defaults
   love.graphics.setColor(1, 1, 1, 1)
   love.graphics.setBlendMode("alpha")
@@ -95,6 +95,7 @@ end
 -- Draw a texture tiled across a rectangular area with given alpha
 function textures.draw_tiled(img, x, y, w, h, alpha, tint_r, tint_g, tint_b)
   ensure_init()
+  if not img then return end
   tint_r = tint_r or 1
   tint_g = tint_g or 1
   tint_b = tint_b or 1

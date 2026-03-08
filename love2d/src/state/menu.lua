@@ -1504,7 +1504,6 @@ function MenuState:draw()
   love.graphics.setColor(DIM[1], DIM[2], DIM[3], 0.6)
   love.graphics.printf("v0.1.0", gw - 80, gh - 24, 70, "right")
 
-  textures.draw_vignette()
 end
 
 function MenuState:poll_joiner()
