@@ -4039,8 +4039,6 @@ function GameState:draw()
 
           -- Fade in over 0.15s after the delay
           local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
-          love.graphics.setColor(0, 0, 0, 0.6 * fade_in)
-          love.graphics.rectangle("fill", tx - 4, ty - 4, tw + 8, th + 8, 8, 8)
           love.graphics.push()
           love.graphics.setColor(1, 1, 1, fade_in)
           card_frame.draw(tx, ty, {
@@ -4100,8 +4098,6 @@ function GameState:draw()
           if ty + th > gh - 10 then ty = gh - th - 10 end
 
           local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
-          love.graphics.setColor(0, 0, 0, 0.6 * fade_in)
-          love.graphics.rectangle("fill", tx - 4, ty - 4, tw + 8, th + 8, 8, 8)
           love.graphics.push()
           love.graphics.setColor(1, 1, 1, fade_in)
           card_frame.draw(tx, ty, {
@@ -4153,8 +4149,6 @@ function GameState:draw()
           if ty + th > gh - 10 then ty = gh - th - 10 end
 
           local fade_in = math.min(1, (self.tooltip_timer - 0.3) / 0.15)
-          love.graphics.setColor(0, 0, 0, 0.6 * fade_in)
-          love.graphics.rectangle("fill", tx - 4, ty - 4, tw + 8, th + 8, 8, 8)
           love.graphics.push()
           love.graphics.setColor(1, 1, 1, fade_in)
           card_frame.draw(tx, ty, {

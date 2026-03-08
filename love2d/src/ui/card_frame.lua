@@ -829,52 +829,35 @@ function card_frame.draw(x, y, params)
   local gold_border = { 0.96, 0.78, 0.42, 1.0 }
 
   local pad = 6
-  local cr = 8  -- corner radius
-  local frame_inset = 3  -- faction-colored frame thickness inside border
+  local cr = 6  -- corner radius
 
   -- ===================== CARD SHADOW =====================
   if is_base then
-    love.graphics.setColor(0.2, 0.15, 0.05, 0.5)
-    love.graphics.rectangle("fill", x + 4, y + 5, w + 2, h + 2, cr + 1, cr + 1)
+    love.graphics.setColor(0.2, 0.15, 0.05, 0.4)
+    love.graphics.rectangle("fill", x + 2, y + 3, w, h, cr + 1, cr + 1)
   else
-    love.graphics.setColor(0, 0, 0, 0.5)
-    love.graphics.rectangle("fill", x + 3, y + 4, w, h, cr + 1, cr + 1)
+    love.graphics.setColor(0, 0, 0, 0.4)
+    love.graphics.rectangle("fill", x + 2, y + 3, w, h, cr + 1, cr + 1)
   end
 
   -- ===================== CARD BODY =====================
-  -- Outer black border fill
-  love.graphics.setColor(0.04, 0.04, 0.06, 1.0)
+  love.graphics.setColor(bg_card)
   love.graphics.rectangle("fill", x, y, w, h, cr, cr)
 
-  -- Faction-colored inner frame
-  local fi = frame_inset
-  love.graphics.setColor(strip_color[1] * 0.45, strip_color[2] * 0.45, strip_color[3] * 0.45, 1.0)
-  love.graphics.rectangle("fill", x + fi, y + fi, w - fi * 2, h - fi * 2, cr - 1, cr - 1)
-
-  -- Card body (inset within frame)
-  local body_inset = fi + 2
-  love.graphics.setColor(bg_card)
-  love.graphics.rectangle("fill", x + body_inset, y + body_inset, w - body_inset * 2, h - body_inset * 2, cr - 2, cr - 2)
-
   -- Parchment texture overlay
-  set_local_scissor(x + body_inset, y + body_inset, w - body_inset * 2, h - body_inset * 2)
-  textures.draw_tiled(textures.card, x, y, w, h, 0.05)
+  set_local_scissor(x, y, w, h)
+  textures.draw_tiled(textures.card, x, y, w, h, 0.04)
   love.graphics.setScissor()
 
-  -- ===================== OUTER BORDER LINE =====================
-  love.graphics.setLineWidth(2)
+  -- ===================== BORDER =====================
+  love.graphics.setLineWidth(1.5)
   if is_base then
-    love.graphics.setColor(gold_border[1], gold_border[2], gold_border[3], 0.6)
-    love.graphics.rectangle("line", x - 1, y - 1, w + 2, h + 2, cr + 1, cr + 1)
-    love.graphics.setColor(gold_border)
+    love.graphics.setColor(gold_border[1], gold_border[2], gold_border[3], 0.8)
     love.graphics.rectangle("line", x, y, w, h, cr, cr)
   else
-    love.graphics.setColor(0.18, 0.19, 0.24, 1.0)
+    love.graphics.setColor(strip_color[1] * 0.5, strip_color[2] * 0.5, strip_color[3] * 0.5, 0.7)
     love.graphics.rectangle("line", x, y, w, h, cr, cr)
   end
-  -- Inner frame edge highlight
-  love.graphics.setColor(strip_color[1] * 0.7, strip_color[2] * 0.7, strip_color[3] * 0.7, 0.4)
-  love.graphics.rectangle("line", x + fi, y + fi, w - fi * 2, h - fi * 2, cr - 1, cr - 1)
   love.graphics.setLineWidth(1)
 
   local cx, cy = x + pad, y + pad
@@ -883,15 +866,12 @@ function card_frame.draw(x, y, params)
   local header_h = 22
   local header_w = w - pad * 2
 
-  -- Header background (dark recessed bar)
+  -- Header background
   love.graphics.setColor(0.06, 0.07, 0.1, 0.85)
   love.graphics.rectangle("fill", cx, cy, header_w, header_h, 4, 4)
-  -- Faction-colored top edge
-  love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.55)
+  -- Faction-colored top accent
+  love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.45)
   love.graphics.rectangle("fill", cx + 2, cy, header_w - 4, 2, 1, 1)
-  -- Bottom edge bevel
-  love.graphics.setColor(0, 0, 0, 0.2)
-  love.graphics.rectangle("fill", cx + 2, cy + header_h - 1, header_w - 4, 1)
 
   -- Title text
   love.graphics.setColor(1, 1, 1, 1)
@@ -923,13 +903,9 @@ function card_frame.draw(x, y, params)
   set_local_scissor(cx, art_y, art_w, art_h)
   card_art.draw_card_art(cx, art_y, art_w, art_h, kind, is_base, title or faction)
   love.graphics.setScissor()
-  -- Inner shadow on art box
-  textures.draw_inner_shadow(cx, art_y, art_w, art_h, 4, 0.3)
-  -- Art frame border (faction-tinted)
-  love.graphics.setColor(strip_color[1] * 0.5, strip_color[2] * 0.5, strip_color[3] * 0.5, 0.8)
-  love.graphics.setLineWidth(1.5)
+  -- Subtle art border
+  love.graphics.setColor(0, 0, 0, 0.3)
   love.graphics.rectangle("line", cx, art_y, art_w, art_h, 3, 3)
-  love.graphics.setLineWidth(1)
 
   cy = art_y + art_h + 2
 
@@ -938,9 +914,6 @@ function card_frame.draw(x, y, params)
   -- Type bar background
   love.graphics.setColor(0.06, 0.07, 0.1, 0.75)
   love.graphics.rectangle("fill", cx, cy, header_w, type_bar_h, 3, 3)
-  -- Subtle top highlight
-  love.graphics.setColor(strip_color[1], strip_color[2], strip_color[3], 0.2)
-  love.graphics.rectangle("fill", cx + 1, cy, header_w - 2, 1)
 
   -- Build display type line
   local display_type_line
@@ -1015,11 +988,8 @@ function card_frame.draw(x, y, params)
   -- Draw a slightly recessed text box area (MTG-style)
   local text_box_bottom = y + h - pad
   local text_box_h = math.max(1, text_box_bottom - cy)
-  love.graphics.setColor(0.12, 0.13, 0.17, 0.5)
+  love.graphics.setColor(0.12, 0.13, 0.17, 0.4)
   love.graphics.rectangle("fill", cx, cy, header_w, text_box_h, 3, 3)
-  -- Text box inner border
-  love.graphics.setColor(strip_color[1] * 0.35, strip_color[2] * 0.35, strip_color[3] * 0.35, 0.3)
-  love.graphics.rectangle("line", cx, cy, header_w, text_box_h, 3, 3)
 
   -- ===================== ABILITIES / TEXT AREA =====================
   local ab_y = cy + 2
@@ -1114,21 +1084,13 @@ function card_frame.draw(x, y, params)
     local badge_y = y + h - badge_h - 4
 
     local function draw_stat_badge(value, bx, fill_rgb, border_rgb)
-      -- Shadow
-      love.graphics.setColor(0, 0, 0, 0.45)
-      love.graphics.rectangle("fill", bx + 1, badge_y + 2, badge_w, badge_h, 4, 4)
       -- Fill
       love.graphics.setColor(fill_rgb[1], fill_rgb[2], fill_rgb[3], 0.95)
       love.graphics.rectangle("fill", bx, badge_y, badge_w, badge_h, 4, 4)
-      -- Top highlight
-      love.graphics.setColor(1, 1, 1, 0.12)
-      love.graphics.rectangle("fill", bx + 2, badge_y + 1, badge_w - 4, 2, 2, 2)
       -- Border
-      love.graphics.setColor(border_rgb[1], border_rgb[2], border_rgb[3], 1.0)
-      love.graphics.setLineWidth(1.5)
+      love.graphics.setColor(border_rgb[1], border_rgb[2], border_rgb[3], 0.8)
       love.graphics.rectangle("line", bx, badge_y, badge_w, badge_h, 4, 4)
-      love.graphics.setLineWidth(1)
-      -- Value text (large, centered)
+      -- Value text
       love.graphics.setFont(stat_font)
       love.graphics.setColor(1, 1, 1, 1)
       love.graphics.printf(tostring(value), bx, badge_y + math.floor((badge_h - stat_font:getHeight()) / 2), badge_w, "center")

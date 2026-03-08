@@ -829,36 +829,31 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
       local offset = layer * 3
       love.graphics.setColor(0.1, 0.1, 0.14, 0.5)
       love.graphics.rectangle("fill", tx + offset, ty - offset, tw, th, 5, 5)
-      love.graphics.setColor(0.22, 0.24, 0.3, 0.4)
-      love.graphics.rectangle("line", tx + offset, ty - offset, tw, th, 5, 5)
     end
   end
 
+  -- Drop shadow
   love.graphics.setColor(0, 0, 0, 0.25)
   love.graphics.rectangle("fill", tx + 2, ty + 3, tw, th, 5, 5)
+  -- Tile background
   if is_active then
     love.graphics.setColor(0.14, 0.15, 0.2, 1.0)
   else
     love.graphics.setColor(0.11, 0.12, 0.16, 0.85)
   end
   love.graphics.rectangle("fill", tx, ty, tw, th, 5, 5)
-  love.graphics.setScissor(tx, ty, tw, th)
-  textures.draw_tiled(textures.panel, tx, ty, tw, th, 0.05)
-  love.graphics.setScissor()
-  textures.draw_inner_shadow(tx, ty, tw, th, 3, 0.15)
-  for gsi = 0, 5 do
-    local ga = (is_active and 0.6 or 0.3) * (1 - gsi / 6)
-    love.graphics.setColor(accent[1], accent[2], accent[3], ga)
-    love.graphics.rectangle("fill", tx + gsi, ty + 3, 1, th - 6)
-  end
+  -- Faction accent (left edge)
+  love.graphics.setColor(accent[1], accent[2], accent[3], is_active and 0.5 or 0.25)
+  love.graphics.rectangle("fill", tx, ty + 3, 3, th - 6, 1, 1)
 
+  -- Border
   if is_base then
-    love.graphics.setColor(0.85, 0.70, 0.25, is_active and 1.0 or 0.6)
-    love.graphics.setLineWidth(2)
+    love.graphics.setColor(0.85, 0.70, 0.25, is_active and 0.8 or 0.5)
+    love.graphics.setLineWidth(1.5)
     love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
     love.graphics.setLineWidth(1)
   else
-    love.graphics.setColor(0.22, 0.24, 0.3, is_active and 1.0 or 0.6)
+    love.graphics.setColor(0.22, 0.24, 0.3, is_active and 0.8 or 0.5)
     love.graphics.rectangle("line", tx, ty, tw, th, 5, 5)
   end
 
@@ -876,10 +871,6 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     local alpha = is_active and 1.0 or 0.6
     love.graphics.setColor(0.2, 0.35, 0.2, 0.35 * alpha)
     love.graphics.rectangle("fill", tx + 4, stat_y, badge_w, stat_h, 3, 3)
-    love.graphics.setColor(0.3, 0.55, 0.3, 0.5 * alpha)
-    love.graphics.rectangle("line", tx + 4, stat_y, badge_w, stat_h, 3, 3)
-    love.graphics.setColor(1, 1, 1, 0.05)
-    love.graphics.rectangle("fill", tx + 5, stat_y + 1, badge_w - 2, 1)
     love.graphics.setColor(1, 1, 1, alpha)
     love.graphics.setFont(util.get_font(10))
     love.graphics.printf("HP " .. tostring(life), tx + 4, stat_y + stat_h / 2 - 6, badge_w, "center")
@@ -893,10 +884,6 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     local alpha = is_active and 1.0 or 0.6
     love.graphics.setColor(0.2, 0.35, 0.2, 0.35 * alpha)
     love.graphics.rectangle("fill", tx + 4, stat_y, badge_w, stat_h, 3, 3)
-    love.graphics.setColor(0.3, 0.55, 0.3, 0.5 * alpha)
-    love.graphics.rectangle("line", tx + 4, stat_y, badge_w, stat_h, 3, 3)
-    love.graphics.setColor(1, 1, 1, 0.05)
-    love.graphics.rectangle("fill", tx + 5, stat_y + 1, badge_w - 2, 1)
     if damage_taken > 0 then
       love.graphics.setColor(1.0, 0.8, 0.8, alpha)
     else
@@ -916,10 +903,6 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     -- ATK badge (left)
     love.graphics.setColor(0.5, 0.2, 0.2, 0.35 * alpha)
     love.graphics.rectangle("fill", tx + 4, stat_y, half_w, stat_h, 3, 3)
-    love.graphics.setColor(0.7, 0.3, 0.3, 0.5 * alpha)
-    love.graphics.rectangle("line", tx + 4, stat_y, half_w, stat_h, 3, 3)
-    love.graphics.setColor(1, 1, 1, 0.05)
-    love.graphics.rectangle("fill", tx + 5, stat_y + 1, half_w - 2, 1)
     if attack_bonus > 0 then
       love.graphics.setColor(0.75, 1.0, 0.75, alpha)
     elseif attack_bonus < 0 then
@@ -933,10 +916,6 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
     local right_x = tx + tw - 4 - half_w
     love.graphics.setColor(0.2, 0.35, 0.2, 0.35 * alpha)
     love.graphics.rectangle("fill", right_x, stat_y, half_w, stat_h, 3, 3)
-    love.graphics.setColor(0.3, 0.55, 0.3, 0.5 * alpha)
-    love.graphics.rectangle("line", right_x, stat_y, half_w, stat_h, 3, 3)
-    love.graphics.setColor(1, 1, 1, 0.05)
-    love.graphics.rectangle("fill", right_x + 1, stat_y + 1, half_w - 2, 1)
     if health_bonus > 0 then
       love.graphics.setColor(0.75, 1.0, 0.75, alpha)
     elseif health_bonus < 0 then
@@ -964,14 +943,10 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
       if attack_bonus > 0 or health_bonus > 0 then
         love.graphics.setColor(0.12, 0.28, 0.12, 0.92)
         love.graphics.rectangle("fill", tag_x, tag_y, tag_w, tag_h, 3, 3)
-        love.graphics.setColor(0.55, 0.9, 0.55, 0.9)
-        love.graphics.rectangle("line", tag_x, tag_y, tag_w, tag_h, 3, 3)
         love.graphics.setColor(0.9, 1.0, 0.9, 1.0)
       else
         love.graphics.setColor(0.32, 0.12, 0.12, 0.92)
         love.graphics.rectangle("fill", tag_x, tag_y, tag_w, tag_h, 3, 3)
-        love.graphics.setColor(0.9, 0.55, 0.55, 0.9)
-        love.graphics.rectangle("line", tag_x, tag_y, tag_w, tag_h, 3, 3)
         love.graphics.setColor(1.0, 0.9, 0.9, 1.0)
       end
       love.graphics.setFont(mod_font)
@@ -1204,46 +1179,24 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
     local faction = player.faction
     local accent = get_faction_color(faction)
 
-    -- Panel outer shadow
-    love.graphics.setColor(0, 0, 0, 0.35)
-    love.graphics.rectangle("fill", px + 3, py + 4, pw, ph, 8, 8)
-
-    -- Panel bg (slightly dimmed if inactive)
+    -- Panel bg
     if is_active then
       love.graphics.setColor(0.11, 0.12, 0.15, 1.0)
     else
       love.graphics.setColor(0.09, 0.10, 0.12, 0.85)
     end
-    love.graphics.rectangle("fill", px, py, pw, ph, 8, 8)
-
-    -- Panel texture overlay
-    love.graphics.setScissor(px, py, pw, ph)
-    textures.draw_tiled(textures.panel, px, py, pw, ph, 0.06)
-    love.graphics.setScissor()
-
-    -- Inner shadow (4 edges)
-    textures.draw_inner_shadow(px, py, pw, ph, 5, 0.2)
+    love.graphics.rectangle("fill", px, py, pw, ph, 6, 6)
 
     -- Panel border
-    love.graphics.setColor(0.18, 0.20, 0.25, 1.0)
-    love.graphics.rectangle("line", px, py, pw, ph, 8, 8)
-
-    -- Active panel: colored left+right accent border
     if is_active then
-      love.graphics.setColor(accent[1], accent[2], accent[3], 0.16)
-      love.graphics.rectangle("fill", px - 4, py - 4, pw + 8, ph + 8, 10, 10)
-      love.graphics.setColor(accent[1], accent[2], accent[3], 0.7)
-      love.graphics.rectangle("fill", px, py + 4, 3, ph - 8)
-      love.graphics.rectangle("fill", px + pw - 3, py + 4, 3, ph - 8)
-      love.graphics.setColor(accent[1], accent[2], accent[3], 0.68)
-      love.graphics.setLineWidth(2.5)
-      love.graphics.rectangle("line", px - 2, py - 2, pw + 4, ph + 4, 9, 9)
+      love.graphics.setColor(accent[1], accent[2], accent[3], 0.5)
+      love.graphics.setLineWidth(1.5)
+      love.graphics.rectangle("line", px, py, pw, ph, 6, 6)
       love.graphics.setLineWidth(1)
+    else
+      love.graphics.setColor(0.18, 0.20, 0.25, 0.6)
+      love.graphics.rectangle("line", px, py, pw, ph, 6, 6)
     end
-
-    -- Accent line at top of panel
-    love.graphics.setColor(accent[1], accent[2], accent[3], 0.5)
-    love.graphics.rectangle("fill", px + 4, py + 1, pw - 8, 1)
 
     draw_turn_ownership_badges(px, py, pw, panel, is_active, accent, t)
 
@@ -1846,9 +1799,6 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
         local r = rects[i]
         local ok, def = pcall(cards.get_card_def, hand[i])
         if ok and def then
-          -- Card shadow
-          love.graphics.setColor(0, 0, 0, 0.4)
-          love.graphics.rectangle("fill", r.x + 2, r.y + 3, r.w, r.h, 5, 5)
           -- Draw scaled card using transform
           love.graphics.push()
           love.graphics.translate(r.x, r.y)
@@ -1917,14 +1867,6 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
         -- Larger shadow for lifted card
         love.graphics.setColor(0, 0, 0, 0.55)
         love.graphics.rectangle("fill", hx + 4, hy + 6, hover_w, hover_h, 5, 5)
-        -- Subtle glow behind
-        if eligible_set and is_eligible_hover then
-          local pulse = 0.25 + 0.15 * math.sin(t * 4)
-          love.graphics.setColor(0.3, 0.9, 0.4, pulse)
-        else
-          love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.2)
-        end
-        love.graphics.rectangle("fill", hx - 4, hy - 4, hover_w + 8, hover_h + 8, 8, 8)
         -- Draw card (no scale transform needed since HAND_HOVER_SCALE = 1.0)
         card_frame.draw(hx, hy, {
           w = hover_w,
