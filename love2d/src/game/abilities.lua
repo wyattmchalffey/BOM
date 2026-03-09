@@ -1456,6 +1456,126 @@ function abilities.has_subtype(card_def, subtype)
   return has_subtype(card_def, subtype)
 end
 
+-- Find all activated ability sources (board + base) that can play a specific hand card.
+-- Returns array of { source = {type, index}, ability_index, ab, cost, fast }
+function abilities.find_play_sources_for_hand_card(game_state, player_index, hand_index)
+  local player = game_state.players[player_index + 1]
+  if not player then return {} end
+  local card_id = player.hand[hand_index]
+  if not card_id then return {} end
+  local ok, card_def = pcall(cards.get_card_def, card_id)
+  if not ok or not card_def then return {} end
+
+  local sources = {}
+
+  local function check_abilities(def, source_ref, source_type)
+    if not def or not def.abilities then return end
+    for ai, ab in ipairs(def.abilities) do
+      if ab.type == "activated" then
+        local dominated_effect = ab.effect
+        local dominated_kind = nil
+        local is_match = false
+        if dominated_effect == "play_unit" then
+          dominated_kind = "Unit"
+          is_match = card_matches_filter(player, card_def, ab.effect_args or {}, dominated_kind)
+        elseif dominated_effect == "play_spell" or dominated_effect == "sacrifice_cast_spell" then
+          dominated_kind = "Spell"
+          is_match = card_matches_filter(player, card_def, ab.effect_args or {}, dominated_kind)
+        elseif dominated_effect == "sacrifice_upgrade" then
+          -- Hand card must have the required subtype and a valid sacrifice target must exist
+          local args = ab.effect_args or {}
+          local required_subtypes = args.subtypes or { "Warrior" }
+          local has_sub = false
+          if card_def.subtypes then
+            for _, req in ipairs(required_subtypes) do
+              for _, got in ipairs(card_def.subtypes) do
+                if req == got then has_sub = true; break end
+              end
+              if has_sub then break end
+            end
+          end
+          if has_sub and card_def.kind == "Unit" then
+            local card_tier = card_def.tier or 0
+            if card_tier >= 1 then
+              -- Check if there's a sacrifice target at tier - 1 on the board
+              local has_target = false
+              for si2, entry2 in ipairs(player.board) do
+                local e_ok, e_def = pcall(cards.get_card_def, entry2.card_id)
+                if e_ok and e_def and e_def.kind ~= "Structure" and e_def.kind ~= "Artifact" then
+                  local e_has_sub = false
+                  if e_def.subtypes then
+                    for _, req in ipairs(required_subtypes) do
+                      for _, got in ipairs(e_def.subtypes) do
+                        if req == got then e_has_sub = true; break end
+                      end
+                      if e_has_sub then break end
+                    end
+                  end
+                  if e_has_sub and (e_def.tier or 0) == card_tier - 1 then
+                    has_target = true; break
+                  end
+                end
+              end
+              -- Workers count as tier 0
+              if not has_target and card_tier == 1 then
+                local sel_info = abilities.collect_activated_selection_cost_targets(game_state, player_index, ab)
+                if sel_info and sel_info.has_worker_tokens then
+                  has_target = true
+                end
+              end
+              is_match = has_target
+            end
+          end
+        end
+        if is_match then
+          -- Check can pay cost
+          local source_entry = (source_type == "board") and player.board[source_ref.index] or nil
+          local can_pay = abilities.can_pay_activated_ability_costs(player.resources, ab, {
+            source_entry = source_entry,
+            require_variable_min = true,
+          })
+          -- Check once_per_turn
+          local source_key
+          if source_type == "base" then
+            source_key = "base:" .. ai
+          else
+            source_key = "board:" .. source_ref.index .. ":" .. ai
+          end
+          local used = abilities.is_activated_ability_used_this_turn(
+            game_state, player_index, source_key, source_ref, ai
+          )
+          if can_pay and (not used or not ab.once_per_turn) then
+            sources[#sources + 1] = {
+              source = source_ref,
+              ability_index = ai,
+              ab = ab,
+              cost = ab.cost,
+              fast = ab.fast or false,
+              effect = dominated_effect,
+            }
+          end
+        end
+      end
+    end
+  end
+
+  -- Check base
+  local base_ok, base_def = pcall(cards.get_card_def, player.baseId)
+  if base_ok and base_def then
+    check_abilities(base_def, { type = "base" }, "base")
+  end
+
+  -- Check board
+  for si, entry in ipairs(player.board) do
+    local b_ok, b_def = pcall(cards.get_card_def, entry.card_id)
+    if b_ok and b_def then
+      check_abilities(b_def, { type = "board", index = si }, "board")
+    end
+  end
+
+  return sources
+end
+
 function abilities.is_unit_like(card_def)
   return is_unit_like(card_def)
 end

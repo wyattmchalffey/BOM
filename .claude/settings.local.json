@@ -14,7 +14,11 @@
       "WebFetch(domain:draftsim.com)",
       "WebFetch(domain:www.qpmarketnetwork.com)",
       "WebFetch(domain:raphaelaleixo.medium.com)",
-      "Bash(luac:*)"
+      "Bash(luac:*)",
+      "Bash(wc:*)",
+      "Bash(lua5.1:*)",
+      "Bash(ls:*)",
+      "Bash(lua:*)"
     ]
   },
   "remote": {

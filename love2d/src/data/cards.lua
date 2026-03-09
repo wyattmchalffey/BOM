@@ -1411,7 +1411,7 @@ return {
     text = "Whenever an ally Unit dies, you may rest this unit to gain 2 Bones.",
     costs = {},
     upkeep = { { type = "food", amount = 1 } },
-    subtypes = { "Warrior" },
+    subtypes = { "Mage" },
     abilities = {
       {
         type = "triggered",

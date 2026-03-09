@@ -55,6 +55,10 @@ local RESOURCE_BADGE_H = 24
 local RESOURCE_BADGE_GAP_X = 6
 local RESOURCE_BADGE_GAP_Y = 6
 
+-- Module-level draw state (set during board.draw, read by helpers)
+local _play_source_prompt = nil
+local _local_player_index = 0
+
 -- Battlefield layout: two-row system (structures in back, units in front)
 local BFIELD_TILE_W = 85
 local BFIELD_TILE_H = 95
@@ -990,11 +994,30 @@ local function draw_battlefield_tile(tx, ty, tw, th, group, sdef, pi, game_state
           and type(hover.idx) == "table"
           and ((is_base and hover.idx.source == "base") or (not is_base and hover.idx.source == "board" and hover.idx.board_index == si))
           and hover.idx.ability_index == ai
+        -- Check if this ability is a highlighted play source (only for local player)
+        local is_play_source = false
+        if _play_source_prompt and _play_source_prompt.sources and pi == _local_player_index then
+          for _, src in ipairs(_play_source_prompt.sources) do
+            if src.source.type == "base" and is_base and src.ability_index == ai then
+              is_play_source = true; break
+            elseif src.source.type == "board" and not is_base and src.source.index == si and src.ability_index == ai then
+              is_play_source = true; break
+            end
+          end
+        end
         card_frame.draw_ability_button(ab, tx + 4, ab_btn_y, tw - 8, {
-          can_activate = can_act,
+          can_activate = can_act or is_play_source,
           is_used = used and ab.once_per_turn,
-          is_hovered = ab_hovered,
+          is_hovered = ab_hovered or is_play_source,
         })
+        -- Play source glow
+        if is_play_source then
+          local pulse = 0.4 + 0.2 * math.sin(t * 4)
+          love.graphics.setColor(0.3, 0.9, 0.4, pulse)
+          love.graphics.setLineWidth(2)
+          love.graphics.rectangle("line", tx + 3, ab_btn_y - 1, tw - 6, STRUCT_TILE_AB_H - 2, 5, 5)
+          love.graphics.setLineWidth(1)
+        end
         ab_btn_y = ab_btn_y + STRUCT_TILE_AB_H
       elseif ab.type == "static" and ab.effect == "produce" then
         has_non_activated_hint = has_non_activated_hint or "PROD"
@@ -1163,6 +1186,10 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
 
   -- Noise texture overlay on background
   textures.draw_tiled(textures.noise, 0, 0, gw, gh, 0.04)
+
+  -- Store play source prompt for ability button highlighting
+  _play_source_prompt = hand_state and hand_state.play_source_prompt or nil
+  _local_player_index = local_player_index or 0
 
   -- Radial warm glow behind active player's panel
   local_player_index = local_player_index or 0
@@ -1842,8 +1869,16 @@ function board.draw(game_state, drag, hover, mouse_down, display_resources, hand
             love.graphics.setLineWidth(1)
           end
           -- Selected glow (normal mode only)
-          if i == selected_idx and not eligible_set and not hand_state.discard_selected_set then
+          if i == selected_idx and not eligible_set and not hand_state.discard_selected_set and not _play_source_prompt then
             love.graphics.setColor(accent0[1], accent0[2], accent0[3], 0.5 + 0.15 * math.sin(t * 5))
+            love.graphics.setLineWidth(2)
+            love.graphics.rectangle("line", r.x - 2, r.y - 2, r.w + 4, r.h + 4, 6, 6)
+            love.graphics.setLineWidth(1)
+          end
+          -- Play source prompt: highlight the selected hand card
+          if _play_source_prompt and _play_source_prompt.hand_index == i then
+            local pulse = 0.45 + 0.25 * math.sin(t * 4)
+            love.graphics.setColor(0.3, 0.9, 0.4, pulse)
             love.graphics.setLineWidth(2)
             love.graphics.rectangle("line", r.x - 2, r.y - 2, r.w + 4, r.h + 4, 6, 6)
             love.graphics.setLineWidth(1)

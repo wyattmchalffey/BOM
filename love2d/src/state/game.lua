@@ -348,6 +348,15 @@ local PROMPT_DEFS = {
       eligible_hand_indices = { order = 3, field = "eligible_indices" },
     },
   },
+  select_play_source = {
+    alias_field = "pending_select_play_source",
+    cancel = { empty_click = true, escape = true },
+    structure_click_method = "_handle_prompt_select_play_source_structure_click",
+    payload_schema = {
+      { op = "required_index", field = "hand_index" },
+      { op = "optional_table", field = "sources" },
+    },
+  },
   spell_target = {
     alias_field = "pending_spell_target",
     cancel = {
@@ -3903,6 +3912,7 @@ function GameState:draw()
     pending_block_assignments = self.pending_block_assignments,
     pending_attack_trigger_targets = self.pending_attack_trigger_targets,
     discard_selected_set = prompt_board_draw.discard_selected_set,
+    play_source_prompt = self:_prompt_payload("select_play_source"),
   }
   board.draw(self.game_state, self.drag, self.hover, self.mouse_down, self.display_resources, hand_state, self.local_player_index)
   self:_draw_attack_declaration_arrows()
@@ -5286,6 +5296,152 @@ function GameState:_handle_prompt_damage_x_structure_click(target_pi, target_si)
   return true
 end
 
+-- Handle ability button click during select_play_source prompt
+function GameState:_handle_prompt_select_play_source_ability_click(pi, info)
+  local pending = self:_prompt_payload("select_play_source")
+  if not pending then return false end
+  if pi ~= self.local_player_index then return false end
+  if type(info) ~= "table" then return false end
+
+  -- Find the matching source in our list
+  for _, src in ipairs(pending.sources or {}) do
+    local source_match = false
+    if src.source.type == "base" and info.source == "base" and src.ability_index == info.ability_index then
+      source_match = true
+    elseif src.source.type == "board" and info.source == "board"
+      and src.source.index == info.board_index and src.ability_index == info.ability_index then
+      source_match = true
+    end
+    if source_match then
+      local p = self.game_state.players[pi + 1]
+      local before_res = {}
+      for k, v in pairs(p.resources) do before_res[k] = v end
+
+      -- For sacrifice_upgrade, transition into the upgrade prompt's sacrifice stage
+      if src.effect == "sacrifice_upgrade" then
+        local sel_info = abilities.collect_activated_selection_cost_targets(self.game_state, pi, src.ab)
+        local warrior_indices = (sel_info and sel_info.eligible_board_indices) or {}
+        local can_sac_workers = (sel_info and sel_info.has_worker_tokens) or false
+        if #warrior_indices == 0 and not can_sac_workers then
+          sound.play("error")
+          self:_clear_prompt("select_play_source")
+          return true
+        end
+        self:_clear_prompt("select_play_source")
+        self:_set_prompt("upgrade", {
+          source = src.source,
+          ability_index = src.ability_index,
+          effect_args = src.ab.effect_args,
+          stage = "sacrifice",
+          sacrifice_target = nil,
+          eligible_hand_indices = nil,
+          eligible_board_indices = warrior_indices,
+          eligible_worker_sacrifice = can_sac_workers,
+          preselected_hand_index = pending.hand_index,
+        })
+        self.hand_selected_index = nil
+        sound.play("click")
+        return true
+      end
+
+      -- For play_spell, check if it needs targeting
+      if src.effect == "play_spell" or src.effect == "sacrifice_cast_spell" then
+        local spell_id = p.hand[pending.hand_index]
+        local spell_ok, spell_def = pcall(cards.get_card_def, spell_id)
+        if spell_ok and spell_def then
+          local targeted_ab = find_targeted_spell_on_cast_ability(spell_def)
+          if targeted_ab then
+            local args = targeted_ab.effect_args or {}
+            local opponent_pi, eligible = collect_targeted_spell_eligible_indices(self.game_state, pi, targeted_ab)
+            if #eligible == 0 then
+              sound.play("error")
+              self:_clear_prompt("select_play_source")
+              return true
+            end
+            self:_set_prompt("spell_target", {
+              hand_index = pending.hand_index,
+              effect_args = args,
+              eligible_player_index = opponent_pi,
+              eligible_board_indices = eligible,
+              via_ability_source = src.source,
+              via_ability_ability_index = src.ability_index,
+              fast = src.fast or false,
+            })
+            self:_clear_prompt("select_play_source")
+            sound.play("click")
+            return true
+          end
+        end
+        -- Non-targeted spell: cast immediately
+        local result = self:dispatch_command({
+          type = "PLAY_SPELL_VIA_ABILITY",
+          player_index = pi,
+          source = src.source,
+          ability_index = src.ability_index,
+          hand_index = pending.hand_index,
+          fast_ability = src.fast or false,
+        })
+        if result.ok then
+          local spell_id_cmd = p.hand[pending.hand_index]
+          local s_ok, s_def = pcall(cards.get_card_def, spell_id_cmd or "")
+          local spell_name = (s_ok and s_def) and s_def.name or "Spell"
+          local pi_panel = self:player_to_panel(pi)
+          local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+          popup.create(spell_name .. "!", px_b + pw_b / 2, py_b + 40, { 0.7, 0.85, 1.0 })
+          sound.play("coin")
+        else
+          sound.play("error")
+        end
+        self:_clear_prompt("select_play_source")
+        self.hand_selected_index = nil
+        return true
+      end
+
+      -- play_unit: dispatch directly
+      local result = self:dispatch_command({
+        type = "PLAY_UNIT_FROM_HAND",
+        player_index = pi,
+        source = src.source,
+        ability_index = src.ability_index,
+        hand_index = pending.hand_index,
+        fast_ability = src.fast or false,
+      })
+      if result.ok then
+        sound.play("coin")
+        -- Resource cost popups
+        for _, c in ipairs(src.cost or {}) do
+          if before_res[c.type] and p.resources[c.type] < before_res[c.type] then
+            local spent = before_res[c.type] - p.resources[c.type]
+            local pi_panel = self:player_to_panel(pi)
+            local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+            popup.create("-" .. spent .. " " .. c.type, px_b + pw_b / 2, py_b + 60, { 0.95, 0.65, 0.3 })
+          end
+        end
+        local card_id = p.hand[pending.hand_index]
+        local c_ok, c_def = pcall(cards.get_card_def, card_id or "")
+        local unit_name = (c_ok and c_def) and c_def.name or "Unit"
+        local pi_panel = self:player_to_panel(pi)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        popup.create(unit_name .. " played!", px_b + pw_b / 2, py_b + 40, { 0.5, 1.0, 0.6 })
+      else
+        sound.play("error")
+      end
+      self:_clear_prompt("select_play_source")
+      self.hand_selected_index = nil
+      return true
+    end
+  end
+
+  -- Clicked an ability that isn't a valid source
+  sound.play("error")
+  return true
+end
+
+-- Dummy structure click handler for prompt system (select_play_source uses ability clicks instead)
+function GameState:_handle_prompt_select_play_source_structure_click(pi, idx)
+  return false
+end
+
 function GameState:_handle_prompt_structure_click(pi, idx)
   if type(idx) ~= "number" then return false end
   return self:_dispatch_prompt_click_from_top(PROMPT_STRUCTURE_CLICK_METHODS, pi, idx)
@@ -5318,6 +5474,31 @@ function GameState:_handle_prompt_upgrade_click(kind, pi, idx, extra, x, y)
       return true
     end
     pending.sacrifice_target = { target_worker = kind, target_worker_extra = idx }
+    -- If a hand card was preselected (from play-from-hand flow), auto-dispatch
+    if pending.preselected_hand_index and has_index(eligible, pending.preselected_hand_index) then
+      local payload = {
+        type = "SACRIFICE_UPGRADE_PLAY",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        hand_index = pending.preselected_hand_index,
+        target_worker = pending.sacrifice_target.target_worker,
+        target_worker_extra = pending.sacrifice_target.target_worker_extra,
+      }
+      local result = self:dispatch_command(payload)
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        popup.create("Upgrade!", px_b + pw_b / 2, py_b + ph_b - 90, { 0.9, 0.3, 0.3 })
+        self:_clear_prompt("upgrade")
+        self.hand_selected_index = nil
+        while #self.hand_y_offsets > #p.hand do table.remove(self.hand_y_offsets) end
+      else
+        sound.play("error")
+      end
+      return true
+    end
     pending.stage = "hand"
     pending.eligible_hand_indices = eligible
     sound.play("click")
@@ -5389,6 +5570,29 @@ function GameState:_handle_prompt_upgrade_click(kind, pi, idx, extra, x, y)
       pending.eligible_board_indices[#pending.eligible_board_indices + 1] = target_si
     end
     pending.sacrifice_target = { target_board_index = target_si }
+    -- If a hand card was preselected (from play-from-hand flow), auto-dispatch
+    if pending.preselected_hand_index and has_index(eligible, pending.preselected_hand_index) then
+      local payload = {
+        type = "SACRIFICE_UPGRADE_PLAY",
+        player_index = self.local_player_index,
+        source = pending.source,
+        ability_index = pending.ability_index,
+        hand_index = pending.preselected_hand_index,
+        target_board_index = target_si,
+      }
+      local result = self:dispatch_command(payload)
+      if result.ok then
+        sound.play("coin")
+        local pi_panel = self:player_to_panel(self.local_player_index)
+        local px_b, py_b, pw_b, ph_b = board.panel_rect(pi_panel)
+        popup.create("Fighting Pits upgrade!", px_b + pw_b / 2, py_b + ph_b - 90, { 0.9, 0.3, 0.3 })
+        self:_clear_prompt("upgrade")
+        self.hand_selected_index = nil
+      else
+        upgrade_error(result.error or "Upgrade failed")
+      end
+      return true
+    end
     pending.stage = "hand"
     pending.eligible_hand_indices = eligible
     sound.play("click")
@@ -6179,6 +6383,17 @@ function GameState:mousepressed(x, y, button, istouch, presses)
               return
             end
           end
+          -- Check if any ability on board/base can play this card
+          local play_sources = abilities.find_play_sources_for_hand_card(self.game_state, pi, idx)
+          if #play_sources > 0 then
+            self:_set_prompt("select_play_source", {
+              hand_index = idx,
+              sources = play_sources,
+            })
+            self.hand_selected_index = nil
+            sound.play("click")
+            return
+          end
         end
       end
       -- Deselect if not playable
@@ -6301,6 +6516,11 @@ function GameState:mousepressed(x, y, button, istouch, presses)
       end
       return
     end
+    return
+  end
+
+  -- Intercept ability clicks during select_play_source prompt
+  if kind == "activate_ability" and self:_handle_prompt_select_play_source_ability_click(pi, extra) then
     return
   end
 
